@@ -6,6 +6,19 @@ Rust + GPUI の agent workspace。[調査の Phase 0](docs/research/analysis/roa
 現在はローカルの疑似プロバイダーを使用します。モデルへの接続、shell 実行、workspace
 の編集、永続化・再開は後続 Phase の対象です。画面に出る実行結果と差分は fixture です。
 
+## デザイン確認アプリ
+
+メインとは別に、基本コンポーネントを確認する **Solo Design** を起動できます。
+ボタン・入力・選択・ナビゲーション・通知・ダイアログを、ライト／ダーク両テーマで操作できます。
+
+```sh
+cargo run --locked --bin solo-design
+cargo run --locked --bin solo-design -- --page buttons --light
+```
+
+テーマ切替は **⌘ Shift L**。仕様・使い方・検証方法は [デザインシステム](docs/design-system.md) を参照してください。
+メインと確認アプリは、同じ `src/design/` の部品と `src/design_tokens.rs` の定義を使います。
+
 ## 起動
 
 初期 GUI 検証対象は macOS / Apple Silicon。Rust 1.98.0、Xcode Command Line Tools が必要です。
@@ -49,6 +62,8 @@ projection.rs  session ごとの順序・重複・turn 検査、表示状態
 mock.rs        疑似イベント、backpressure、中止、障害注入、ログ退避
 text.rs        UTF-16 / UTF-8、grapheme、IME composition（GPUI 非依存）
 ui/            GPUI の Entity・focus・リスト・入力・window寿命
+design/        両アプリで共有する基本コンポーネントとテーマ
+gallery/       デザイン確認用アプリのページと操作例
 ```
 
 `schema_version / event_id / session_id / sequence / timestamp_ms / turn_id / payload`
@@ -71,7 +86,8 @@ usage/cost は未取得なら `null` /「不明」で、0 に補完しません�
 cargo fmt --all -- --check
 cargo clippy --locked --all-targets -- -D warnings
 cargo test --locked --no-default-features --all-targets
-cargo build --locked --bin solo
+cargo build --locked --bins
+cargo run --locked --bin solo-design -- --smoke
 cargo run --locked --bin solo -- --smoke
 ```
 

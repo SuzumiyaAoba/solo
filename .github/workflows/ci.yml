@@ -1,4 +1,4 @@
-name: Phase 0
+name: Solo
 on: [push, pull_request]
 permissions:
   contents: read
@@ -21,4 +21,4 @@ jobs:
         with:
           components: clippy
       - run: cargo clippy --locked --all-targets -- -D warnings
-      - run: cargo build --locked --bin solo
+      - run: cargo build --locked --bins

@@ -1,6 +1,6 @@
 # Third-party notices
 
-`src/ui/input.rs` の TextElement の layout / painting は、GPUI 0.2.2 の
+`src/design/input.rs` の TextElement の layout / painting は、GPUI 0.2.2 の
 `examples/input.rs` を参照・改変しています。
 
 - Copyright 2022–2025 Zed Industries, Inc.

@@ -1,9 +1,9 @@
 // TextElement's layout/painting follows GPUI 0.2.2 examples/input.rs.
 // Copyright 2022–2025 Zed Industries, Inc. Apache-2.0; see THIRD_PARTY_NOTICES.md.
 // Modified: independent Unicode buffer, composition ranges, focus and horizontal scrolling.
-use gpui::{prelude::*, *};
+use super::{ControlSize, Icon, radius, theme};
 use crate::text::TextBuffer;
-use super::{theme, ControlSize, Icon, radius};
+use gpui::{prelude::*, *};
 use std::ops::Range;
 
 actions!(
@@ -52,7 +52,10 @@ pub fn bind_keys(cx: &mut App) {
 }
 
 pub struct Submitted(pub String);
-pub struct InputEvent { pub text: String, pub composing: bool }
+pub struct InputChanged {
+    pub text: String,
+    pub composing: bool,
+}
 pub struct TextInput {
     pub buffer: TextBuffer,
     pub can_submit: bool,
@@ -71,7 +74,7 @@ pub struct TextInput {
 }
 
 impl EventEmitter<Submitted> for TextInput {}
-impl EventEmitter<InputEvent> for TextInput {}
+impl EventEmitter<InputChanged> for TextInput {}
 
 impl TextInput {
     pub fn new(cx: &mut Context<Self>) -> Self {
@@ -93,24 +96,67 @@ impl TextInput {
         }
     }
 
-    pub fn placeholder(mut self, text: impl Into<SharedString>) -> Self { self.placeholder = text.into(); self }
-    pub fn default_value(mut self, text: &str) -> Self { self.buffer.replace(None, text); self }
-    pub fn control_size(mut self, size: ControlSize) -> Self { self.size = size; self }
-    pub fn leading_icon(mut self, icon: Icon) -> Self { self.leading = Some(icon); self }
-    pub fn invalid(mut self, invalid: bool) -> Self { self.invalid = invalid; self }
-    pub fn read_only(mut self, read_only: bool) -> Self { self.read_only = read_only; self }
-    pub fn disabled(mut self, disabled: bool) -> Self { self.disabled = disabled; self.focus = self.focus.tab_stop(!disabled); self }
-    pub fn clear_on_submit(mut self, clear: bool) -> Self { self.clear_on_submit = clear; self }
-    pub fn editable(&self) -> bool { !self.disabled && !self.read_only }
+    pub fn placeholder(mut self, text: impl Into<SharedString>) -> Self {
+        self.placeholder = text.into();
+        self
+    }
+    pub fn default_value(mut self, text: &str) -> Self {
+        self.buffer.replace(None, text);
+        self
+    }
+    pub fn control_size(mut self, size: ControlSize) -> Self {
+        self.size = size;
+        self
+    }
+    pub fn leading_icon(mut self, icon: Icon) -> Self {
+        self.leading = Some(icon);
+        self
+    }
+    pub fn invalid(mut self, invalid: bool) -> Self {
+        self.invalid = invalid;
+        self
+    }
+    pub fn read_only(mut self, read_only: bool) -> Self {
+        self.read_only = read_only;
+        self
+    }
+    pub fn disabled(mut self, disabled: bool) -> Self {
+        self.disabled = disabled;
+        self.focus = self.focus.tab_stop(!disabled);
+        self
+    }
+    pub fn clear_on_submit(mut self, clear: bool) -> Self {
+        self.clear_on_submit = clear;
+        self
+    }
+    pub fn editable(&self) -> bool {
+        !self.disabled && !self.read_only
+    }
     fn changed(&self, cx: &mut Context<Self>) {
-        cx.emit(InputEvent { text: self.buffer.content.clone(), composing: self.buffer.marked.is_some() });
+        cx.emit(InputChanged {
+            text: self.buffer.content.clone(),
+            composing: self.buffer.marked.is_some(),
+        });
         cx.notify();
     }
 
     pub fn submit(&mut self, cx: &mut Context<Self>) {
-        if !self.can_submit || !self.editable() || self.buffer.marked.is_some() || self.buffer.content.trim().is_empty() { return; }
-        let text = if self.clear_on_submit { self.buffer.take_committed().expect("committed text") } else { self.buffer.content.clone() };
-        if self.clear_on_submit { self.scroll_x = px(0.); self.changed(cx); }
+        if !self.can_submit
+            || !self.editable()
+            || self.buffer.marked.is_some()
+            || self.buffer.content.trim().is_empty()
+        {
+            return;
+        }
+        let text = if self.clear_on_submit {
+            self.buffer.take_committed().expect("committed text")
+        } else {
+            self.buffer.content.clone()
+        };
+        if self.clear_on_submit {
+            self.scroll_x = px(0.);
+            self.changed(cx);
+        }
         cx.emit(Submitted(text));
         cx.notify();
     }
@@ -179,7 +225,9 @@ impl EntityInputHandler for TextInput {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !self.editable() { return; }
+        if !self.editable() {
+            return;
+        }
         self.buffer.replace(range, &text.replace(['\n', '\r'], " "));
         self.changed(cx);
     }
@@ -191,7 +239,9 @@ impl EntityInputHandler for TextInput {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !self.editable() { return; }
+        if !self.editable() {
+            return;
+        }
         self.buffer.replace_and_mark(range, text, selected);
         self.changed(cx);
     }
@@ -240,7 +290,9 @@ impl Render for TextInput {
             .track_focus(&self.focus)
             .tab_stop(!self.disabled)
             .cursor(CursorStyle::IBeam)
-            .flex().items_center().gap_2()
+            .flex()
+            .items_center()
+            .gap_2()
             .w_full()
             .h(px(self.size.height()))
             .px(px(self.size.padding()))
@@ -249,113 +301,132 @@ impl Render for TextInput {
             .rounded(px(radius::CONTROL))
             .bg(rgb(p.canvas))
             .border_1()
-            .border_color(rgb(if self.invalid { p.danger } else { p.control_border }))
+            .border_color(rgb(if self.invalid {
+                p.danger
+            } else {
+                p.control_border
+            }))
             .text_color(rgb(p.text))
             .text_size(px(self.size.font_size()))
             .line_height(px(22.))
             .when(self.disabled, |v| v.opacity(0.4).cursor_default())
-            .when(!self.disabled, |v| v.focus(move |s| s.border_color(rgb(if invalid { p.danger } else { p.focus }))))
-            .when(!self.disabled, |view| view
-            .on_action(cx.listener(|this, _: &Backspace, _, cx| {
-                if !this.editable() { return; }
-                this.buffer.backspace();
-                this.changed(cx);
-            }))
-            .on_action(cx.listener(|this, _: &Delete, _, cx| {
-                if !this.editable() { return; }
-                this.buffer.delete();
-                this.changed(cx);
-            }))
-            .on_action(cx.listener(|this, _: &Left, _, cx| {
-                let offset = if this.buffer.selection.is_empty() {
-                    this.buffer.previous()
-                } else {
-                    this.buffer.selection.start
-                };
-                this.buffer.move_to(offset, false);
-                cx.notify();
-            }))
-            .on_action(cx.listener(|this, _: &Right, _, cx| {
-                let offset = if this.buffer.selection.is_empty() {
-                    this.buffer.next()
-                } else {
-                    this.buffer.selection.end
-                };
-                this.buffer.move_to(offset, false);
-                cx.notify();
-            }))
-            .on_action(cx.listener(|this, _: &SelectLeft, _, cx| {
-                this.buffer.move_to(this.buffer.previous(), true);
-                cx.notify();
-            }))
-            .on_action(cx.listener(|this, _: &SelectRight, _, cx| {
-                this.buffer.move_to(this.buffer.next(), true);
-                cx.notify();
-            }))
-            .on_action(cx.listener(|this, _: &Home, _, cx| {
-                this.buffer.move_to(0, false);
-                cx.notify();
-            }))
-            .on_action(cx.listener(|this, _: &End, _, cx| {
-                this.buffer.move_to(this.buffer.content.len(), false);
-                cx.notify();
-            }))
-            .on_action(cx.listener(|this, _: &SelectHome, _, cx| {
-                this.buffer.move_to(0, true);
-                cx.notify();
-            }))
-            .on_action(cx.listener(|this, _: &SelectEnd, _, cx| {
-                this.buffer.move_to(this.buffer.content.len(), true);
-                cx.notify();
-            }))
-            .on_action(cx.listener(|this, _: &SelectAll, _, cx| {
-                this.buffer.move_to(0, false);
-                this.buffer.move_to(this.buffer.content.len(), true);
-                cx.notify();
-            }))
-            .on_action(cx.listener(|this, _: &Copy, _, cx| this.copy(cx)))
-            .on_action(cx.listener(|this, _: &Cut, _, cx| {
-                if this.editable() && !this.buffer.selection.is_empty() {
-                    this.copy(cx);
-                    this.buffer.replace(None, "");
+            .when(!self.disabled, |v| {
+                v.focus(move |s| s.border_color(rgb(if invalid { p.danger } else { p.focus })))
+            })
+            .when(!self.disabled, |view| {
+                view.on_action(cx.listener(|this, _: &Backspace, _, cx| {
+                    if !this.editable() {
+                        return;
+                    }
+                    this.buffer.backspace();
                     this.changed(cx);
-                }
-            }))
-            .on_action(cx.listener(|this, _: &Paste, window, cx| {
-                if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
-                    this.replace_text_in_range(None, &text, window, cx);
-                }
-            }))
-            .on_action(cx.listener(|this, _: &Submit, _, cx| this.submit(cx)))
-            .on_action(
-                cx.listener(|_, _: &CharacterPalette, window, _| window.show_character_palette()),
-            )
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(|this, event: &MouseDownEvent, window, cx| {
-                    this.focus.focus(window);
-                    this.selecting = true;
-                    this.buffer
-                        .move_to(this.index_at(event.position), event.modifiers.shift);
+                }))
+                .on_action(cx.listener(|this, _: &Delete, _, cx| {
+                    if !this.editable() {
+                        return;
+                    }
+                    this.buffer.delete();
+                    this.changed(cx);
+                }))
+                .on_action(cx.listener(|this, _: &Left, _, cx| {
+                    let offset = if this.buffer.selection.is_empty() {
+                        this.buffer.previous()
+                    } else {
+                        this.buffer.selection.start
+                    };
+                    this.buffer.move_to(offset, false);
                     cx.notify();
-                }),
-            )
-            .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _, cx| {
-                if this.selecting {
-                    this.buffer.move_to(this.index_at(event.position), true);
+                }))
+                .on_action(cx.listener(|this, _: &Right, _, cx| {
+                    let offset = if this.buffer.selection.is_empty() {
+                        this.buffer.next()
+                    } else {
+                        this.buffer.selection.end
+                    };
+                    this.buffer.move_to(offset, false);
                     cx.notify();
-                }
-            }))
-            .on_mouse_up(
-                MouseButton::Left,
-                cx.listener(|this, _, _, _| this.selecting = false),
-            )
-            .on_mouse_up_out(
-                MouseButton::Left,
-                cx.listener(|this, _, _, _| this.selecting = false),
-            ))
+                }))
+                .on_action(cx.listener(|this, _: &SelectLeft, _, cx| {
+                    this.buffer.move_to(this.buffer.previous(), true);
+                    cx.notify();
+                }))
+                .on_action(cx.listener(|this, _: &SelectRight, _, cx| {
+                    this.buffer.move_to(this.buffer.next(), true);
+                    cx.notify();
+                }))
+                .on_action(cx.listener(|this, _: &Home, _, cx| {
+                    this.buffer.move_to(0, false);
+                    cx.notify();
+                }))
+                .on_action(cx.listener(|this, _: &End, _, cx| {
+                    this.buffer.move_to(this.buffer.content.len(), false);
+                    cx.notify();
+                }))
+                .on_action(cx.listener(|this, _: &SelectHome, _, cx| {
+                    this.buffer.move_to(0, true);
+                    cx.notify();
+                }))
+                .on_action(cx.listener(|this, _: &SelectEnd, _, cx| {
+                    this.buffer.move_to(this.buffer.content.len(), true);
+                    cx.notify();
+                }))
+                .on_action(cx.listener(|this, _: &SelectAll, _, cx| {
+                    this.buffer.move_to(0, false);
+                    this.buffer.move_to(this.buffer.content.len(), true);
+                    cx.notify();
+                }))
+                .on_action(cx.listener(|this, _: &Copy, _, cx| this.copy(cx)))
+                .on_action(cx.listener(|this, _: &Cut, _, cx| {
+                    if this.editable() && !this.buffer.selection.is_empty() {
+                        this.copy(cx);
+                        this.buffer.replace(None, "");
+                        this.changed(cx);
+                    }
+                }))
+                .on_action(cx.listener(|this, _: &Paste, window, cx| {
+                    if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
+                        this.replace_text_in_range(None, &text, window, cx);
+                    }
+                }))
+                .on_action(cx.listener(|this, _: &Submit, _, cx| this.submit(cx)))
+                .on_action(
+                    cx.listener(|_, _: &CharacterPalette, window, _| {
+                        window.show_character_palette()
+                    }),
+                )
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|this, event: &MouseDownEvent, window, cx| {
+                        this.focus.focus(window);
+                        this.selecting = true;
+                        this.buffer
+                            .move_to(this.index_at(event.position), event.modifiers.shift);
+                        cx.notify();
+                    }),
+                )
+                .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _, cx| {
+                    if this.selecting {
+                        this.buffer.move_to(this.index_at(event.position), true);
+                        cx.notify();
+                    }
+                }))
+                .on_mouse_up(
+                    MouseButton::Left,
+                    cx.listener(|this, _, _, _| this.selecting = false),
+                )
+                .on_mouse_up_out(
+                    MouseButton::Left,
+                    cx.listener(|this, _, _, _| this.selecting = false),
+                )
+            })
             .when_some(self.leading, |v, icon| v.child(icon.view(p.muted)))
-            .child(div().flex_1().min_w_0().overflow_hidden().child(TextElement { input: cx.entity() }))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .overflow_hidden()
+                    .child(TextElement { input: cx.entity() }),
+            )
     }
 }
 
@@ -501,11 +572,13 @@ impl Element for TextElement {
         cx: &mut App,
     ) {
         let focus = self.input.read(cx).focus.clone();
-        if !self.input.read(cx).disabled { window.handle_input(
-            &focus,
-            ElementInputHandler::new(bounds, self.input.clone()),
-            cx,
-        ); }
+        if !self.input.read(cx).disabled {
+            window.handle_input(
+                &focus,
+                ElementInputHandler::new(bounds, self.input.clone()),
+                cx,
+            );
+        }
         if let Some(selection) = state.selection.take() {
             window.paint_quad(selection);
         }
@@ -516,7 +589,10 @@ impl Element for TextElement {
             window,
             cx,
         );
-        if !self.input.read(cx).disabled && focus.is_focused(window) && self.input.read(cx).buffer.selection.is_empty() {
+        if !self.input.read(cx).disabled
+            && focus.is_focused(window)
+            && self.input.read(cx).buffer.selection.is_empty()
+        {
             window.paint_quad(state.cursor.clone());
         }
         self.input.update(cx, |input, _| {

@@ -1,5 +1,7 @@
 use gpui::{prelude::*, *};
-use solo::design::{self, TextInput as Composer, Submitted, Button, ButtonVariant, ControlSize, DesignAssets};
+use solo::design::{
+    self, Button, ButtonVariant, ControlSize, DesignAssets, Submitted, TextInput as Composer,
+};
 use solo::{
     mock::{self, Config, Controller, Delivery, FRAME_BATCH, FRAME_INTERVAL, Scenario},
     projection::{DiffKind, Session, Speaker, Status},
@@ -162,7 +164,11 @@ impl Workspace {
         }
         self.serial += 1;
         let id = format!("session-{}", self.serial);
-        let composer = cx.new(|cx| Composer::new(cx).control_size(ControlSize::Large).clear_on_submit(true));
+        let composer = cx.new(|cx| {
+            Composer::new(cx)
+                .control_size(ControlSize::Large)
+                .clear_on_submit(true)
+        });
         let callback_id = id.clone();
         let subscription = cx.subscribe(&composer, move |this, _, submitted: &Submitted, cx| {
             if let Some(index) = this.sessions.iter().position(|s| s.model.id == callback_id) {
@@ -388,11 +394,11 @@ impl Workspace {
                             .rounded_md()
                             .cursor_pointer()
                             .bg(rgb(if index == self.selected {
-                                0x273840
+                                design::DARK.hover
                             } else {
                                 PANEL
                             }))
-                            .hover(|style| style.bg(rgb(0x223039)))
+                            .hover(|style| style.bg(rgb(design::DARK.hover)))
                             .child(
                                 div()
                                     .text_sm()
@@ -461,9 +467,9 @@ impl Workspace {
                 return div().into_any_element();
             };
             let (name, color) = match block.speaker {
-                Speaker::User => ("あなた", 0xc3d1e7),
+                Speaker::User => ("あなた", design::DARK.text),
                 Speaker::Assistant => ("SOLO · 疑似応答", ACCENT),
-                Speaker::Notice => ("状態", 0xf0c783),
+                Speaker::Notice => ("状態", design::DARK.warning),
             };
             let copy = block.text.clone();
             div()
@@ -476,7 +482,7 @@ impl Workspace {
                         .p_4()
                         .rounded_lg()
                         .bg(rgb(if block.speaker == Speaker::User {
-                            0x1d2a37
+                            design::DARK.elevated
                         } else {
                             PANEL
                         }))
@@ -599,7 +605,7 @@ impl Workspace {
                                                 .w(px(44.))
                                                 .flex_shrink_0()
                                                 .text_color(rgb(if row.level == "event" {
-                                                    0xf0c783
+                                                    design::DARK.warning
                                                 } else {
                                                     ACCENT
                                                 }))
@@ -652,7 +658,7 @@ impl Workspace {
                 view.child(
                     div()
                         .px_4()
-                        .text_color(rgb(0xf0c783))
+                        .text_color(rgb(design::DARK.warning))
                         .child("差分の表示上限に達しました"),
                 )
             })
@@ -667,10 +673,16 @@ impl Workspace {
                             .map(|i| {
                                 let line = &diff.lines[i];
                                 let (background, color) = match line.kind {
-                                    DiffKind::Added => (0x19352f, 0x9be1b7),
-                                    DiffKind::Removed => (0x39292e, 0xf0a8ab),
-                                    DiffKind::Header => (0x243243, 0xa4c5ee),
-                                    DiffKind::Context => (BG, 0xd7e1e6),
+                                    DiffKind::Added => {
+                                        (design::DARK.success_soft, design::DARK.success)
+                                    }
+                                    DiffKind::Removed => {
+                                        (design::DARK.danger_soft, design::DARK.danger)
+                                    }
+                                    DiffKind::Header => {
+                                        (design::DARK.accent_soft, design::DARK.accent_text)
+                                    }
+                                    DiffKind::Context => (BG, design::DARK.text),
                                 };
                                 let text = line.text.clone();
                                 div()
@@ -731,7 +743,7 @@ impl Render for Workspace {
             Tab::Diff => self.diff(cx),
             Tab::Logs => self.logs(cx),
         };
-        div().size_full().flex().bg(rgb(BG)).text_color(rgb(0xe2e9ed)).font_family(".AppleSystemUIFont")
+        design::root(cx).flex()
             .on_action(cx.listener(|_, _: &CloseWindow, window, _| window.remove_window()))
             .on_action(cx.listener(|this, _: &NewSession, window, cx| { this.new_session(cx); window.focus(&this.sessions[this.selected].composer.focus_handle(cx)); }))
             .child(self.sidebar(cx))
@@ -748,17 +760,17 @@ impl Render for Workspace {
                 .child(div().flex().flex_wrap().gap_2().px_4().py_3().children([
                     Scenario::Demo, Scenario::Events10k, Scenario::Events100k, Scenario::Log100MiB, Scenario::Faults,
                 ].into_iter().enumerate().map(|(i, scenario)| {
-                    button(("scenario", i), scenario.label()).when(active, |view| view.opacity(0.4))
+                    button(("scenario", i), scenario.label()).disabled(active)
                         .on_click(cx.listener(move |this, _, _, cx| this.scenario(scenario, cx)))
                 })))
-                .when(!self.message.is_empty(), |view| view.child(div().px_5().py_2().text_xs().text_color(rgb(0xf0c783)).child(self.message.clone())))
-                .when(session.model.unknown > 0 || session.model.rejected > 0, |view| view.child(div().px_5().py_2().bg(rgb(0x302b23)).text_xs().text_color(rgb(0xf0c783))
+                .when(!self.message.is_empty(), |view| view.child(div().px_5().py_2().text_xs().text_color(rgb(design::DARK.warning)).child(self.message.clone())))
+                .when(session.model.unknown > 0 || session.model.rejected > 0, |view| view.child(div().px_5().py_2().bg(rgb(design::DARK.warning_soft)).text_xs().text_color(rgb(design::DARK.warning))
                     .child(format!("未対応 {} 件 / 不正・順序違反 {} 件 — ログで詳細を確認できます", session.model.unknown, session.model.rejected))))
                 .when(!session.model.reason.is_empty(), |view| view.child(div().px_5().py_2().text_xs().text_color(rgb(status_color(session.model.status))).child(session.model.reason.clone())))
                 .child(div().flex().gap_2().px_4().pb_2().border_b_1().border_color(rgb(BORDER)).children([
                     (Tab::Chat, "会話".to_owned()), (Tab::Diff, format!("差分  {}", session.model.diffs.len())), (Tab::Logs, "ログ".to_owned()),
                 ].into_iter().enumerate().map(|(i, (tab, title))| {
-                    button(("tab", i), title).when(session.tab == tab, |view| view.bg(rgb(0x2c4948)).text_color(rgb(ACCENT)))
+                    design::tab(("tab", i), title, session.tab == tab, cx)
                         .on_click(cx.listener(move |this, _, _, cx| { this.sessions[this.selected].tab = tab; cx.notify(); }))
                 })))
                 .child(div().flex_1().min_h_0().overflow_hidden().child(pane))
@@ -773,7 +785,7 @@ impl Render for Workspace {
                             .child(button("cancel", "中止").on_click(cx.listener(|this, _, _, cx| {
                                 let s = &mut this.sessions[this.selected]; if let Some(controller) = &s.controller { controller.cancel(); s.model.status = Status::Cancelling; cx.notify(); }
                             }))))
-                            .child(button("submit", "送信 ↑").when(active, |view| view.opacity(0.4)).on_click(move |_, _, cx| composer.update(cx, |input, cx| input.submit(cx)))))))
+                            .child(button("submit", "送信").variant(ButtonVariant::Primary).trailing_icon(design::Icon::ArrowRight).disabled(active).on_click(move |_, _, cx| composer.update(cx, |input, cx| input.submit(cx)))))))
                 .child(div().h(px(26.)).px_4().flex().items_center().justify_between().text_size(px(10.)).bg(rgb(PANEL)).text_color(rgb(MUTED))
                     .child(format!("{} events · 重複 {} · 表示更新 {} 回 / 最大 {:.2} ms", session.model.accepted, session.model.duplicates, session.batches, session.max_batch_ms))
                     .child(format!("tokens {} / {} · cost {}{}", number(session.model.usage.input_tokens), number(session.model.usage.output_tokens), session.model.usage.cost_usd.map(|n| format!("${n:.4}")).unwrap_or_else(|| "不明".into()), if self.smoke { " · smoke" } else { "" }))))
@@ -781,7 +793,9 @@ impl Render for Workspace {
 }
 
 fn button(id: impl Into<ElementId>, label: impl Into<SharedString>) -> Button {
-    Button::new(id, label).variant(ButtonVariant::Secondary).control_size(ControlSize::Small)
+    Button::new(id, label)
+        .variant(ButtonVariant::Secondary)
+        .control_size(ControlSize::Small)
 }
 
 fn empty(title: &'static str, subtitle: &'static str) -> Div {
@@ -799,8 +813,8 @@ fn empty(title: &'static str, subtitle: &'static str) -> Div {
 
 fn status_color(status: Status) -> u32 {
     match status {
-        Status::Failed | Status::Disconnected => 0xf0a8ab,
-        Status::Cancelling => 0xf0c783,
+        Status::Failed | Status::Disconnected => design::DARK.danger,
+        Status::Cancelling => design::DARK.warning,
         Status::Running | Status::Completed => ACCENT,
         _ => MUTED,
     }
