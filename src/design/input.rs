@@ -233,6 +233,7 @@ impl EntityInputHandler for TextInput {
 impl Render for TextInput {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let p = theme(cx);
+        let invalid = self.invalid;
         div()
             .id("composer")
             .key_context("TextInput")
@@ -253,7 +254,7 @@ impl Render for TextInput {
             .text_size(px(self.size.font_size()))
             .line_height(px(22.))
             .when(self.disabled, |v| v.opacity(0.4).cursor_default())
-            .when(!self.disabled, |v| v.focus(move |s| s.border_color(rgb(if self.invalid { p.danger } else { p.focus }))))
+            .when(!self.disabled, |v| v.focus(move |s| s.border_color(rgb(if invalid { p.danger } else { p.focus }))))
             .when(!self.disabled, |view| view
             .on_action(cx.listener(|this, _: &Backspace, _, cx| {
                 if !this.editable() { return; }
@@ -473,7 +474,7 @@ impl Element for TextElement {
                         bounds.bottom(),
                     ),
                 ),
-                rgb(theme(cx).accent).opacity(0.3),
+                rgba((theme(cx).accent << 8) | 0x4d),
             )
         });
         TextPaint {

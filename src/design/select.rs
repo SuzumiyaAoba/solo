@@ -62,7 +62,7 @@ impl Render for Select {
                 anchored().position_mode(AnchoredPositionMode::Local).position(point(px(0.), px(40.))).snap_to_window()
                     .child(div().id("select-menu").w(px(260.)).max_h(px(280.)).overflow_y_scroll().p_1().rounded(px(radius::CONTROL))
                         .bg(rgb(p.elevated)).border_1().border_color(rgb(p.border)).shadow_lg().occlude()
-                        .on_mouse_down_out(MouseButton::Left, cx.listener(|this, _, _, cx| this.close(cx)))
+                        .on_mouse_down_out(cx.listener(|this, _, _, cx| this.close(cx)))
                         .children(self.options.iter().enumerate().map(|(index, label)| {
                             Button::new(("option", index), label.clone()).variant(ButtonVariant::Ghost).w_full().justify_start()
                                 .bg(rgb(if self.highlighted == index { p.hover } else { p.elevated }))

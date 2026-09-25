@@ -107,7 +107,7 @@ impl Palette {
 pub fn contrast(foreground: u32, background: u32) -> f64 {
     fn luminance(color: u32) -> f64 {
         let channel = |shift| {
-            let value = ((color >> shift) & 255) as f64 / 255.;
+            let value = ((color >> shift) & 255_u32) as f64 / 255.;
             if value <= 0.04045 { value / 12.92 } else { ((value + 0.055) / 1.055).powf(2.4) }
         };
         0.2126 * channel(16) + 0.7152 * channel(8) + 0.0722 * channel(0)
