@@ -1,5 +1,6 @@
 //! Solo 自身のハーネスを動かし、Codex モデルの応答を UI イベントに変換する。
 use crate::{
+    approval::ApprovalRequest,
     codex_subscription::{Authentication, DEFAULT_MODEL, DeviceLogin},
     event::{Envelope, Event, SCHEMA_VERSION, Usage, preview},
     harness::{
@@ -8,7 +9,7 @@ use crate::{
     },
 };
 use async_channel::{Receiver, Sender};
-use serde_json::{Value, json};
+use serde_json::json;
 use std::{
     collections::HashMap,
     fs, io,
@@ -28,8 +29,7 @@ pub enum Delivery {
     LoginCancelled,
     History(Vec<Message>),
     Approval {
-        method: String,
-        params: Value,
+        request: Box<ApprovalRequest>,
         reply: Sender<bool>,
     },
     Error(String),
@@ -201,6 +201,7 @@ fn run(
         text: config.prompt,
     });
     let approval_sender = sender.clone();
+    let approval_workspace = workspace.clone();
     let mut policy = move |call: &ToolCall| {
         if matches!(call.name.as_str(), "read" | "search") {
             return true;
@@ -208,8 +209,7 @@ fn run(
         let (reply, answer) = async_channel::bounded(1);
         if approval_sender
             .send_blocking(Delivery::Approval {
-                method: format!("tool/{}/requestApproval", call.name),
-                params: json!({"tool":call.name,"arguments":call.arguments}),
+                request: Box::new(ApprovalRequest::tool(call, &approval_workspace)),
                 reply,
             })
             .is_err()
@@ -232,7 +232,7 @@ fn run(
             Update::ModelRequested => {
                 model_requests += 1;
                 emitter.emit(Event::ModelRequestStarted {
-                    provider: "OpenAI Codex / Solo".into(),
+                    provider: "OpenAI Codex".into(),
                     model: model_name.clone(),
                     request_id: format!("request-{model_requests}"),
                 });
@@ -287,7 +287,7 @@ fn run(
         StopReason::Completed => {
             let _ = sender.send_blocking(Delivery::History(run.messages));
             emitter.emit(Event::TurnCompleted {
-                reason: "Solo の実行が完了しました".into(),
+                reason: "実行完了".into(),
                 usage: Usage::default(),
             });
         }

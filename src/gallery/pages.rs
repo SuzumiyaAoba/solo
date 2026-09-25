@@ -242,7 +242,7 @@ impl Gallery {
             .child(
                 section(
                     "Iconography",
-                    "GPUI Kit の Lucide アイコン。アイコンだけの操作には名前を添える。",
+                    "Lucide の UI アイコンと Lobe Icons のブランドアイコン。アイコンだけの操作には名前を添える。",
                     cx,
                 )
                 .child(card(cx).p_4().child(row().gap_2().children(
@@ -694,6 +694,7 @@ impl Gallery {
                         .child(
                             row()
                                 .child(avatar("S", Tone::Accent, cx))
+                                .child(icon_avatar(Icon::OpenAi, Tone::Accent, cx))
                                 .child(avatar("AI", Tone::Neutral, cx))
                                 .child(avatar("D", Tone::Success, cx)),
                         ),

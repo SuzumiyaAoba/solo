@@ -31,6 +31,7 @@ pub struct Button {
     size: ControlSize,
     disabled: bool,
     loading: bool,
+    toggled: Option<bool>,
     icon: Option<Icon>,
     icon_only: bool,
     trailing: Option<Icon>,
@@ -48,6 +49,7 @@ impl Button {
             size: ControlSize::Medium,
             disabled: false,
             loading: false,
+            toggled: None,
             icon: None,
             icon_only: false,
             trailing: None,
@@ -80,6 +82,10 @@ impl Button {
     }
     pub fn loading(mut self, loading: bool) -> Self {
         self.loading = loading;
+        self
+    }
+    pub fn toggled(mut self, toggled: bool) -> Self {
+        self.toggled = Some(toggled);
         self
     }
     pub fn with_icon(mut self, icon: Icon) -> Self {
@@ -132,6 +138,7 @@ impl RenderOnce for Button {
             .when(self.icon_only, |b| b.w(px(self.size.height())))
             .disabled(self.disabled)
             .loading(self.loading)
+            .when_some(self.toggled, |b, value| b.selected(value).toggled(value))
             .tab_stop(!self.loading)
             .accessibility_label(self.label.clone())
             .when(!self.icon_only, |b| b.label(self.label))
@@ -241,10 +248,42 @@ pub fn badge(label: impl Into<SharedString>, tone: Tone, cx: &App) -> kit::tag::
         .small()
         .child(label.into())
 }
+
+/// 文言を常設しない状態・数値表示。意味は tooltip と読み上げラベルで提供する。
+pub fn indicator(
+    id: impl Into<ElementId>,
+    icon: Icon,
+    value: impl Into<SharedString>,
+    label: impl Into<SharedString>,
+    tone: Tone,
+    cx: &App,
+) -> Stateful<Div> {
+    let label = label.into();
+    let (fg, _) = theme(cx).tone(tone);
+    div()
+        .id(id)
+        .flex()
+        .items_center()
+        .gap_1()
+        .text_size(px(12.))
+        .text_color(rgb(fg))
+        .aria_label(label.clone())
+        .child(icon.view(fg).size(px(14.)))
+        .child(value.into())
+        .tooltip(move |window, cx| kit::tooltip::Tooltip::new(label.clone()).build(window, cx))
+}
 pub fn avatar(initials: impl Into<SharedString>, tone: Tone, cx: &App) -> kit::avatar::Avatar {
     let (fg, bg) = theme(cx).tone(tone);
     kit::avatar::Avatar::new()
         .name(initials)
+        .with_size(px(28.))
+        .bg(rgb(bg))
+        .text_color(rgb(fg))
+}
+pub fn icon_avatar(icon: Icon, tone: Tone, cx: &App) -> kit::avatar::Avatar {
+    let (fg, bg) = theme(cx).tone(tone);
+    kit::avatar::Avatar::new()
+        .placeholder(icon.view(fg).size(px(18.)))
         .with_size(px(28.))
         .bg(rgb(bg))
         .text_color(rgb(fg))

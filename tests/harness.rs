@@ -300,3 +300,33 @@ fn duplicate_call_ids_are_rejected_before_execution() {
     assert_eq!(result.tool_calls, 0);
     assert!(!dir.path().join("first").exists());
 }
+
+#[test]
+fn cancellation_while_waiting_for_approval_prevents_execution() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut tools = WorkspaceTools::new(dir.path()).unwrap();
+    let mut model = ScriptedModel(VecDeque::from([ModelOutput {
+        text: String::new(),
+        tool_calls: vec![call(
+            "cancelled",
+            "exec",
+            json!({"command":"touch should-not-run"}),
+        )],
+    }]));
+    let cancel = Cancellation::default();
+    let while_awaiting = cancel.clone();
+    let result = run(
+        &mut model,
+        &mut tools,
+        &mut move |_: &ToolCall| {
+            while_awaiting.cancel();
+            true
+        },
+        vec![],
+        &Limits::default(),
+        &cancel,
+        |_| {},
+    );
+    assert_eq!(result.stop, StopReason::Cancelled);
+    assert!(!dir.path().join("should-not-run").exists());
+}

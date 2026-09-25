@@ -1,5 +1,8 @@
 use solo::{
+    approval::{ApprovalPlan, ApprovalRequest},
+    auto_approval::{self, CodexReviewer, ReviewInput, Reviewer},
     codex_subscription::{Authentication, DEFAULT_MODEL},
+    command_rules::{RuleList, RuleStore},
     harness::{
         self, Cancellation, Limits, Message, StopReason, ToolCall, Update,
         workspace::WorkspaceTools,
@@ -39,12 +42,16 @@ fn run() -> io::Result<()> {
             "--login" => login = true,
             "--help" => {
                 println!(
-                    "使い方: solo-subscription [--cwd PATH] [--model MODEL] [--login] [PROMPT...]\nSolo のハーネスと ChatGPT Codex モデルで実行します。"
+                    "使い方: solo-subscription [--cwd PATH] [--model MODEL] [--login] [PROMPT...]\nSolo のハーネスと ChatGPT Codex モデルで実行します。\n承認設定: ~/.config/solo/config.yml"
                 );
                 return Ok(());
             }
             _ => prompt.push(arg),
         }
+    }
+    let rule_store = RuleStore::for_workspace(&cwd)?;
+    if !prompt.is_empty() {
+        rule_store.approval_policy()?;
     }
     let auth = Authentication::new()?;
     let cancel = CancellationToken::new();
@@ -62,25 +69,115 @@ fn run() -> io::Result<()> {
     if prompt.is_empty() {
         return Ok(());
     }
-    let mut model = auth.model(model_name.clone(), cancel)?;
-    let mut tools = WorkspaceTools::new(cwd)?;
+    let mut model = auth.model(model_name.clone(), cancel.clone())?;
+    let mut tools = WorkspaceTools::new(&cwd)?;
+    let user_prompt = prompt.join(" ");
+    let review_prompt = user_prompt.clone();
     let mut policy = |call: &ToolCall| {
         if matches!(call.name.as_str(), "read" | "search") {
             return true;
         }
-        eprintln!("\n承認要求: {} {}", call.name, call.arguments);
-        eprint!("今回だけ許可しますか? [y/N] ");
+        let request = ApprovalRequest::tool(call, &cwd);
+        let plan = match request.plan(&rule_store) {
+            Ok(plan) => plan,
+            Err(error) => {
+                eprintln!("承認設定を読めないため実行しません: {error}");
+                return false;
+            }
+        };
+        match plan {
+            ApprovalPlan::Allow(source) => {
+                eprintln!("\n[{source}] 許可: {}", request.title);
+                return true;
+            }
+            ApprovalPlan::Deny(source) => {
+                eprintln!("\n[{source}] 拒否: {}", request.title);
+                return false;
+            }
+            ApprovalPlan::Auto(settings) => {
+                eprintln!("\n[Auto] {} で承認を判定中", settings.model);
+                let input = ReviewInput::new(&request, &review_prompt, &cwd);
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    CodexReviewer.review(&settings, &input, &cancel)
+                }))
+                .unwrap_or_else(|_| Err("Auto 判定のワーカーが終了しました".into()));
+                let current = match request.plan(&rule_store) {
+                    Ok(plan) => plan,
+                    Err(error) => {
+                        eprintln!("承認設定を再確認できません: {error}");
+                        return false;
+                    }
+                };
+                match &result {
+                    Ok(result) => eprintln!("[Auto] {:?}: {}", result.decision, result.reason),
+                    Err(error) => eprintln!("[Auto] {error} · 手動確認に戻ります"),
+                }
+                if let Some(accepted) =
+                    auto_approval::resolve_result(&current, &settings, result.as_ref().ok())
+                {
+                    return accepted;
+                }
+            }
+            ApprovalPlan::Manual => {}
+        }
+        eprintln!("\n{}", request.title);
+        if let Some(command) = &request.display_command {
+            eprintln!(
+                "実行元: {}\n作業ディレクトリ: {}\n$ {}",
+                request.executor,
+                cwd.display(),
+                command
+            );
+        } else {
+            eprintln!("{}", request.details);
+        }
+        eprint!(
+            "{}",
+            if request.command.is_some() {
+                "[y] 今回だけ実行 / [a] Whitelist に完全一致で登録 / [b] Blacklist に完全一致で登録して拒否 / [N] 拒否: "
+            } else {
+                "今回だけ許可しますか? [y/N] "
+            }
+        );
         let _ = io::stderr().flush();
         let mut answer = String::new();
-        io::stdin().read_line(&mut answer).is_ok() && answer.trim().eq_ignore_ascii_case("y")
+        if io::stdin().read_line(&mut answer).is_err() {
+            return false;
+        }
+        let recheck = || match request.plan(&rule_store) {
+            Ok(ApprovalPlan::Allow(_) | ApprovalPlan::Manual | ApprovalPlan::Auto(_)) => true,
+            Ok(ApprovalPlan::Deny(_)) => {
+                eprintln!("Blacklist に一致するため実行を拒否しました");
+                false
+            }
+            Err(error) => {
+                eprintln!("ルールを再確認できないため実行しません: {error}");
+                false
+            }
+        };
+        match answer.trim().to_ascii_lowercase().as_str() {
+            "y" => recheck(),
+            "a" | "b" if request.command.is_some() => {
+                let list = if answer.trim().eq_ignore_ascii_case("a") {
+                    RuleList::Whitelist
+                } else {
+                    RuleList::Blacklist
+                };
+                let command = request.command.as_ref().expect("command approval");
+                if let Err(error) = rule_store.add(list, command.clone()) {
+                    eprintln!("ルールを保存できないため実行しません: {error}");
+                    return false;
+                }
+                list == RuleList::Whitelist && recheck()
+            }
+            _ => false,
+        }
     };
     let run = harness::run(
         &mut model,
         &mut tools,
         &mut policy,
-        vec![Message::User {
-            text: prompt.join(" "),
-        }],
+        vec![Message::User { text: user_prompt }],
         &Limits::default(),
         &Cancellation::default(),
         |update| match update {
@@ -88,7 +185,9 @@ fn run() -> io::Result<()> {
                 print!("{text}");
                 let _ = io::stdout().flush();
             }
-            Update::ToolProposed(call) => eprintln!("\n実行: {} {}", call.name, call.arguments),
+            Update::ToolProposed(call) => {
+                eprintln!("\nツール要求: {} {}", call.name, call.arguments)
+            }
             Update::ToolFinished { result, .. } => eprintln!("{}", result.content),
             _ => {}
         },

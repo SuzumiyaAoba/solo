@@ -1,5 +1,13 @@
+mod approval_modes_smoke;
+mod approvals;
+mod command_rules;
+mod overview;
+mod projects;
+mod projects_smoke;
 mod smoke;
 mod views;
+mod workflow;
+mod workflow_smoke;
 
 use gpui_kit::component::message_scroller::MessageScrollerState;
 use gpui_kit::{prelude::*, *};
@@ -10,9 +18,14 @@ use solo::design::{
 use solo::{
     acp::{self, AgentProfile},
     acp_worker::{self, Delivery as AcpDelivery},
+    approval::{ApprovalPlan, ApprovalRequest},
+    auto_approval::{self, Assessment, CodexReviewer, Reviewer},
     codex_subscription::DeviceLogin,
+    command_rules::{Decision, RuleList, RuleStore},
+    config::{ApprovalMode, ApprovalSettings, AutoSettings},
     harness::Message,
     mock::{self, Config, Delivery as MockDelivery, FRAME_BATCH, FRAME_INTERVAL, Scenario},
+    orchestration::{QueuedRun, RunQueue, task_title},
     projection::{DiffKind, Session, Speaker, Status},
     subscription_worker::{self, Delivery as SubscriptionDelivery},
 };
@@ -57,9 +70,21 @@ enum UiDelivery {
 }
 
 struct PendingApproval {
-    method: String,
-    params: serde_json::Value,
+    request: ApprovalRequest,
     reply: async_channel::Sender<bool>,
+    details_open: bool,
+    policy_error: Option<String>,
+    serial: u64,
+    auto_settings: Option<AutoSettings>,
+    auto_cancel: Option<tokio_util::sync::CancellationToken>,
+    review_note: Option<String>,
+}
+impl Drop for PendingApproval {
+    fn drop(&mut self) {
+        if let Some(cancel) = &self.auto_cancel {
+            cancel.cancel();
+        }
+    }
 }
 
 actions!(
@@ -71,7 +96,9 @@ actions!(
         ToggleTheme,
         ShowChat,
         ShowDiff,
-        ShowLogs
+        ShowLogs,
+        ShowOverview,
+        NextAttention
     ]
 );
 
@@ -101,6 +128,10 @@ pub fn run() {
                 KeyBinding::new("cmd-1", ShowChat, None),
                 KeyBinding::new("cmd-2", ShowDiff, None),
                 KeyBinding::new("cmd-3", ShowLogs, None),
+                KeyBinding::new("cmd-0", ShowOverview, None),
+                KeyBinding::new("cmd-shift-a", NextAttention, None),
+                KeyBinding::new("cmd-shift-o", projects::AddProject, None),
+                KeyBinding::new("cmd-shift-p", projects::ShowProjects, None),
             ]);
             cx.on_action(|_: &Quit, cx| cx.quit());
             cx.on_window_closed(|cx, _| {
@@ -115,12 +146,19 @@ pub fn run() {
                 size(px(1240.), px(840.))
             };
             let bounds = Bounds::centered(None, window_size, cx);
+            let window_title = std::env::current_dir()
+                .ok()
+                .and_then(|path| {
+                    path.file_name()
+                        .map(|name| name.to_string_lossy().into_owned())
+                })
+                .unwrap_or_else(|| "ワークスペース".into());
             cx.open_window(
                 WindowOptions {
                     window_bounds: Some(WindowBounds::Windowed(bounds)),
                     window_min_size: Some(size(px(820.), px(620.))),
                     titlebar: Some(TitlebarOptions {
-                        title: Some("Solo".into()),
+                        title: Some(window_title.into()),
                         appears_transparent: true,
                         traffic_light_position: Some(point(px(16.), px(16.))),
                     }),
@@ -128,7 +166,7 @@ pub fn run() {
                     ..Default::default()
                 },
                 |window, cx| {
-                    let view = cx.new(|cx| Workspace::new(smoke, window, cx));
+                    let view = cx.new(|cx| projects::ProjectManager::new(smoke, window, cx));
                     cx.new(|cx| gpui_kit::component::Root::new(view, window, cx))
                 },
             )
@@ -139,6 +177,7 @@ pub fn run() {
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Tab {
+    Overview,
     Chat,
     Diff,
     Logs,
@@ -169,6 +208,13 @@ struct SessionView {
     _input_subscription: Subscription,
     batches: u64,
     max_batch_ms: f64,
+    started_at: Option<Instant>,
+    elapsed: Option<std::time::Duration>,
+    unread_result: bool,
+    input_composing: bool,
+    last_prompt: String,
+    approval_note: Option<String>,
+    _change_subscription: Subscription,
 }
 
 struct Workspace {
@@ -182,17 +228,30 @@ struct Workspace {
     acp_agents: Vec<AgentProfile>,
     _picker_subscription: Subscription,
     toast: Entity<ToastHost>,
+    command_rules: Result<RuleStore, String>,
+    rule_editor: Entity<command_rules::CommandRuleEditor>,
+    _rule_temp: Option<tempfile::TempDir>,
+    approval_settings: Result<ApprovalSettings, String>,
+    approval_serial: u64,
+    approval_reviewer: Arc<dyn Reviewer>,
+    _approval_settings_subscription: Subscription,
     show_metrics: bool,
     rendered: usize,
+    queue: RunQueue,
+    attention_only: bool,
+    is_visible: bool,
+    other_project_attention: usize,
 }
 
 impl Workspace {
-    fn new(smoke: bool, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let path = std::env::current_dir().unwrap_or_default();
-        let workspace_name = path
-            .file_name()
-            .map(|name| name.to_string_lossy().into_owned())
-            .unwrap_or_else(|| "Workspace".into());
+    fn new(
+        path: PathBuf,
+        workspace_name: String,
+        smoke: bool,
+        toast: Entity<ToastHost>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let (acp_agents, config_error) = match acp::load_agents(&path) {
             Ok(agents) => (agents, None),
             Err(error) => (
@@ -216,7 +275,27 @@ impl Workspace {
                 cx.notify();
             },
         );
+        let rule_temp = smoke.then(|| tempfile::tempdir().expect("smoke rule store"));
+        let command_rules = if let Some(dir) = &rule_temp {
+            RuleStore::at_path(dir.path().join("config.yml"), &path)
+        } else {
+            RuleStore::for_workspace(&path)
+        }
+        .map_err(|error| error.to_string());
+        approvals::init(cx);
+        let approval_settings = approvals::settings(&command_rules);
+        let approval_settings_subscription = cx
+            .observe_global::<approvals::PolicyRevision>(|this, cx| this.reconsider_approvals(cx));
+        let rule_editor =
+            cx.new(|cx| command_rules::CommandRuleEditor::new(command_rules.clone(), window, cx));
         let mut this = Self {
+            command_rules,
+            rule_editor,
+            _rule_temp: rule_temp,
+            approval_settings,
+            approval_serial: 0,
+            approval_reviewer: Arc::new(CodexReviewer),
+            _approval_settings_subscription: approval_settings_subscription,
             sessions: Vec::new(),
             selected: 0,
             serial: 0,
@@ -226,23 +305,17 @@ impl Workspace {
             scenario_picker,
             acp_agents,
             _picker_subscription: picker_subscription,
-            toast: cx.new(ToastHost::new),
+            toast,
             show_metrics: false,
             rendered: 0,
+            queue: RunQueue::default(),
+            attention_only: false,
+            is_visible: true,
+            other_project_attention: 0,
         };
         this.new_session(window, cx);
         if let Some(error) = config_error {
             this.message = error;
-        }
-        window.focus(&this.sessions[0].composer.focus_handle(cx), cx);
-        if smoke {
-            this.start_mock(
-                0,
-                Scenario::Demo,
-                "Phase 0 の表示を確認してください。".into(),
-                cx,
-            );
-            smoke::start(window, cx);
         }
         this
     }
@@ -257,6 +330,7 @@ impl Workspace {
         let id = format!("session-{}", self.serial);
         let composer = cx.new(|cx| {
             Composer::multiline(window, cx)
+                .placeholder("依頼を入力…")
                 .control_size(ControlSize::Large)
                 .clear_on_submit(true)
         });
@@ -266,7 +340,19 @@ impl Workspace {
                 this.start_selected(index, submitted.0.clone(), cx);
             }
         });
-        let mut model = Session::new(id, format!("新しいセッション {}", self.serial));
+        let changed_id = id.clone();
+        let change_subscription =
+            cx.subscribe(&composer, move |this, _, change: &ds::InputChanged, cx| {
+                if let Some(session) = this
+                    .sessions
+                    .iter_mut()
+                    .find(|session| session.model.id == changed_id)
+                {
+                    session.input_composing = change.composing;
+                }
+                cx.notify();
+            });
+        let mut model = Session::new(id, format!("新しいタスク {}", self.serial));
         model.provider = "Codex / ChatGPT Subscription".into();
         self.sessions.push(SessionView {
             model,
@@ -275,7 +361,7 @@ impl Workspace {
             log_scroll: UniformListScrollHandle::new(),
             diff_scroll: UniformListScrollHandle::new(),
             diff_index: 0,
-            tab: Tab::Chat,
+            tab: Tab::Overview,
             follow_logs: true,
             artifacts: Vec::new(),
             controller: None,
@@ -293,8 +379,16 @@ impl Workspace {
             _input_subscription: subscription,
             batches: 0,
             max_batch_ms: 0.,
+            started_at: None,
+            elapsed: None,
+            unread_result: false,
+            input_composing: false,
+            last_prompt: String::new(),
+            approval_note: None,
+            _change_subscription: change_subscription,
         });
         self.selected = self.sessions.len() - 1;
+        self.attention_only = false;
         self.scenario_picker.update(cx, |picker, cx| {
             picker.selected = 0;
             picker.close(cx);
@@ -305,23 +399,16 @@ impl Workspace {
     }
 
     fn start_selected(&mut self, index: usize, prompt: String, cx: &mut Context<Self>) {
-        let selected = self.scenario_picker.read(cx).selected;
-        if selected <= self.acp_agents.len()
-            && self.sessions.iter().enumerate().any(|(other, session)| {
-                other != index
-                    && session.model.status.is_active()
-                    && (session.is_subscription || session.is_acp)
-            })
+        if prompt.trim().is_empty()
+            || self.sessions[index].model.status.is_active()
+            || self
+                .queue
+                .position(&self.sessions[index].model.id)
+                .is_some()
         {
-            self.sessions[index].composer.update(cx, |input, cx| {
-                input.set_value(prompt.clone(), cx);
-                cx.notify();
-            });
-            self.message =
-                "この workspace では別の agent が実行中です。完了後に開始してください".into();
-            cx.notify();
             return;
         }
+        let selected = self.sessions[index].selected_backend;
         let requested = if selected == 0 {
             "subscription".to_owned()
         } else if let Some(agent) = self.acp_agents.get(selected - 1) {
@@ -340,6 +427,26 @@ impl Workspace {
             cx.notify();
             return;
         }
+        if self.sessions[index].model.last_sequence == 0 {
+            self.sessions[index].model.title = task_title(&prompt);
+        }
+        if selected <= self.acp_agents.len()
+            && (self.workspace_busy() || !self.queue.is_empty() || self.queue.paused)
+        {
+            self.enqueue(index, prompt, cx);
+            return;
+        }
+        self.run_backend(index, selected, prompt, cx);
+    }
+
+    fn run_backend(
+        &mut self,
+        index: usize,
+        selected: usize,
+        prompt: String,
+        cx: &mut Context<Self>,
+    ) {
+        self.sessions[index].last_prompt = prompt.clone();
         if selected == 0 {
             self.start_subscription(index, prompt, cx);
         } else if let Some(agent) = self.acp_agents.get(selected - 1).cloned() {
@@ -365,12 +472,12 @@ impl Workspace {
         if session.model.status.is_active() {
             return;
         }
+        session.last_prompt = prompt.clone();
         let mut config = Config::new(&session.model.id, scenario);
-        config.title = format!(
-            "{} / {}",
-            session.model.id.trim_start_matches("session-"),
-            scenario.label()
-        );
+        if session.model.last_sequence == 0 {
+            session.model.title = task_title(&prompt);
+        }
+        config.title = session.model.title.clone();
         config.prompt = prompt.clone();
         config.start_sequence = session.model.last_sequence;
         config.workspace = self.workspace_path.clone();
@@ -387,6 +494,7 @@ impl Workspace {
             }
         };
         session.model.status = Status::Connecting;
+        session.begin_run();
         session.model.reason.clear();
         session.composer.update(cx, |input, cx| {
             input.can_submit = false;
@@ -443,12 +551,13 @@ impl Workspace {
                     input.set_value(prompt.clone(), cx);
                     cx.notify();
                 });
-                self.message = format!("Solo ハーネスを開始できませんでした: {error}");
+                self.message = format!("エージェントを開始できませんでした: {error}");
                 cx.notify();
                 return;
             }
         };
         session.model.status = Status::Connecting;
+        session.begin_run();
         session.model.reason.clear();
         session.login = None;
         session.login_only = false;
@@ -485,6 +594,7 @@ impl Workspace {
     fn start_login(&mut self, cx: &mut Context<Self>) {
         let session = &mut self.sessions[self.selected];
         if session.model.status.is_active()
+            || self.queue.position(&session.model.id).is_some()
             || session.selected_backend != 0
             || session
                 .backend_id
@@ -502,6 +612,7 @@ impl Workspace {
             }
         };
         session.model.status = Status::Connecting;
+        session.begin_run();
         session.model.reason.clear();
         session.model.provider = "ChatGPT ログイン待ち".into();
         session.login = None;
@@ -568,6 +679,9 @@ impl Workspace {
                 }
             };
             if let Err(error) = controller.prompt(prompt.clone()) {
+                session
+                    .composer
+                    .update(cx, |input, cx| input.set_value(prompt.clone(), cx));
                 self.message = error.to_string();
                 cx.notify();
                 return;
@@ -584,6 +698,7 @@ impl Workspace {
             session.controller = Some(UiController::Acp(controller));
         }
         session.model.status = Status::Connecting;
+        session.begin_run();
         session.model.reason.clear();
         session.model.provider = format!("ACP / {}", agent.name);
         session.is_subscription = false;
@@ -651,6 +766,9 @@ impl Workspace {
         closed: bool,
         cx: &mut Context<Self>,
     ) {
+        let mut approval_requests = Vec::new();
+        let background = !self.is_visible || self.sessions[self.selected].model.id != id;
+        let project_name = self.workspace_name.clone();
         let Some(session) = self
             .sessions
             .iter_mut()
@@ -661,6 +779,7 @@ impl Workspace {
         let start = Instant::now();
         let old_len = session.model.chat.len();
         let old_discarded = session.model.chat_discarded;
+        let was_active = session.model.status.is_active();
         for delivery in batch {
             match delivery {
                 UiDelivery::Mock(MockDelivery::Event(event))
@@ -683,48 +802,31 @@ impl Workspace {
                     if session.login_only {
                         session.model.status = Status::Idle;
                         session.model.reason.clear();
-                        session.model.provider = "ChatGPT ログイン済み / Solo".into();
+                        session.model.provider = "ChatGPT ログイン済み".into();
                         session.login = None;
                         session.login_only = false;
                         session.is_subscription = false;
                         session.controller = None;
                     } else {
                         session.login = None;
-                        session.model.provider = "OpenAI Codex / Solo".into();
+                        session.model.provider = "OpenAI Codex".into();
                     }
                 }
                 UiDelivery::Subscription(SubscriptionDelivery::LoginCancelled) => {
                     if session.login_only {
                         session.model.status = Status::Idle;
-                        session.model.provider = "OpenAI Codex / Solo".into();
+                        session.model.provider = "OpenAI Codex".into();
                         session.login = None;
                         session.login_only = false;
                         session.is_subscription = false;
                         session.controller = None;
                     }
                 }
-                UiDelivery::Subscription(SubscriptionDelivery::Approval {
-                    method,
-                    params,
-                    reply,
-                }) => {
-                    session.approval = Some(PendingApproval {
-                        method,
-                        params,
-                        reply,
-                    });
+                UiDelivery::Subscription(SubscriptionDelivery::Approval { request, reply })
+                | UiDelivery::Acp(AcpDelivery::Approval { request, reply }) => {
+                    approval_requests.push((*request, reply));
                 }
-                UiDelivery::Acp(AcpDelivery::Approval {
-                    method,
-                    params,
-                    reply,
-                }) => {
-                    session.approval = Some(PendingApproval {
-                        method,
-                        params,
-                        reply,
-                    });
-                }
+
                 UiDelivery::Acp(AcpDelivery::SessionId(id)) => session.acp_session_id = Some(id),
                 UiDelivery::Mock(MockDelivery::Error(error))
                 | UiDelivery::Subscription(SubscriptionDelivery::Error(error)) => {
@@ -756,6 +858,35 @@ impl Workspace {
         if !session.model.status.is_active() {
             session.login = None;
             session.approval = None;
+            if was_active && session.model.status != Status::Idle {
+                session.elapsed = session.started_at.map(|at| at.elapsed());
+                session.unread_result = true;
+                if (session.is_subscription || session.is_acp)
+                    && matches!(
+                        session.model.status,
+                        Status::Failed | Status::Disconnected | Status::Cancelled
+                    )
+                {
+                    self.queue.paused = true;
+                }
+                if background {
+                    self.toast.update(cx, |toast, cx| {
+                        toast.push(
+                            format!(
+                                "{project_name} · {} · {}",
+                                session.model.title,
+                                session.model.status.label()
+                            ),
+                            if session.model.status == Status::Completed {
+                                Tone::Success
+                            } else {
+                                Tone::Warning
+                            },
+                            cx,
+                        )
+                    });
+                }
+            }
         }
         let discarded = session.model.chat_discarded - old_discarded;
         if discarded > 0 {
@@ -773,7 +904,8 @@ impl Workspace {
                 .log_scroll
                 .scroll_to_item(session.model.logs.len() - 1, ScrollStrategy::Bottom);
         }
-        let can_submit = !session.model.status.is_active();
+        let can_submit =
+            !session.model.status.is_active() && self.queue.position(&session.model.id).is_none();
         if session.composer.read(cx).can_submit != can_submit {
             session.composer.update(cx, |input, cx| {
                 input.can_submit = can_submit;
@@ -785,11 +917,25 @@ impl Workspace {
             .max_batch_ms
             .max(start.elapsed().as_secs_f64() * 1000.);
         self.sync_controls(cx);
+        self.dispatch_queue(cx);
+        for (request, reply) in approval_requests {
+            self.receive_approval(id, generation, request, reply, cx);
+        }
         cx.notify();
     }
 
     fn scenario(&mut self, scenario: Scenario, cx: &mut Context<Self>) {
-        if self.sessions[self.selected].model.status.is_active() {
+        let session = &self.sessions[self.selected];
+        if session.model.status.is_active() || self.queue.position(&session.model.id).is_some() {
+            return;
+        }
+        if session
+            .backend_id
+            .as_deref()
+            .is_some_and(|backend| backend != "mock")
+        {
+            self.message = "デモを試すには新しいタスクを作成してください".into();
+            cx.notify();
             return;
         }
         self.start_mock(
@@ -801,10 +947,13 @@ impl Workspace {
     }
 
     fn sync_controls(&self, cx: &mut Context<Self>) {
-        let active = self.sessions[self.selected].model.status.is_active();
-        if self.scenario_picker.read(cx).disabled != active {
+        let session = &self.sessions[self.selected];
+        let locked = session.model.status.is_active()
+            || self.queue.position(&session.model.id).is_some()
+            || session.backend_id.as_deref().is_some_and(|id| id != "mock");
+        if self.scenario_picker.read(cx).disabled != locked {
             self.scenario_picker.update(cx, |picker, cx| {
-                picker.disabled = active;
+                picker.disabled = locked;
                 picker.close(cx);
             });
         }
@@ -829,6 +978,11 @@ impl Workspace {
     }
 
     fn close_session(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let session = &self.sessions[self.selected];
+        self.queue.cancel(&session.model.id);
+        if session.model.status.is_active() && (session.is_subscription || session.is_acp) {
+            self.queue.paused = true;
+        }
         self.sessions.remove(self.selected);
         self.selected = self.selected.saturating_sub(1);
         if self.sessions.is_empty() {
@@ -837,6 +991,7 @@ impl Workspace {
         self.message.clear();
         let id = self.sessions[self.selected].model.id.clone();
         self.select_session(&id, window, cx);
+        self.dispatch_queue(cx);
     }
 
     fn show_tab(&mut self, tab: Tab, cx: &mut Context<Self>) {
@@ -856,13 +1011,6 @@ impl Workspace {
                 let _ = approval.reply.try_send(false);
             }
             session.model.status = Status::Cancelling;
-            cx.notify();
-        }
-    }
-
-    fn answer_approval(&mut self, accepted: bool, cx: &mut Context<Self>) {
-        if let Some(approval) = self.sessions[self.selected].approval.take() {
-            let _ = approval.reply.try_send(accepted);
             cx.notify();
         }
     }

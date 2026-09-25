@@ -6760,6 +6760,7 @@ dependencies = [
  "gpui-kit",
  "rustls",
  "serde",
+ "serde-saphyr",
  "serde_json",
  "tempfile",
  "tokio",

@@ -1,0 +1,12 @@
+# 保存先: ~/.config/solo/config.yml
+version: 1
+approval:
+  # manual: 手動確認 / bypass: すべて許可 / auto: 指定モデルで承認を判定
+  mode: manual
+  auto:
+    # 作業を実行するモデルとは別の、承認判定用モデルです。
+    # ChatGPT ログインで利用可能なモデル名を指定してください。
+    model: gpt-5.6-sol
+    timeout_seconds: 30
+# コマンドの Whitelist / Blacklist は GUI から登録できます。
+workspaces: {}

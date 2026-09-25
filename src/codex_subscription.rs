@@ -12,7 +12,7 @@ use genai::{
     codex::{CodexStreamFn, ResolverTokenSource},
     stream_fn::LlmContext,
 };
-use std::{io, path::PathBuf, sync::Arc};
+use std::{io, path::PathBuf, sync::Arc, time::Duration};
 use tokio::runtime::{Builder, Runtime};
 use tokio_util::sync::CancellationToken;
 
@@ -98,6 +98,8 @@ impl Authentication {
                 .with_user_agent(concat!("solo/", env!("CARGO_PKG_VERSION"))),
             runtime: Builder::new_current_thread().enable_all().build()?,
             cancel,
+            system_prompt: "あなたは Solo のコーディングエージェントです。必要に応じて提供された tool を使い、作業内容を日本語で報告してください。".into(),
+            review_timeout: None,
         })
     }
 }
@@ -111,9 +113,17 @@ pub struct CodexModel {
     stream: CodexStreamFn,
     runtime: Runtime,
     cancel: CancellationToken,
+    system_prompt: String,
+    review_timeout: Option<Duration>,
 }
 
 impl CodexModel {
+    pub fn with_review_settings(mut self, system_prompt: &str, timeout: Duration) -> Self {
+        self.system_prompt = system_prompt.into();
+        self.review_timeout = Some(timeout);
+        self
+    }
+
     fn complete_streaming(
         &mut self,
         messages: &[Message],
@@ -121,17 +131,25 @@ impl CodexModel {
         on_delta: &mut dyn FnMut(&str),
     ) -> Result<ModelOutput, String> {
         let context = LlmContext {
-            system_prompt: "あなたは Solo のコーディングエージェントです。必要に応じて提供された tool を使い、作業内容を日本語で報告してください。".into(),
+            system_prompt: self.system_prompt.clone(),
             messages: to_chat_messages(messages),
-            tools: tools.iter().map(|spec| {
-                Tool::new(spec.name.clone())
-                    .with_description(spec.description.clone())
-                    .with_schema(spec.parameters.clone())
-            }).collect(),
+            tools: tools
+                .iter()
+                .map(|spec| {
+                    Tool::new(spec.name.clone())
+                        .with_description(spec.description.clone())
+                        .with_schema(spec.parameters.clone())
+                })
+                .collect(),
         };
-        let request =
+        let mut request =
             StreamRequest::new(self.name.clone(), context).with_cancellation(self.cancel.clone());
-        self.runtime.block_on(async {
+        if self.review_timeout.is_some() {
+            request = request
+                .with_max_retries(0)
+                .with_options(genai::chat::ChatOptions::default().with_max_tokens(2048));
+        }
+        let response = async {
             let mut stream = self.stream.stream(request).await;
             while let Some(event) = stream.next().await {
                 match event {
@@ -161,6 +179,12 @@ impl CodexModel {
                 }
             }
             Err("モデルの応答が途中で終了しました".into())
+        };
+        self.runtime.block_on(async {
+            match self.review_timeout {
+                Some(timeout) => review_with_deadline(response, &self.cancel, timeout).await,
+                None => response.await,
+            }
         })
     }
 }
@@ -211,4 +235,43 @@ pub fn to_chat_messages(messages: &[Message]) -> Vec<ChatMessage> {
             }
         })
         .collect()
+}
+
+async fn review_with_deadline<T>(
+    response: impl std::future::Future<Output = Result<T, String>>,
+    cancel: &CancellationToken,
+    timeout: Duration,
+) -> Result<T, String> {
+    tokio::select! {
+        result = response => result,
+        _ = cancel.cancelled() => Err("Auto 判定を中止しました".into()),
+        _ = tokio::time::sleep(timeout) => Err("Auto 判定がタイムアウトしました。手動で確認してください。".into()),
+    }
+}
+
+#[cfg(test)]
+mod review_tests {
+    use super::*;
+    #[test]
+    fn deadline_and_cancellation_stop_a_waiting_review() {
+        let runtime = Builder::new_current_thread().enable_all().build().unwrap();
+        runtime.block_on(async {
+            let token = CancellationToken::new();
+            let result = review_with_deadline(
+                std::future::pending::<Result<(), String>>(),
+                &token,
+                Duration::from_millis(1),
+            )
+            .await;
+            assert!(result.unwrap_err().contains("タイムアウト"));
+            token.cancel();
+            let result = review_with_deadline(
+                std::future::pending::<Result<(), String>>(),
+                &token,
+                Duration::from_secs(30),
+            )
+            .await;
+            assert!(result.unwrap_err().contains("中止"));
+        });
+    }
 }

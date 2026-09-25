@@ -233,6 +233,8 @@ where
             } else if !policy.allow(&call) {
                 calls += 1;
                 ToolResult::error("tool の実行は許可されませんでした")
+            } else if cancellation.is_cancelled() {
+                ToolResult::error("承認待ちの間に中止されたため実行しませんでした")
             } else {
                 calls += 1;
                 tools.execute(&call)

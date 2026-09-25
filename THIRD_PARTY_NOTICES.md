@@ -8,6 +8,12 @@ Kit が対応する `gpui-pre` 0.3.6、gpui-base、gpui-component と assets を
 - Source: https://github.com/longbridge/gpui-kit/tree/v0.6.6
 - Lucide icons: ISC。Feather 由来のアイコンは MIT。
   [同梱ライセンス](licenses/LUCIDE-LICENSE.txt) / [公式出典](https://lucide.dev/license)
+- Lobe Icons (`@lobehub/icons-static-svg` 1.95.1): MIT。
+  [同梱ライセンス](licenses/LOBE-ICONS-LICENSE.txt) /
+  [固定リビジョンの出典](https://github.com/lobehub/lobe-icons/tree/49a2130df7bfa5eb1b088261bff20a37e2967789)
+  - `assets/icons/lobe/openai.svg` は公開パッケージの `icons/openai.svg` を変更せず同梱。
+  - [取得元](https://registry.npmjs.org/@lobehub/icons-static-svg/-/icons-static-svg-1.95.1.tgz)
+  - SVG SHA-256: `a595df6b423920c67a7f8f73c063e4bfb72d415948097b6cac063a2366bb5186`
 
 直接依存は `Cargo.toml` で完全固定し、推移的依存は `Cargo.lock` で固定します。
 各依存の package metadata 上の license は以下のとおりです。
@@ -20,6 +26,7 @@ Kit が対応する `gpui-pre` 0.3.6、gpui-base、gpui-component と assets を
 | genai-agentprism | 0.7.0-beta.19.1-agentprism | MIT OR Apache-2.0 |
 | serde | 1.0.229 | MIT OR Apache-2.0 |
 | serde_json | 1.0.151 | MIT OR Apache-2.0 |
+| serde-saphyr | 1.3.0 | MIT OR Apache-2.0 |
 | tempfile | 3.27.0 | MIT OR Apache-2.0 |
 | tokio | 1.53.1 | MIT |
 | tokio-util | 0.7.19 | MIT |

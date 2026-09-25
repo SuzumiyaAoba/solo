@@ -1,6 +1,9 @@
 use gpui_kit::{prelude::*, *};
+use std::borrow::Cow;
 
-/// GPUI Kit に同梱された Lucide アイコンのアプリ内での名前。
+const OPENAI_PATH: &str = "icons/lobe/openai.svg";
+
+/// Lucide の UI アイコンと Lobe Icons のブランドアイコン。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Icon {
     Plus,
@@ -29,9 +32,27 @@ pub enum Icon {
     Spinner,
     Folder,
     Command,
+    Terminal,
+    ArrowUp,
+    Play,
+    Square,
+    ListPlus,
+    FileDiff,
+    MessageSquare,
+    RotateCcw,
+    ExternalLink,
+    LogIn,
+    Clock,
+    Pause,
+    CircleCheck,
+    Activity,
+    Unplug,
+    Pin,
+    Pencil,
+    OpenAi,
 }
 impl Icon {
-    pub const ALL: [Self; 26] = [
+    pub const ALL: [Self; 44] = [
         Self::Plus,
         Self::Check,
         Self::Minus,
@@ -58,6 +79,24 @@ impl Icon {
         Self::Spinner,
         Self::Folder,
         Self::Command,
+        Self::Terminal,
+        Self::ArrowUp,
+        Self::Play,
+        Self::Square,
+        Self::ListPlus,
+        Self::FileDiff,
+        Self::MessageSquare,
+        Self::RotateCcw,
+        Self::ExternalLink,
+        Self::LogIn,
+        Self::Clock,
+        Self::Pause,
+        Self::CircleCheck,
+        Self::Activity,
+        Self::Unplug,
+        Self::Pin,
+        Self::Pencil,
+        Self::OpenAi,
     ];
     pub fn name(self) -> &'static str {
         match self {
@@ -87,6 +126,24 @@ impl Icon {
             Self::Spinner => "spinner",
             Self::Folder => "folder",
             Self::Command => "command",
+            Self::Terminal => "terminal",
+            Self::ArrowUp => "arrow-up",
+            Self::Play => "play",
+            Self::Square => "square",
+            Self::ListPlus => "list-plus",
+            Self::FileDiff => "file-diff",
+            Self::MessageSquare => "message-square",
+            Self::RotateCcw => "rotate-ccw",
+            Self::ExternalLink => "external-link",
+            Self::LogIn => "log-in",
+            Self::Clock => "clock",
+            Self::Pause => "pause",
+            Self::CircleCheck => "circle-check",
+            Self::Activity => "activity",
+            Self::Unplug => "unplug",
+            Self::Pin => "pin",
+            Self::Pencil => "pencil",
+            Self::OpenAi => "openai",
         }
     }
     pub fn kit(self) -> gpui_kit::component::Icon {
@@ -118,6 +175,24 @@ impl Icon {
             Self::Spinner => N::LoaderCircle,
             Self::Folder => N::Folder,
             Self::Command => N::Command,
+            Self::Terminal => N::Terminal,
+            Self::ArrowUp => N::ArrowUp,
+            Self::Play => N::Play,
+            Self::Square => N::Square,
+            Self::ListPlus => N::ListPlus,
+            Self::FileDiff => N::FileDiff,
+            Self::MessageSquare => N::MessageSquare,
+            Self::RotateCcw => N::RotateCcw,
+            Self::ExternalLink => N::ExternalLink,
+            Self::LogIn => N::LogIn,
+            Self::Clock => N::Clock,
+            Self::Pause => N::Pause,
+            Self::CircleCheck => N::CircleCheck,
+            Self::Activity => N::Activity,
+            Self::Unplug => N::Unplug,
+            Self::Pin => N::Pin,
+            Self::Pencil => N::Pencil,
+            Self::OpenAi => return gpui_kit::component::Icon::default().path(OPENAI_PATH),
         };
         gpui_kit::component::Icon::new(name)
     }
@@ -129,4 +204,24 @@ impl Icon {
     }
 }
 
-pub use gpui_kit::assets::AllAssets as DesignAssets;
+/// Kit の組込みアセットと、バイナリに埋め込んだブランドアイコンを提供する。
+pub struct DesignAssets;
+
+impl AssetSource for DesignAssets {
+    fn load(&self, path: &str) -> Result<Option<Cow<'static, [u8]>>> {
+        if path == OPENAI_PATH {
+            return Ok(Some(Cow::Borrowed(include_bytes!(
+                "../../assets/icons/lobe/openai.svg"
+            ))));
+        }
+        gpui_kit::assets::AllAssets.load(path)
+    }
+
+    fn list(&self, path: &str) -> Result<Vec<SharedString>> {
+        let mut assets = gpui_kit::assets::AllAssets.list(path)?;
+        if OPENAI_PATH.starts_with(path) {
+            assets.push(OPENAI_PATH.into());
+        }
+        Ok(assets)
+    }
+}

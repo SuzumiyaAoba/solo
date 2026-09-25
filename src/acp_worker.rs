@@ -1,13 +1,14 @@
 //! ACP v1 Agent のプロセスを UI セッション単位で保持する。
 use crate::{
     acp::{AgentProfile, Client},
+    approval::ApprovalRequest,
     event::{Envelope, Event, SCHEMA_VERSION, Usage, preview},
 };
 use async_channel::{Receiver, Sender};
 use serde_json::{Value, json};
 use std::{
     cell::RefCell,
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     io::{self, BufReader, Write},
     path::PathBuf,
     process::{Child, ChildStdin, Command, Stdio},
@@ -22,8 +23,7 @@ use std::{
 pub enum Delivery {
     Event(Envelope),
     Approval {
-        method: String,
-        params: Value,
+        request: Box<ApprovalRequest>,
         reply: Sender<bool>,
     },
     SessionId(String),
@@ -228,11 +228,15 @@ fn run(
             if message["method"] == "session/request_permission"
                 && message["params"]["sessionId"] == session
             {
+                let params = bridge.borrow_mut().permission_params(&message["params"]);
                 let (reply, answer) = async_channel::bounded(1);
                 if sender
                     .send_blocking(Delivery::Approval {
-                        method: "session/request_permission".into(),
-                        params: message["params"].clone(),
+                        request: Box::new(ApprovalRequest::acp(
+                            params,
+                            &config.profile,
+                            &config.workspace,
+                        )),
                         reply,
                     })
                     .is_err()
@@ -251,7 +255,8 @@ fn run(
                 let option = message["params"]["options"]
                     .as_array()
                     .and_then(|options| options.iter().find(|option| option["kind"] == kind))
-                    .and_then(|option| option["optionId"].as_str());
+                    .and_then(|option| option["optionId"].as_str())
+                    .filter(|id| !id.is_empty());
                 return Some(match option {
                     Some(option_id) => {
                         json!({"outcome":{"outcome":"selected","optionId":option_id}})
@@ -326,9 +331,35 @@ impl Emitter {
 #[derive(Default)]
 struct Bridge {
     tools: HashSet<String>,
+    metadata: HashMap<String, Value>,
     log_offset: u64,
 }
 impl Bridge {
+    fn remember_tool(&mut self, update: &Value) -> Value {
+        let Some(id) = update["toolCallId"].as_str() else {
+            return update.clone();
+        };
+        let entry = self
+            .metadata
+            .entry(id.into())
+            .or_insert_with(|| json!({"toolCallId":id}));
+        for key in ["name", "title", "kind", "rawInput"] {
+            if let Some(value) = update.get(key).filter(|value| !value.is_null()) {
+                entry[key] = value.clone();
+            }
+        }
+        entry.clone()
+    }
+    fn permission_params(&mut self, params: &Value) -> Value {
+        let mut params = params.clone();
+        let metadata = self.remember_tool(&params["toolCall"]);
+        if let Some(tool) = params["toolCall"].as_object_mut() {
+            for (key, value) in metadata.as_object().into_iter().flatten() {
+                tool.insert(key.clone(), value.clone());
+            }
+        }
+        params
+    }
     fn handle(&mut self, update: &Value, out: &mut Emitter) {
         match update["sessionUpdate"].as_str() {
             Some("agent_message_chunk") => {
@@ -341,6 +372,7 @@ impl Bridge {
                 }
             }
             Some("tool_call" | "tool_call_update") => {
+                self.remember_tool(update);
                 if let Some(id) = update["toolCallId"].as_str() {
                     if self.tools.insert(id.into()) {
                         out.emit(Event::ToolStarted {
@@ -376,6 +408,7 @@ impl Bridge {
                     if matches!(update["status"].as_str(), Some("completed" | "failed"))
                         && self.tools.remove(id)
                     {
+                        self.metadata.remove(id);
                         out.emit(Event::ToolFinished {
                             invocation_id: id.into(),
                             exit_code: if update["status"] == "completed" {
@@ -443,6 +476,25 @@ mod tests {
     };
 
     #[cfg(unix)]
+    #[test]
+    fn permission_request_inherits_tool_metadata_and_updates_do_not_clear_it() {
+        let mut bridge = Bridge::default();
+        bridge.remember_tool(&json!({"toolCallId":"one","kind":"execute","name":"shell","rawInput":{"command":"pwd","cwd":"/tmp"}}));
+        bridge.remember_tool(
+            &json!({"toolCallId":"one","kind":null,"rawInput":null,"title":"Working"}),
+        );
+        let params = bridge.permission_params(&json!({"sessionId":"s","toolCall":{"toolCallId":"one"},"options":[{"kind":"allow_once"}]}));
+        assert_eq!(params["toolCall"]["kind"], "execute");
+        assert_eq!(params["toolCall"]["rawInput"]["command"], "pwd");
+        assert_eq!(params["toolCall"]["title"], "Working");
+        let other = bridge.permission_params(&json!({"toolCall":{"toolCallId":"two"}}));
+        assert!(other["toolCall"]["rawInput"].is_null());
+        let changed = bridge.permission_params(
+            &json!({"toolCall":{"toolCallId":"one","rawInput":{"command":"whoami"}}}),
+        );
+        assert_eq!(changed["toolCall"]["rawInput"], json!({"command":"whoami"}));
+    }
+
     #[test]
     fn two_turns_share_one_agent_process_and_permission_is_forwarded() {
         let dir = tempfile::tempdir().unwrap();

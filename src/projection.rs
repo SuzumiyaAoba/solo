@@ -5,6 +5,7 @@ pub const MAX_LOG_ROWS: usize = 1_000;
 pub const MAX_CHAT_BLOCKS: usize = 16_384;
 pub const CHAT_BLOCK_BYTES: usize = 1_024;
 pub const MAX_DIFF_LINES: usize = 20_000;
+pub const MAX_TOOL_ACTIVITIES: usize = 256;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Status {
@@ -79,6 +80,7 @@ pub struct Diff {
     pub path: String,
     pub lines: Vec<DiffLine>,
     pub truncated: bool,
+    pub reviewed: bool,
 }
 
 impl Diff {
@@ -92,6 +94,7 @@ impl Diff {
                 truncated = true;
                 break;
             }
+            truncated |= line.len() > 2_048;
             let kind = if line.starts_with("@@") {
                 let mut parts = line.split_whitespace().skip(1);
                 old = parts
@@ -132,8 +135,26 @@ impl Diff {
             path,
             lines,
             truncated,
+            reviewed: false,
         }
     }
+
+    pub fn line_counts(&self) -> (usize, usize) {
+        self.lines.iter().fold((0, 0), |(added, removed), line| {
+            (
+                added + usize::from(line.kind == DiffKind::Added),
+                removed + usize::from(line.kind == DiffKind::Removed),
+            )
+        })
+    }
+}
+
+#[derive(Debug)]
+pub struct ToolActivity {
+    pub invocation_id: String,
+    pub command: String,
+    pub cwd: String,
+    pub exit_code: Option<i32>,
 }
 
 #[derive(Debug)]
@@ -152,6 +173,7 @@ pub struct Session {
     pub logs_discarded: usize,
     pub diffs: Vec<Diff>,
     pub tools: HashMap<String, Option<i32>>,
+    pub tool_activity: VecDeque<ToolActivity>,
     pub last_sequence: u64,
     pub accepted: u64,
     pub duplicates: u64,
@@ -187,6 +209,7 @@ impl Session {
             logs_discarded: 0,
             diffs: Vec::new(),
             tools: HashMap::new(),
+            tool_activity: VecDeque::new(),
             last_sequence: 0,
             accepted: 0,
             duplicates: 0,
@@ -303,6 +326,7 @@ impl Session {
                 self.usage = Usage::default();
                 self.incomplete = false;
                 self.tools.clear();
+                self.tool_activity.clear();
                 self.turn_id = envelope.turn_id;
                 self.append(
                     Speaker::User,
@@ -335,7 +359,16 @@ impl Session {
                 command,
                 cwd,
             } => {
-                self.tools.insert(invocation_id, None);
+                self.tools.insert(invocation_id.clone(), None);
+                if self.tool_activity.len() == MAX_TOOL_ACTIVITIES {
+                    self.tool_activity.pop_front();
+                }
+                self.tool_activity.push_back(ToolActivity {
+                    invocation_id,
+                    command: preview(&command, 512),
+                    cwd: preview(&cwd, 512),
+                    exit_code: None,
+                });
                 self.notice(format!("実行開始: {command}  ({cwd})"));
             }
             Event::ToolFinished {
@@ -343,6 +376,13 @@ impl Session {
                 exit_code,
             } => {
                 self.tools.insert(invocation_id.clone(), Some(exit_code));
+                if let Some(activity) = self
+                    .tool_activity
+                    .iter_mut()
+                    .find(|activity| activity.invocation_id == invocation_id)
+                {
+                    activity.exit_code = Some(exit_code);
+                }
                 self.notice(format!("実行終了: {invocation_id} / exit {exit_code}"));
             }
             Event::DiffUpdated { path, unified_diff } => {
@@ -379,6 +419,22 @@ impl Session {
                 "完了イベントを受信する前に接続が閉じました".into(),
             );
         }
+    }
+
+    pub fn unreviewed_count(&self) -> usize {
+        self.diffs.iter().filter(|diff| !diff.reviewed).count()
+    }
+
+    /// 更新途中や省略された差分を「確認済み」と扱わない。
+    pub fn toggle_reviewed(&mut self, index: usize) -> bool {
+        if self.status.is_active() {
+            return false;
+        }
+        let Some(diff) = self.diffs.get_mut(index).filter(|diff| !diff.truncated) else {
+            return false;
+        };
+        diff.reviewed = !diff.reviewed;
+        true
     }
 
     fn finish(&mut self, status: Status, reason: String) {
