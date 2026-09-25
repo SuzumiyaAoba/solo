@@ -1,0 +1,41 @@
+[package]
+name = "solo"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.98"
+publish = false
+description = "Rust + GPUI agent workspace — Phase 0"
+default-run = "solo"
+
+[features]
+default = ["gui"]
+gui = ["dep:gpui"]
+
+[dependencies]
+async-channel = "=2.5.0"
+serde = { version = "=1.0.229", features = ["derive"] }
+serde_json = "=1.0.151"
+tempfile = "=3.27.0"
+unicode-segmentation = "=1.13.3"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+gpui = { version = "=0.2.2", optional = true, default-features = false, features = ["font-kit", "runtime_shaders"] }
+
+[[bin]]
+name = "solo"
+path = "src/main.rs"
+required-features = ["gui"]
+
+[[bin]]
+name = "solo-design"
+path = "src/bin/solo-design.rs"
+required-features = ["gui"]
+
+[profile.dev]
+debug = 1
+
+[profile.release]
+lto = "thin"
+
+[lints.rust]
+unsafe_code = "forbid"
