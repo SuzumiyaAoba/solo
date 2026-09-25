@@ -19,13 +19,14 @@ pub(super) fn start(window: &Window, cx: &mut Context<Workspace>) {
                     let s = &mut this.sessions[this.selected];
                     s.tab = [Tab::Chat, Tab::Logs, Tab::Diff][tick % 3];
                     s.composer.update(cx, |input, cx| {
-                        input.buffer = Default::default();
+                        input.set_value("", cx);
                         input.replace_text_in_range(None, "前🙂", window, cx);
                         input.replace_and_mark_text_in_range(None, "にほんご", Some(4..4), window, cx);
                         assert_eq!(input.marked_text_range(window, cx), Some(3..7));
-                        assert!(input.buffer.take_committed().is_none());
+                        input.submit(window, cx);
+                        assert!(input.marked_text_range(window, cx).is_some());
                         input.replace_text_in_range(None, "日本語", window, cx);
-                        assert_eq!(input.buffer.content, "前🙂日本語");
+                        assert_eq!(input.value(cx), "前🙂日本語");
                     });
                     let done = !s.model.status.is_active();
                     assert_eq!(this.scenario_picker.read(cx).disabled, !done);
@@ -48,8 +49,8 @@ pub(super) fn start(window: &Window, cx: &mut Context<Workspace>) {
             this.sessions[0].composer.update(cx, |input, cx| {
                 input.replace_text_in_range(Some(0..usize::MAX), "保持する下書き🙂", window, cx);
             });
-            this.sessions[0].chat_list.scroll_to(ListOffset { item_ix: 3, offset_in_item: px(0.) });
-            this.new_session(cx);
+            this.sessions[0].chat_list.update(cx, |list, cx| { assert!(list.scroll_to_item(3, cx)); });
+            this.new_session(window, cx);
             original_id
         }).unwrap();
         // 空状態も両テーマで描画し、セッションを切り替えても下書き・scroll を失わない。
@@ -62,18 +63,19 @@ pub(super) fn start(window: &Window, cx: &mut Context<Workspace>) {
         this.update_in(cx, |this, window, cx| {
             let empty_id = this.sessions[this.selected].model.id.clone();
             this.select_session(&original_id, window, cx);
-            assert_eq!(this.sessions[this.selected].composer.read(cx).buffer.content, "保持する下書き🙂");
-            assert_eq!(this.sessions[this.selected].chat_list.logical_scroll_top().item_ix, 3);
+            assert_eq!(this.sessions[this.selected].composer.read(cx).value(cx), "保持する下書き🙂");
+            assert!(!this.sessions[this.selected].chat_list.read(cx).is_following_tail());
             this.select_session(&empty_id, window, cx);
             this.close_session(window, cx);
             assert_eq!(this.sessions.len(), 1);
+            assert_eq!(this.scenario_picker.read(cx).selected, this.sessions[0].selected_backend, "closing a session must restore its neighbor backend");
             assert!(this.sessions[0].composer.focus_handle(cx).is_focused(window));
         }).unwrap();
 
         // UI の停止要求と停止確認を区別し、開始前の cancel も通す。
         for expected in [Status::Cancelled, Status::Disconnected] {
-            this.update_in(cx, |this, _, cx| {
-                this.new_session(cx);
+            this.update_in(cx, |this, window, cx| {
+                this.new_session(window, cx);
                 this.scenario(Scenario::Events100k, cx);
                 if expected == Status::Cancelled {
                     this.cancel(cx);
@@ -101,7 +103,7 @@ pub(super) fn start(window: &Window, cx: &mut Context<Workspace>) {
         }
 
         this.update_in(cx, |this, window, cx| {
-            this.new_session(cx);
+            this.new_session(window, cx);
             this.scenario(Scenario::Events100k, cx);
             this.close_session(window, cx); // 受信中に閉じても、生き残った session を更新しない。
             assert_eq!(this.sessions[0].model.id, original_id);
@@ -126,7 +128,7 @@ pub(super) fn start(window: &Window, cx: &mut Context<Workspace>) {
             assert!(this.rendered > 30);
             assert_eq!(this.sessions[0].model.unknown, 2);
             assert_eq!(this.sessions[0].model.rejected, 2);
-            assert_eq!(this.sessions[0].composer.read(cx).buffer.content, "保持する下書き🙂");
+            assert_eq!(this.sessions[0].composer.read(cx).value(cx), "保持する下書き🙂");
             println!("Solo smoke OK: both themes, all panes, 100k events, 100MiB logs, IME, session drafts/scroll, cancel/disconnect, close while running, compact layout, keyboard shortcuts");
             cx.quit();
         }).unwrap();

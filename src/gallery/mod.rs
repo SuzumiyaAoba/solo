@@ -1,7 +1,12 @@
 mod pages;
 mod smoke;
 
-use gpui::{prelude::*, *};
+use gpui_kit::component::{
+    Sizable,
+    sidebar::{Sidebar, SidebarGroup, SidebarMenu, SidebarMenuItem},
+    tab::{Tab as KitTab, TabBar},
+};
+use gpui_kit::{prelude::*, *};
 use solo::design::{self as ds, *};
 use std::time::Duration;
 
@@ -103,49 +108,54 @@ pub fn run() {
     let light = args.iter().any(|arg| arg == "--light");
     let smoke = args.iter().any(|arg| arg == "--smoke");
     let compact = args.iter().any(|arg| arg == "--compact");
-    Application::new().with_assets(DesignAssets).run(move |cx| {
-        ds::init(cx);
-        if light {
-            ds::set_theme(ColorScheme::Light, cx);
-        }
-        cx.bind_keys([
-            KeyBinding::new("cmd-q", QuitGallery, None),
-            KeyBinding::new("cmd-w", CloseGallery, None),
-            KeyBinding::new("cmd-shift-l", ToggleTheme, None),
-        ]);
-        cx.on_action(|_: &QuitGallery, cx| cx.quit());
-        cx.on_window_closed(|cx| {
-            if cx.windows().is_empty() {
-                cx.quit();
+    gpui_kit::application()
+        .with_assets(DesignAssets)
+        .run(move |cx| {
+            ds::init(cx);
+            if light {
+                ds::set_theme(ColorScheme::Light, cx);
             }
-        })
-        .detach();
-        let window_size = if compact {
-            size(px(980.), px(720.))
-        } else {
-            size(px(1280.), px(900.))
-        };
-        cx.open_window(
-            WindowOptions {
-                window_bounds: Some(WindowBounds::Windowed(Bounds::centered(
-                    None,
-                    window_size,
-                    cx,
-                ))),
-                window_min_size: Some(size(px(980.), px(700.))),
-                titlebar: Some(TitlebarOptions {
-                    title: Some("Solo Design".into()),
-                    appears_transparent: true,
-                    traffic_light_position: Some(point(px(16.), px(16.))),
-                }),
-                app_id: Some("dev.solo.design".into()),
-                ..Default::default()
-            },
-            |window, cx| cx.new(|cx| Gallery::new(page, smoke, window, cx)),
-        )
-        .expect("Solo Design の window を開けませんでした");
-        cx.activate(true);
-    });
+            cx.bind_keys([
+                KeyBinding::new("cmd-q", QuitGallery, None),
+                KeyBinding::new("cmd-w", CloseGallery, None),
+                KeyBinding::new("cmd-shift-l", ToggleTheme, None),
+            ]);
+            cx.on_action(|_: &QuitGallery, cx| cx.quit());
+            cx.on_window_closed(|cx, _| {
+                if cx.windows().is_empty() {
+                    cx.quit();
+                }
+            })
+            .detach();
+            let window_size = if compact {
+                size(px(980.), px(720.))
+            } else {
+                size(px(1280.), px(900.))
+            };
+            cx.open_window(
+                WindowOptions {
+                    window_bounds: Some(WindowBounds::Windowed(Bounds::centered(
+                        None,
+                        window_size,
+                        cx,
+                    ))),
+                    window_min_size: Some(size(px(980.), px(700.))),
+                    titlebar: Some(TitlebarOptions {
+                        title: Some("Solo Design".into()),
+                        appears_transparent: true,
+                        traffic_light_position: Some(point(px(16.), px(16.))),
+                    }),
+                    app_id: Some("dev.solo.design".into()),
+                    ..Default::default()
+                },
+                |window, cx| {
+                    let view = cx.new(|cx| Gallery::new(page, smoke, window, cx));
+                    cx.new(|cx| gpui_kit::component::Root::new(view, window, cx))
+                },
+            )
+            .expect("Solo Design の window を開けませんでした");
+            cx.activate(true);
+        });
 }
 
 struct Gallery {
@@ -154,6 +164,8 @@ struct Gallery {
     search: Entity<TextInput>,
     query: String,
     fields: Vec<Entity<TextInput>>,
+    composer: Entity<TextInput>,
+    submissions: Vec<String>,
     select: Entity<Select>,
     disabled_select: Entity<Select>,
     dialog: Entity<Dialog>,
@@ -161,77 +173,84 @@ struct Gallery {
     scrolls: [ScrollHandle; 8],
     checked: bool,
     switch_on: bool,
-    mixed: bool,
     radio: usize,
-    radio_focus: [FocusHandle; 3],
     selected_tab: usize,
     selected_nav: usize,
     progress: f32,
     clicks: usize,
     loading: bool,
     loading_task: Option<Task<()>>,
-    probe_focus: FocusHandle,
-    disabled_focus: FocusHandle,
     _subscriptions: Vec<Subscription>,
     rendered: usize,
 }
 impl Gallery {
     fn new(page: Page, smoke: bool, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let search = cx.new(|cx| {
-            TextInput::new(cx)
+            TextInput::new(window, cx)
                 .control_size(ControlSize::Small)
                 .leading_icon(Icon::Search)
                 .placeholder("コンポーネントを探す")
         });
         let fields = vec![
             cx.new(|cx| {
-                TextInput::new(cx)
+                TextInput::new(window, cx)
                     .placeholder("プロジェクト名")
                     .default_value("Solo workspace")
             }),
             cx.new(|cx| {
-                TextInput::new(cx)
+                TextInput::new(window, cx)
                     .placeholder("セッションを検索…")
                     .leading_icon(Icon::Search)
             }),
             cx.new(|cx| {
-                TextInput::new(cx)
+                TextInput::new(window, cx)
                     .placeholder("3文字以上の名前")
                     .default_value("ab")
                     .invalid(true)
             }),
             cx.new(|cx| {
-                TextInput::new(cx)
+                TextInput::new(window, cx)
                     .default_value("変更できません")
                     .disabled(true)
             }),
             cx.new(|cx| {
-                TextInput::new(cx)
+                TextInput::new(window, cx)
                     .default_value("solo / design-system")
                     .read_only(true)
             }),
             cx.new(|cx| {
-                TextInput::new(cx)
+                TextInput::new(window, cx)
                     .placeholder("Small · 28 px")
                     .control_size(ControlSize::Small)
             }),
             cx.new(|cx| {
-                TextInput::new(cx)
+                TextInput::new(window, cx)
                     .placeholder("Large · 40 px")
                     .control_size(ControlSize::Large)
             }),
         ];
+        let composer = cx.new(|cx| {
+            TextInput::multiline(window, cx)
+                .placeholder("作業を依頼する…")
+                .clear_on_submit(true)
+        });
         let select = cx.new(|cx| {
             Select::new(
                 ["すべてのセッション", "進行中", "完了", "アーカイブ"],
                 0,
+                window,
                 cx,
             )
         });
-        let disabled_select = cx.new(|cx| Select::new(["選択できません"], 0, cx).disabled(true));
+        let disabled_select =
+            cx.new(|cx| Select::new(["選択できません"], 0, window, cx).disabled(true));
         let dialog = cx.new(Dialog::new);
         let toast = cx.new(ToastHost::new);
         let subscriptions = vec![
+            cx.subscribe(&composer, |this, _, submitted: &Submitted, cx| {
+                this.submissions.push(submitted.0.clone());
+                this.message("メッセージを送信しました", Tone::Success, cx);
+            }),
             cx.subscribe(&search, |this, _, event: &InputChanged, cx| {
                 this.query = event.text.to_lowercase();
                 cx.notify();
@@ -259,13 +278,15 @@ impl Gallery {
             }),
         ];
         let focus = cx.focus_handle();
-        window.focus(&focus);
+        window.focus(&focus, cx);
         let this = Self {
             page,
             focus,
             search,
             query: String::new(),
             fields,
+            composer,
+            submissions: Vec::new(),
             select,
             disabled_select,
             dialog,
@@ -273,17 +294,13 @@ impl Gallery {
             scrolls: std::array::from_fn(|_| ScrollHandle::new()),
             checked: true,
             switch_on: true,
-            mixed: true,
             radio: 0,
-            radio_focus: std::array::from_fn(|_| cx.focus_handle().tab_stop(true)),
             selected_tab: 0,
             selected_nav: 0,
             progress: 0.64,
             clicks: 0,
             loading: false,
             loading_task: None,
-            probe_focus: cx.focus_handle().tab_stop(true),
-            disabled_focus: cx.focus_handle().tab_stop(false),
             _subscriptions: subscriptions,
             rendered: 0,
         };
@@ -328,7 +345,6 @@ impl Gallery {
         cx.notify();
     }
     fn sidebar(&self, cx: &mut Context<Self>) -> AnyElement {
-        let p = theme(cx);
         let matches: Vec<_> = Page::ALL
             .into_iter()
             .filter(|page| {
@@ -337,162 +353,97 @@ impl Gallery {
                     .contains(&self.query)
             })
             .collect();
-        div()
+        let menu = SidebarMenu::new().children(matches.iter().map(|&page| {
+            SidebarMenuItem::new(page.title())
+                .icon(page.icon().kit())
+                .active(self.page == page)
+                .on_click(cx.listener(move |this, _, _, cx| this.navigate(page, cx)))
+        }));
+        Sidebar::new("gallery-sidebar")
             .w(px(220.))
-            .flex_shrink_0()
             .h_full()
-            .flex()
-            .flex_col()
-            .bg(rgb(p.sidebar))
-            .border_r_1()
-            .border_color(rgb(p.border))
-            .child(
+            .collapsible(false)
+            .header(
                 div()
-                    .h(px(46.))
-                    .flex_shrink_0()
-                    .window_control_area(WindowControlArea::Drag),
-            )
-            .child(
-                div()
-                    .px_5()
-                    .pt_3()
-                    .pb_5()
+                    .w_full()
                     .flex()
-                    .items_center()
-                    .gap_3()
+                    .flex_col()
+                    .gap_4()
+                    .pb_3()
                     .child(
                         div()
-                            .size(px(28.))
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .rounded(px(7.))
-                            .bg(rgb(p.text))
-                            .text_color(rgb(p.sidebar))
-                            .text_size(px(18.))
-                            .font_weight(FontWeight::BOLD)
-                            .child("s"),
+                            .h(px(46.))
+                            .window_control_area(WindowControlArea::Drag),
                     )
                     .child(
                         div()
                             .flex()
-                            .flex_col()
-                            .gap(px(2.))
+                            .items_center()
+                            .gap_3()
+                            .px_2()
+                            .child(avatar("S", Tone::Accent, cx))
                             .child(
                                 div()
-                                    .text_size(px(14.))
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .child("Solo Design"),
-                            )
-                            .child(
-                                div()
-                                    .text_size(px(10.))
-                                    .text_color(rgb(p.muted))
-                                    .child("COMPONENT LIBRARY"),
+                                    .flex()
+                                    .flex_col()
+                                    .gap_1()
+                                    .child(
+                                        div()
+                                            .font_weight(FontWeight::SEMIBOLD)
+                                            .child("Solo Design"),
+                                    )
+                                    .child(label("GPUI Kit 0.6.6", cx)),
                             ),
-                    ),
-            )
-            .child(div().px_3().mb_5().child(self.search.clone()))
-            .child(
-                div()
-                    .px_5()
-                    .mb_2()
-                    .text_size(px(10.))
-                    .font_weight(FontWeight::MEDIUM)
-                    .text_color(rgb(p.muted))
-                    .child("ライブラリ"),
+                    )
+                    .child(self.search.clone()),
             )
             .child(
-                div()
-                    .id("gallery-navigation")
-                    .flex_1()
-                    .min_h_0()
-                    .overflow_y_scroll()
-                    .px_3()
-                    .flex()
-                    .flex_col()
-                    .gap(px(3.))
-                    .children(matches.iter().map(|&page| {
-                        nav_item(
-                            ("page", page as usize),
-                            page.icon(),
-                            page.title(),
-                            self.page == page,
-                            cx,
-                        )
-                        .on_click(cx.listener(move |this, _, _, cx| this.navigate(page, cx)))
-                    }))
-                    .when(matches.is_empty(), |v| {
-                        v.child(
-                            div()
-                                .px_5()
-                                .py_3()
-                                .text_color(rgb(p.muted))
-                                .text_size(px(12.))
-                                .child("該当する項目がありません"),
-                        )
-                    }),
+                SidebarGroup::new(if matches.is_empty() {
+                    "該当する項目がありません"
+                } else {
+                    "ライブラリ"
+                })
+                .child(menu),
             )
-            .child(
+            .footer(
                 div()
-                    .p_4()
+                    .w_full()
                     .flex()
                     .flex_col()
                     .gap_3()
+                    .p_2()
                     .child(
                         div()
                             .flex()
-                            .items_center()
                             .justify_between()
-                            .text_size(px(11.))
-                            .text_color(rgb(p.muted))
-                            .child("Appearance")
+                            .child(label("テーマ", cx))
                             .child(keycap("⌘ ⇧ L", cx)),
                     )
                     .child(
-                        div()
-                            .flex()
-                            .gap_1()
-                            .p_1()
-                            .rounded(px(radius::CONTROL))
-                            .bg(rgb(p.surface))
-                            .children(
-                                [ColorScheme::Light, ColorScheme::Dark]
-                                    .into_iter()
-                                    .enumerate()
-                                    .map(|(i, scheme)| {
-                                        tab(
-                                            ("scheme", i),
-                                            scheme.label(),
-                                            ds::scheme(cx) == scheme,
-                                            cx,
-                                        )
-                                        .with_icon(if scheme == ColorScheme::Dark {
-                                            Icon::Moon
-                                        } else {
-                                            Icon::Sun
-                                        })
-                                        .flex_1()
-                                        .on_click(move |_, _, cx| ds::set_theme(scheme, cx))
-                                    }),
-                            ),
+                        TabBar::new("gallery-appearance")
+                            .segmented()
+                            .small()
+                            .selected_index(usize::from(ds::scheme(cx) == ColorScheme::Dark))
+                            .child(KitTab::new().label("Light"))
+                            .child(KitTab::new().label("Dark"))
+                            .on_click(|index, _, cx| {
+                                ds::set_theme(
+                                    if *index == 0 {
+                                        ColorScheme::Light
+                                    } else {
+                                        ColorScheme::Dark
+                                    },
+                                    cx,
+                                )
+                            }),
                     )
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap_2()
-                            .text_size(px(10.))
-                            .text_color(rgb(p.muted))
-                            .child(div().size(px(5.)).rounded_full().bg(rgb(p.success)))
-                            .child("v0.1  ·  Shared with Solo"),
-                    ),
+                    .child(label("メインアプリと同じコンポーネント", cx)),
             )
             .into_any_element()
     }
 }
 impl Render for Gallery {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.rendered += 1;
         let p = theme(cx);
         let content = match self.page {
@@ -644,10 +595,14 @@ impl Render for Gallery {
                             .text_size(px(10.))
                             .text_color(rgb(p.muted))
                             .child("Tab で移動   ·   Enter / Space で操作   ·   Esc で閉じる")
-                            .child(format!("{} theme  ·  GPUI", ds::scheme(cx).label())),
+                            .child(format!("{} theme  ·  GPUI Kit", ds::scheme(cx).label())),
                     ),
             )
             .child(self.toast.clone())
+            .children(gpui_kit::component::Root::render_dialog_layer(window, cx))
+            .children(gpui_kit::component::Root::render_notification_layer(
+                window, cx,
+            ))
             .child(self.dialog.clone())
     }
 }

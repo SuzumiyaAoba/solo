@@ -1,6 +1,6 @@
 # Solo
 
-Rust + GPUI の agent workspace。[調査の Phase 0](docs/research/analysis/roadmap.md) に沿った、
+Rust + [GPUI Kit](https://gpui-kit.com/) の agent workspace。[調査の Phase 0](docs/research/analysis/roadmap.md) に沿った、
 会話・差分・ログ・セッション・日本語入力とイベント契約の試作です。
 
 GUI では OpenAI Subscription、ACP agent、ローカルの疑似シナリオを選べます。疑似シナリオの
@@ -139,13 +139,16 @@ cargo run --locked --bin solo-design -- --page buttons --light
 ```
 
 テーマ切替は **⌘ Shift L**。仕様・使い方・検証方法は [デザインシステム](docs/design-system.md) を参照してください。
-メインと確認アプリは、同じ `src/design/` の部品と `src/design_tokens.rs` の定義を使います。
+メインと確認アプリは GPUI Kit 0.6.6 の標準部品を共有します。
+`src/design/` が Kit とアプリのイベントを接続し、`src/design_tokens.rs` の配色を
+Kit の Theme に反映します。ボタン、入力、検索付き選択、通知、ダイアログ、Lucide アイコンに加え、
+メイン画面では Sidebar / TabBar / Message / MessageScroller / Resizable / StatusBar を使います。
 
 ## 起動
 
 初期 GUI 検証対象は macOS / Apple Silicon。上記の `nix develop` で必要な環境を用意できます。
 Nix を使わない場合は Rust 1.98.0 と Xcode Command Line Tools を用意してください。
-GPUI 0.2.2 の `runtime_shaders` を使うため、Metal shader は起動時にコンパイルします。
+GPUI Kit が固定する GPUI (`gpui-pre` 0.3.6) の `runtime_shaders` により、Metal shader は起動時にコンパイルします。
 開発用 shader の事前コンパイルに full Xcode を要求しません。
 
 ```sh
@@ -160,9 +163,9 @@ cargo run --locked --bin solo -- --compact
 
 ## 操作
 
-- サイドバーでセッションを作成・切替。入力途中の文章と scroll 位置はセッションごとに保持。
+- サイドバーでセッションを作成・切替。境界をドラッグして幅を調整。入力途中の文章と scroll 位置はセッションごとに保持。
 - 上部で **OpenAI Subscription** または登録した **ACP agent** を選んで送信。疑似シナリオは **会話と差分 / 1万イベント / 10万イベント / 100 MiB ログ / 未知イベント・切断** で再生。
-- **⌘ Enter** または送信ボタンで入力を送信。IME 変換中は送信せず、Enter は変換確定に利用。
+- 実行先の選択欄は名前で検索可能。**⌘ Enter** または送信ボタンで送信、**Enter** で改行。IME 変換中は送信せず、Enter は変換確定に利用。
 - **中止** は要求中と停止確認を分けて表示。**切断を試す** は結果未確認として表示。
 - 会話のコピーボタン、ログ行・差分行のクリックで表示内容をコピー。
 - **全文のパスをコピー** でセッション内のログ一時ファイル一覧を取得。ログは最新1,000件を表示。
@@ -175,7 +178,8 @@ cargo run --locked --bin solo -- --compact
 メイン画面全体がデザインシステムの色・文字・余白を参照します。テーマを切り替えても
 各セッションの下書き・会話の scroll 位置を保持します。`--compact` は820×620で起動します。
 
-入力欄は横スクロールする一行入力です。貼付け時の改行は空白になります。
+入力欄は Kit の Textarea です。2〜5行で高さが変わり、貼付け時の改行を保持します。
+会話を上へスクロールすると末尾追従を止め、「最新のメッセージへ」で再開できます。
 会話は最大1,024 byte の表示 block に分け、block 単位でコピーできます。
 セッションは最大8件。ログ一時ファイルはセッションを閉じるかアプリが正常終了すると削除します。
 crash 後の回収・永続的な履歴は Phase 2 で扱います。
@@ -195,9 +199,9 @@ codex_subscription.rs  ChatGPT OAuth と Codex モデルを使う Model アダ�
 subscription_worker.rs Solo ハーネスの更新から Solo event への変換
 acp.rs         ACP v1 の設定・JSON-RPC 契約
 acp_worker.rs  ACP プロセスと Solo event への変換
-text.rs        UTF-16 / UTF-8、grapheme、IME composition（GPUI 非依存）
+text.rs        UTF-16 / UTF-8、grapheme、IME composition のコア契約（GPUI 非依存）
 ui/            GPUI の Entity・focus・リスト・入力・window寿命
-design/        両アプリで共有する基本コンポーネントとテーマ
+design/        GPUI Kit の部品・入力・テーマと Solo のイベント契約の接続
 gallery/       デザイン確認用アプリのページと操作例
 ```
 
@@ -208,7 +212,7 @@ gallery/       デザイン確認用アプリのページと操作例
 イベント欠落や未完了 tool がある完了通知を成功表示にしません。
 usage/cost は未取得なら `null` /「不明」で、0 に補完しません。
 
-会話は可変高さ `ListState`、ログ・diff は `uniform_list` で可視範囲だけ描画します。
+会話は Kit の `MessageScroller`、ログ・diff は `uniform_list` で可視範囲だけ描画します。
 会話は16,384 block、ログは1,000 preview に制限し、100 MiB の巨大一行は worker で
 4 KiB ごとに退避します。差分は20,000行、各行は2,048 byteまで表示します。
 省略したログは一時ファイルから参照できます。会話の省略分はこの試作では保存しません。

@@ -1,7 +1,8 @@
 mod smoke;
 mod views;
 
-use gpui::{prelude::*, *};
+use gpui_kit::component::message_scroller::MessageScrollerState;
+use gpui_kit::{prelude::*, *};
 use solo::design::{
     self as ds, Button, ButtonVariant, ColorScheme, ControlSize, DesignAssets, Icon, Select,
     Submitted, TextInput as Composer, ToastHost, Tone, space, typography,
@@ -85,50 +86,55 @@ pub fn run() {
     let smoke = args.iter().any(|arg| arg == "--smoke");
     let light = args.iter().any(|arg| arg == "--light");
     let compact = args.iter().any(|arg| arg == "--compact");
-    Application::new().with_assets(DesignAssets).run(move |cx| {
-        ds::init(cx);
-        if light {
-            ds::set_theme(ColorScheme::Light, cx);
-        }
-        cx.bind_keys([
-            KeyBinding::new("cmd-q", Quit, None),
-            KeyBinding::new("cmd-w", CloseWindow, None),
-            KeyBinding::new("cmd-n", NewSession, None),
-            KeyBinding::new("cmd-shift-l", ToggleTheme, None),
-            KeyBinding::new("cmd-1", ShowChat, None),
-            KeyBinding::new("cmd-2", ShowDiff, None),
-            KeyBinding::new("cmd-3", ShowLogs, None),
-        ]);
-        cx.on_action(|_: &Quit, cx| cx.quit());
-        cx.on_window_closed(|cx| {
-            if cx.windows().is_empty() {
-                cx.quit();
+    gpui_kit::application()
+        .with_assets(DesignAssets)
+        .run(move |cx| {
+            ds::init(cx);
+            if light {
+                ds::set_theme(ColorScheme::Light, cx);
             }
-        })
-        .detach();
-        let window_size = if compact {
-            size(px(820.), px(620.))
-        } else {
-            size(px(1240.), px(840.))
-        };
-        let bounds = Bounds::centered(None, window_size, cx);
-        cx.open_window(
-            WindowOptions {
-                window_bounds: Some(WindowBounds::Windowed(bounds)),
-                window_min_size: Some(size(px(820.), px(620.))),
-                titlebar: Some(TitlebarOptions {
-                    title: Some("Solo".into()),
-                    appears_transparent: true,
-                    traffic_light_position: Some(point(px(16.), px(16.))),
-                }),
-                app_id: Some("dev.solo.app".into()),
-                ..Default::default()
-            },
-            |window, cx| cx.new(|cx| Workspace::new(smoke, window, cx)),
-        )
-        .expect("Solo の window を開けませんでした");
-        cx.activate(true);
-    });
+            cx.bind_keys([
+                KeyBinding::new("cmd-q", Quit, None),
+                KeyBinding::new("cmd-w", CloseWindow, None),
+                KeyBinding::new("cmd-n", NewSession, None),
+                KeyBinding::new("cmd-shift-l", ToggleTheme, None),
+                KeyBinding::new("cmd-1", ShowChat, None),
+                KeyBinding::new("cmd-2", ShowDiff, None),
+                KeyBinding::new("cmd-3", ShowLogs, None),
+            ]);
+            cx.on_action(|_: &Quit, cx| cx.quit());
+            cx.on_window_closed(|cx, _| {
+                if cx.windows().is_empty() {
+                    cx.quit();
+                }
+            })
+            .detach();
+            let window_size = if compact {
+                size(px(820.), px(620.))
+            } else {
+                size(px(1240.), px(840.))
+            };
+            let bounds = Bounds::centered(None, window_size, cx);
+            cx.open_window(
+                WindowOptions {
+                    window_bounds: Some(WindowBounds::Windowed(bounds)),
+                    window_min_size: Some(size(px(820.), px(620.))),
+                    titlebar: Some(TitlebarOptions {
+                        title: Some("Solo".into()),
+                        appears_transparent: true,
+                        traffic_light_position: Some(point(px(16.), px(16.))),
+                    }),
+                    app_id: Some("dev.solo.app".into()),
+                    ..Default::default()
+                },
+                |window, cx| {
+                    let view = cx.new(|cx| Workspace::new(smoke, window, cx));
+                    cx.new(|cx| gpui_kit::component::Root::new(view, window, cx))
+                },
+            )
+            .expect("Solo の window を開けませんでした");
+            cx.activate(true);
+        });
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -141,7 +147,7 @@ enum Tab {
 struct SessionView {
     model: Session,
     composer: Entity<Composer>,
-    chat_list: ListState,
+    chat_list: Entity<MessageScrollerState>,
     log_scroll: UniformListScrollHandle,
     diff_scroll: UniformListScrollHandle,
     diff_index: usize,
@@ -202,7 +208,7 @@ impl Workspace {
             )
             .chain(SCENARIOS.iter().map(|scenario| scenario.label().to_owned()))
             .collect::<Vec<_>>();
-        let scenario_picker = cx.new(|cx| Select::new(choices, 0, cx));
+        let scenario_picker = cx.new(|cx| Select::new(choices, 0, window, cx));
         let picker_subscription = cx.subscribe(
             &scenario_picker,
             |this, _, selected: &solo::design::SelectionChanged, cx| {
@@ -224,11 +230,11 @@ impl Workspace {
             show_metrics: false,
             rendered: 0,
         };
-        this.new_session(cx);
+        this.new_session(window, cx);
         if let Some(error) = config_error {
             this.message = error;
         }
-        window.focus(&this.sessions[0].composer.focus_handle(cx));
+        window.focus(&this.sessions[0].composer.focus_handle(cx), cx);
         if smoke {
             this.start_mock(
                 0,
@@ -241,7 +247,7 @@ impl Workspace {
         this
     }
 
-    fn new_session(&mut self, cx: &mut Context<Self>) {
+    fn new_session(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.sessions.len() >= 8 {
             self.message = "最大8セッションです。不要なセッションを閉じてください。".into();
             cx.notify();
@@ -250,7 +256,7 @@ impl Workspace {
         self.serial += 1;
         let id = format!("session-{}", self.serial);
         let composer = cx.new(|cx| {
-            Composer::new(cx)
+            Composer::multiline(window, cx)
                 .control_size(ControlSize::Large)
                 .clear_on_submit(true)
         });
@@ -265,7 +271,7 @@ impl Workspace {
         self.sessions.push(SessionView {
             model,
             composer,
-            chat_list: ListState::new(0, ListAlignment::Bottom, px(300.)),
+            chat_list: cx.new(|cx| MessageScrollerState::new(0, cx)),
             log_scroll: UniformListScrollHandle::new(),
             diff_scroll: UniformListScrollHandle::new(),
             diff_index: 0,
@@ -308,7 +314,7 @@ impl Workspace {
             })
         {
             self.sessions[index].composer.update(cx, |input, cx| {
-                input.buffer.replace(None, &prompt);
+                input.set_value(prompt.clone(), cx);
                 cx.notify();
             });
             self.message =
@@ -327,7 +333,7 @@ impl Workspace {
             && self.sessions[index].backend_id.as_deref() != Some(requested.as_str())
         {
             self.sessions[index].composer.update(cx, |input, cx| {
-                input.buffer.replace(None, &prompt);
+                input.set_value(prompt.clone(), cx);
                 cx.notify();
             });
             self.message = "実行先を切り替えるには新しいセッションを作成してください".into();
@@ -372,7 +378,7 @@ impl Workspace {
             Ok(stream) => stream,
             Err(error) => {
                 session.composer.update(cx, |input, cx| {
-                    input.buffer.replace(None, &prompt);
+                    input.set_value(prompt.clone(), cx);
                     cx.notify();
                 });
                 self.message = format!("疑似ストリームを開始できませんでした: {error}");
@@ -434,7 +440,7 @@ impl Workspace {
             Ok(stream) => stream,
             Err(error) => {
                 session.composer.update(cx, |input, cx| {
-                    input.buffer.replace(None, &prompt);
+                    input.set_value(prompt.clone(), cx);
                     cx.notify();
                 });
                 self.message = format!("Solo ハーネスを開始できませんでした: {error}");
@@ -534,7 +540,7 @@ impl Workspace {
         if let Some(UiController::Acp(controller)) = &session.controller {
             if let Err(error) = controller.prompt(prompt.clone()) {
                 session.composer.update(cx, |input, cx| {
-                    input.buffer.replace(None, &prompt);
+                    input.set_value(prompt.clone(), cx);
                     cx.notify();
                 });
                 self.message = error.to_string();
@@ -553,7 +559,7 @@ impl Workspace {
                 Ok(stream) => stream,
                 Err(error) => {
                     session.composer.update(cx, |input, cx| {
-                        input.buffer.replace(None, &prompt);
+                        input.set_value(prompt.clone(), cx);
                         cx.notify();
                     });
                     self.message = format!("ACP agent を起動できません: {error}");
@@ -753,13 +759,15 @@ impl Workspace {
         }
         let discarded = session.model.chat_discarded - old_discarded;
         if discarded > 0 {
-            session.chat_list.splice(0..discarded.min(old_len), 0);
+            session
+                .chat_list
+                .update(cx, |list, cx| list.splice(0..discarded.min(old_len), 0, cx));
         }
         let old_len = old_len.saturating_sub(discarded);
         let from = old_len.saturating_sub(1);
-        session
-            .chat_list
-            .splice(from..old_len, session.model.chat.len() - from);
+        session.chat_list.update(cx, |list, cx| {
+            list.splice(from..old_len, session.model.chat.len() - from, cx)
+        });
         if session.follow_logs && !session.model.logs.is_empty() {
             session
                 .log_scroll
@@ -816,7 +824,7 @@ impl Workspace {
             picker.close(cx);
         });
         self.sync_controls(cx);
-        window.focus(&self.sessions[index].composer.focus_handle(cx));
+        window.focus(&self.sessions[index].composer.focus_handle(cx), cx);
         cx.notify();
     }
 
@@ -824,12 +832,11 @@ impl Workspace {
         self.sessions.remove(self.selected);
         self.selected = self.selected.saturating_sub(1);
         if self.sessions.is_empty() {
-            self.new_session(cx);
+            self.new_session(window, cx);
         }
         self.message.clear();
-        self.sync_controls(cx);
-        window.focus(&self.sessions[self.selected].composer.focus_handle(cx));
-        cx.notify();
+        let id = self.sessions[self.selected].model.id.clone();
+        self.select_session(&id, window, cx);
     }
 
     fn show_tab(&mut self, tab: Tab, cx: &mut Context<Self>) {

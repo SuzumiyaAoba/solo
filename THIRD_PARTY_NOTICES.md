@@ -1,21 +1,22 @@
 # Third-party notices
 
-`src/design/input.rs` の TextElement の layout / painting は、GPUI 0.2.2 の
-`examples/input.rs` を参照・改変しています。
+UI は [GPUI Kit](https://gpui-kit.com/) 0.6.6 を使用しています。
+Kit が対応する `gpui-pre` 0.3.6、gpui-base、gpui-component と assets をまとめて提供します。
+旧 GPUI input example を基にした独自 TextElement は廃止し、入力処理も Kit に委ねています。
 
-- Copyright 2022–2025 Zed Industries, Inc.
-- Apache License 2.0: [license text](licenses/GPUI-APACHE-2.0.txt)
-- Source: https://docs.rs/crate/gpui/0.2.2/source/examples/input.rs
-- 変更: Unicode buffer の分離、IME 選択範囲の修正、横スクロール、focus、送信、配色。
+- GPUI Kit / GPUI: Apache-2.0 ([license text](licenses/GPUI-APACHE-2.0.txt))
+- Source: https://github.com/longbridge/gpui-kit/tree/v0.6.6
+- Lucide icons: ISC。Feather 由来のアイコンは MIT。
+  [同梱ライセンス](licenses/LUCIDE-LICENSE.txt) / [公式出典](https://lucide.dev/license)
 
 直接依存は `Cargo.toml` で完全固定し、推移的依存は `Cargo.lock` で固定します。
 各依存の package metadata 上の license は以下のとおりです。
 
 | Crate | Version | License |
 | --- | --- | --- |
-| gpui | 0.2.2 | Apache-2.0 |
+| gpui-kit | 0.6.6 | Apache-2.0 |
 | async-channel | 2.5.0 | Apache-2.0 OR MIT |
-| futures | 0.3.31 | MIT OR Apache-2.0 |
+| futures | 0.3.34 | MIT OR Apache-2.0 |
 | genai-agentprism | 0.7.0-beta.19.1-agentprism | MIT OR Apache-2.0 |
 | serde | 1.0.229 | MIT OR Apache-2.0 |
 | serde_json | 1.0.151 | MIT OR Apache-2.0 |

@@ -1,4 +1,13 @@
 use super::*;
+use gpui_kit::component::{
+    Sizable, h_resizable,
+    message::{Message as KitMessage, MessageContent, MessageHeader},
+    message_scroller::MessageScroller,
+    resizable_panel,
+    sidebar::{Sidebar, SidebarGroup, SidebarMenu, SidebarMenuItem},
+    status_bar::StatusBar,
+    tab::{Tab as KitTab, TabBar},
+};
 
 const TITLEBAR_HEIGHT: f32 = 46.;
 const SIDEBAR_WIDTH: f32 = 220.;
@@ -6,170 +15,116 @@ const SIDEBAR_WIDTH: f32 = 220.;
 impl Workspace {
     fn sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let p = ds::theme(cx);
-        let active = self
-            .sessions
-            .iter()
-            .filter(|session| session.model.status.is_active())
-            .count();
-        let navigation = div()
-            .id("sessions")
-            .flex_1()
-            .min_h_0()
-            .overflow_y_scroll()
-            .px(px(space::MD))
-            .flex()
-            .flex_col()
-            .gap(px(space::XS))
-            .children(self.sessions.iter().enumerate().map(|(index, session)| {
-                let id = session.model.id.clone();
-                ds::nav_item(
-                    ("session", index),
-                    status_icon(session.model.status),
-                    session.model.title.clone(),
-                    index == self.selected,
-                    cx,
-                )
-                .tooltip(format!(
-                    "{} · {}",
-                    session.model.title,
-                    session.model.status.label()
-                ))
+        let menu = SidebarMenu::new().children(self.sessions.iter().map(|session| {
+            let id = session.model.id.clone();
+            let active = session.model.id == self.sessions[self.selected].model.id;
+            let status = session.model.status;
+            SidebarMenuItem::new(session.model.title.clone())
+                .icon(status_icon(status).kit())
+                .active(active)
                 .on_click(
                     cx.listener(move |this, _, window, cx| this.select_session(&id, window, cx)),
                 )
-            }));
-        let appearance = div()
-            .p(px(space::LG))
-            .flex()
-            .flex_col()
-            .gap(px(space::MD))
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .child(caption("テーマ", cx))
-                    .child(ds::keycap("⌘ ⇧ L", cx)),
-            )
-            .child(
-                div()
-                    .flex()
-                    .gap(px(space::XS))
-                    .p(px(space::XS))
-                    .rounded(px(ds::radius::CONTROL))
-                    .bg(rgb(p.surface))
-                    .children(
-                        [ColorScheme::Light, ColorScheme::Dark]
-                            .into_iter()
-                            .enumerate()
-                            .map(|(i, scheme)| {
-                                ds::tab(
-                                    ("appearance", i),
-                                    scheme.label(),
-                                    ds::scheme(cx) == scheme,
-                                    cx,
-                                )
-                                .with_icon(if scheme == ColorScheme::Dark {
-                                    Icon::Moon
-                                } else {
-                                    Icon::Sun
-                                })
-                                .flex_1()
-                                .on_click(move |_, _, cx| ds::set_theme(scheme, cx))
-                            }),
-                    ),
-            )
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(space::SM))
-                    .child(Icon::Info.view(p.muted))
-                    .child(caption("Subscription / ACP / ローカルデモ", cx)),
-            );
-        div()
-            .w(px(SIDEBAR_WIDTH))
+        }));
+        Sidebar::new("workspace-sidebar")
+            .w_full()
             .h_full()
-            .flex_shrink_0()
-            .flex()
-            .flex_col()
-            .bg(rgb(p.sidebar))
-            .border_r_1()
-            .border_color(rgb(p.border))
-            .child(
+            .collapsible(false)
+            .header(
                 div()
-                    .h(px(TITLEBAR_HEIGHT))
-                    .flex_shrink_0()
-                    .window_control_area(WindowControlArea::Drag),
-            )
-            .child(
-                div()
-                    .px(px(space::LG))
-                    .pt(px(space::MD))
-                    .pb(px(space::XL))
+                    .w_full()
                     .flex()
-                    .items_center()
-                    .gap(px(space::MD))
+                    .flex_col()
+                    .gap_4()
+                    .pb_3()
                     .child(
                         div()
-                            .size(px(ControlSize::Small.height()))
-                            .rounded(px(ds::radius::CONTROL))
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .bg(rgb(p.text))
-                            .text_color(rgb(p.sidebar))
-                            .text_size(px(typography::HEADING))
-                            .font_weight(FontWeight::BOLD)
-                            .child("s"),
+                            .h(px(TITLEBAR_HEIGHT))
+                            .window_control_area(WindowControlArea::Drag),
                     )
                     .child(
                         div()
-                            .min_w_0()
-                            .flex_1()
                             .flex()
-                            .flex_col()
-                            .gap(px(space::XS))
+                            .items_center()
+                            .gap_3()
+                            .px_2()
+                            .child(ds::avatar("S", Tone::Accent, cx))
                             .child(
                                 div()
-                                    .text_size(px(typography::LEAD))
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .child("Solo"),
-                            )
-                            .child(caption(self.workspace_name.clone(), cx).truncate()),
+                                    .flex()
+                                    .flex_col()
+                                    .gap_1()
+                                    .min_w_0()
+                                    .child(
+                                        div()
+                                            .text_size(px(typography::LEAD))
+                                            .font_weight(FontWeight::SEMIBOLD)
+                                            .child("Solo"),
+                                    )
+                                    .child(caption(self.workspace_name.clone(), cx).truncate()),
+                            ),
+                    )
+                    .child(
+                        Button::new("new-session", "新しいセッション")
+                            .with_icon(Icon::Plus)
+                            .w_full()
+                            .justify_start()
+                            .tooltip("新しいセッション · ⌘ N")
+                            .disabled(self.sessions.len() >= 8)
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.new_session(window, cx);
+                                window.focus(
+                                    &this.sessions[this.selected].composer.focus_handle(cx),
+                                    cx,
+                                );
+                            })),
                     ),
             )
             .child(
-                div().px(px(space::MD)).pb(px(space::XL)).child(
-                    Button::new("new-session", "新しいセッション")
-                        .with_icon(Icon::Plus)
-                        .w_full()
-                        .justify_start()
-                        .tooltip("新しいセッション · ⌘ N")
-                        .disabled(self.sessions.len() >= 8)
-                        .on_click(cx.listener(|this, _, window, cx| {
-                            this.new_session(cx);
-                            window.focus(&this.sessions[this.selected].composer.focus_handle(cx));
-                        })),
-                ),
+                SidebarGroup::new(format!("セッション  {} / 8", self.sessions.len())).child(menu),
             )
-            .child(
+            .footer(
                 div()
-                    .px(px(space::LG))
-                    .pb(px(space::SM))
+                    .w_full()
                     .flex()
-                    .items_center()
-                    .justify_between()
-                    .child(caption(
-                        format!("セッション  {} / 8", self.sessions.len()),
-                        cx,
-                    ))
-                    .when(active > 0, |v| {
-                        v.child(ds::badge(format!("受信中 {active}"), Tone::Accent, cx))
-                    }),
+                    .flex_col()
+                    .gap_3()
+                    .p_2()
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .child(caption("テーマ", cx))
+                            .child(ds::keycap("⌘ ⇧ L", cx)),
+                    )
+                    .child(
+                        TabBar::new("appearance")
+                            .segmented()
+                            .small()
+                            .selected_index(usize::from(ds::scheme(cx) == ColorScheme::Dark))
+                            .child(KitTab::new().label("Light"))
+                            .child(KitTab::new().label("Dark"))
+                            .on_click(|index, _, cx| {
+                                ds::set_theme(
+                                    if *index == 0 {
+                                        ColorScheme::Light
+                                    } else {
+                                        ColorScheme::Dark
+                                    },
+                                    cx,
+                                )
+                            }),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .gap_2()
+                            .items_center()
+                            .child(Icon::Folder.view(p.muted))
+                            .child(caption("Subscription / ACP / デモ", cx)),
+                    ),
             )
-            .child(navigation)
-            .child(appearance)
     }
 
     fn header(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -257,24 +212,16 @@ impl Workspace {
             .border_b_1()
             .border_color(rgb(p.border))
             .child(
-                div().flex().gap(px(space::XS)).children(
-                    [
-                        (Tab::Chat, "会話".to_owned(), "会話 · ⌘ 1"),
-                        (
-                            Tab::Diff,
-                            format!("差分 {}", session.model.diffs.len()),
-                            "差分 · ⌘ 2",
-                        ),
-                        (Tab::Logs, "ログ".into(), "ログ · ⌘ 3"),
-                    ]
-                    .into_iter()
-                    .enumerate()
-                    .map(|(i, (tab, label, tooltip))| {
-                        ds::tab(("tab", i), label, session.tab == tab, cx)
-                            .tooltip(tooltip)
-                            .on_click(cx.listener(move |this, _, _, cx| this.show_tab(tab, cx)))
-                    }),
-                ),
+                TabBar::new("workspace-tabs")
+                    .underline()
+                    .small()
+                    .selected_index(session.tab as usize)
+                    .child(KitTab::new().label("会話"))
+                    .child(KitTab::new().label(format!("差分 {}", session.model.diffs.len())))
+                    .child(KitTab::new().label("ログ"))
+                    .on_click(cx.listener(|this, index: &usize, _, cx| {
+                        this.show_tab([Tab::Chat, Tab::Diff, Tab::Logs][*index], cx);
+                    })),
             )
             .child(
                 div()
@@ -400,78 +347,88 @@ impl Workspace {
         }
         let weak = cx.weak_entity();
         let session_id = session.model.id.clone();
-        list(session.chat_list.clone(), move |row, _, cx| {
-            let Some(view) = weak.upgrade() else {
-                return div().into_any_element();
-            };
-            let Some(block) = view
-                .read(cx)
-                .sessions
-                .iter()
-                .find(|s| s.model.id == session_id)
-                .and_then(|s| s.model.chat.get(row))
-            else {
-                return div().into_any_element();
-            };
-            let p = ds::theme(cx);
-            let copy = block.text.clone();
-            let callback_view = weak.clone();
-            let copy_button = Button::icon(("copy-chat", row), Icon::Copy, "この部分をコピー")
-                .control_size(ControlSize::Small)
-                .on_click(move |_, _, cx| {
-                    let _ = callback_view.update(cx, |this, cx| {
-                        this.copy(copy.clone(), "本文をコピーしました", cx)
+        MessageScroller::new(
+            "conversation",
+            session.chat_list.clone(),
+            move |row, _, cx| {
+                let Some(view) = weak.upgrade() else {
+                    return div().into_any_element();
+                };
+                let Some(block) = view
+                    .read(cx)
+                    .sessions
+                    .iter()
+                    .find(|s| s.model.id == session_id)
+                    .and_then(|s| s.model.chat.get(row))
+                else {
+                    return div().into_any_element();
+                };
+                let p = ds::theme(cx);
+                let copy = block.text.clone();
+                let callback_view = weak.clone();
+                let copy_button = Button::icon(("copy-chat", row), Icon::Copy, "この部分をコピー")
+                    .control_size(ControlSize::Small)
+                    .on_click(move |_, _, cx| {
+                        let _ = callback_view.update(cx, |this, cx| {
+                            this.copy(copy.clone(), "本文をコピーしました", cx)
+                        });
                     });
-                });
-            let (name, initial, tone) = match block.speaker {
-                Speaker::User => ("あなた", "You", Tone::Neutral),
-                Speaker::Assistant => ("Solo", "S", Tone::Accent),
-                Speaker::Notice => ("状態の更新", "", Tone::Neutral),
-            };
-            let body = if block.speaker == Speaker::Notice {
-                ds::alert(name, block.text.clone(), tone, cx)
-                    .child(copy_button)
+                let (name, initial, tone) = match block.speaker {
+                    Speaker::User => ("あなた", "You", Tone::Neutral),
+                    Speaker::Assistant => ("Solo", "S", Tone::Accent),
+                    Speaker::Notice => ("状態の更新", "", Tone::Neutral),
+                };
+                let body = if block.speaker == Speaker::Notice {
+                    ds::alert(name, block.text.clone(), tone, cx)
+                        .child(copy_button)
+                        .into_any_element()
+                } else {
+                    KitMessage::new()
+                        .w_full()
+                        .avatar(ds::avatar(initial, tone, cx))
+                        .header(
+                            MessageHeader::new()
+                                .justify_between()
+                                .child(
+                                    div()
+                                        .flex()
+                                        .items_center()
+                                        .gap_2()
+                                        .child(div().font_weight(FontWeight::MEDIUM).child(name))
+                                        .when(
+                                            block.speaker == Speaker::Assistant
+                                                && view
+                                                    .read(cx)
+                                                    .sessions
+                                                    .iter()
+                                                    .find(|s| s.model.id == session_id)
+                                                    .is_some_and(|s| {
+                                                        !s.is_subscription && !s.is_acp
+                                                    }),
+                                            |v| v.child(ds::badge("疑似応答", Tone::Neutral, cx)),
+                                        ),
+                                )
+                                .child(copy_button),
+                        )
+                        .content(
+                            MessageContent::new()
+                                .w_full()
+                                .text_size(px(typography::LEAD))
+                                .line_height(px(typography::LEAD + space::SM))
+                                .text_color(rgb(p.text))
+                                .child(block.text.clone()),
+                        )
+                        .into_any_element()
+                };
+                div()
+                    .w_full()
+                    .px(px(space::XL))
+                    .py(px(space::SM))
+                    .child(div().w_full().max_w(px(840.)).mx_auto().child(body))
                     .into_any_element()
-            } else {
-                ds::card(cx)
-                    .p(px(space::LG))
-                    .gap(px(space::MD))
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .justify_between()
-                            .gap(px(space::SM))
-                            .child(
-                                div()
-                                    .flex()
-                                    .items_center()
-                                    .gap(px(space::SM))
-                                    .child(ds::avatar(initial, tone, cx))
-                                    .child(div().font_weight(FontWeight::MEDIUM).child(name))
-                                    .when(block.speaker == Speaker::Assistant, |v| {
-                                        v.child(ds::badge("疑似応答", Tone::Neutral, cx))
-                                    }),
-                            )
-                            .child(copy_button),
-                    )
-                    .child(
-                        div()
-                            .w_full()
-                            .text_size(px(typography::LEAD))
-                            .line_height(px(typography::LEAD + space::SM))
-                            .text_color(rgb(p.text))
-                            .child(block.text.clone()),
-                    )
-                    .into_any_element()
-            };
-            div()
-                .w_full()
-                .px(px(space::XL))
-                .py(px(space::SM))
-                .child(div().w_full().max_w(px(840.)).mx_auto().child(body))
-                .into_any_element()
-        })
+            },
+        )
+        .with_jump_button_label("最新のメッセージへ")
         .size_full()
         .into_any_element()
     }
@@ -636,7 +593,7 @@ impl Workspace {
                             .collect()
                     }),
                 )
-                .track_scroll(session.log_scroll.clone())
+                .track_scroll(&session.log_scroll)
                 .flex_1()
                 .min_h_0(),
             )
@@ -667,16 +624,25 @@ impl Workspace {
                     .flex()
                     .flex_wrap()
                     .gap(px(space::SM))
-                    .children(s.model.diffs.iter().enumerate().map(|(i, diff)| {
-                        ds::tab(("diff-file", i), diff.path.clone(), s.diff_index == i, cx)
-                            .with_icon(Icon::Folder)
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                let s = &mut this.sessions[this.selected];
-                                s.diff_index = i;
-                                s.diff_scroll = UniformListScrollHandle::new();
+                    .child(
+                        TabBar::new("diff-files")
+                            .underline()
+                            .small()
+                            .max_width(px(240.))
+                            .selected_index(s.diff_index)
+                            .children(
+                                s.model
+                                    .diffs
+                                    .iter()
+                                    .map(|diff| KitTab::new().label(diff.path.clone())),
+                            )
+                            .on_click(cx.listener(|this, index: &usize, _, cx| {
+                                let session = &mut this.sessions[this.selected];
+                                session.diff_index = *index;
+                                session.diff_scroll = UniformListScrollHandle::new();
                                 cx.notify();
-                            }))
-                    })),
+                            })),
+                    ),
             )
             .child(
                 div()
@@ -760,7 +726,7 @@ impl Workspace {
                             .collect()
                     }),
                 )
-                .track_scroll(s.diff_scroll.clone())
+                .track_scroll(&s.diff_scroll)
                 .flex_1()
                 .min_h_0(),
             )
@@ -862,7 +828,7 @@ impl Workspace {
                                     .items_center()
                                     .gap(px(space::SM))
                                     .child(ds::keycap("⌘ ↵", cx))
-                                    .child(caption("送信 · 変換中は確定後に送信", cx)),
+                                    .child(caption("送信 · Enter で改行", cx)),
                             )
                             .child(
                                 div()
@@ -906,8 +872,8 @@ impl Workspace {
                                             .trailing_icon(Icon::ArrowRight)
                                             .control_size(ControlSize::Small)
                                             .disabled(active)
-                                            .on_click(move |_, _, cx| {
-                                                composer.update(cx, |input, cx| input.submit(cx))
+                                            .on_click(move |_, window, cx| {
+                                                composer.update(cx, |input, cx| input.submit(window, cx))
                                             }),
                                     ),
                             ),
@@ -940,18 +906,13 @@ impl Workspace {
                 )))
             })
             .child(
-                div()
-                    .flex()
-                    .flex_wrap()
-                    .items_center()
-                    .justify_between()
-                    .gap(px(space::SM))
-                    .child(caption(format!("受信 {} 件", s.model.accepted), cx))
-                    .child(
+                StatusBar::new()
+                    .left(caption(format!("受信 {} 件", s.model.accepted), cx))
+                    .right(
                         div()
                             .flex()
                             .items_center()
-                            .gap(px(space::MD))
+                            .gap_3()
                             .child(caption(
                                 format!(
                                     "トークン {} / {} · コスト {}",
@@ -981,7 +942,7 @@ impl Workspace {
 }
 
 impl Render for Workspace {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.rendered += 1;
         let session = &self.sessions[self.selected];
         let pane = match session.tab {
@@ -995,37 +956,53 @@ impl Render for Workspace {
             .on_action(|_: &CloseWindow, window, _| window.remove_window())
             .on_action(|_: &ToggleTheme, _, cx| ds::set_theme(ds::scheme(cx).opposite(), cx))
             .on_action(cx.listener(|this, _: &NewSession, window, cx| {
-                this.new_session(cx);
-                window.focus(&this.sessions[this.selected].composer.focus_handle(cx));
+                this.new_session(window, cx);
+                window.focus(&this.sessions[this.selected].composer.focus_handle(cx), cx);
             }))
             .on_action(cx.listener(|this, _: &ShowChat, _, cx| this.show_tab(Tab::Chat, cx)))
             .on_action(cx.listener(|this, _: &ShowDiff, _, cx| this.show_tab(Tab::Diff, cx)))
             .on_action(cx.listener(|this, _: &ShowLogs, _, cx| this.show_tab(Tab::Logs, cx)))
-            .child(self.sidebar(cx))
             .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .h_full()
-                    .flex()
-                    .flex_col()
-                    .child(self.header(cx))
-                    .child(self.toolbar(cx))
-                    .child(self.notices(cx))
-                    .child(div().flex_1().min_h_0().overflow_hidden().child(pane))
-                    .when(session.model.chat_discarded > 0, |v| {
-                        v.child(div().px(px(space::XL)).py(px(space::XS)).child(caption(
-                            format!(
-                                "表示上限のため古い会話を {} 件省略しています",
-                                session.model.chat_discarded
-                            ),
-                            cx,
-                        )))
-                    })
-                    .child(self.composer(cx))
-                    .child(self.footer(cx)),
+                h_resizable("workspace-layout")
+                    .child(
+                        resizable_panel()
+                            .size(px(SIDEBAR_WIDTH))
+                            .size_range(px(190.)..px(340.))
+                            .child(self.sidebar(cx)),
+                    )
+                    .child(
+                        resizable_panel().size_range(px(470.)..px(5000.)).child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .h_full()
+                                .flex()
+                                .flex_col()
+                                .child(self.header(cx))
+                                .child(self.toolbar(cx))
+                                .child(self.notices(cx))
+                                .child(div().flex_1().min_h_0().overflow_hidden().child(pane))
+                                .when(session.model.chat_discarded > 0, |v| {
+                                    v.child(div().px(px(space::XL)).py(px(space::XS)).child(
+                                        caption(
+                                            format!(
+                                                "表示上限のため古い会話を {} 件省略しています",
+                                                session.model.chat_discarded
+                                            ),
+                                            cx,
+                                        ),
+                                    ))
+                                })
+                                .child(self.composer(cx))
+                                .child(self.footer(cx)),
+                        ),
+                    ),
             )
             .child(self.toast.clone())
+            .children(gpui_kit::component::Root::render_dialog_layer(window, cx))
+            .children(gpui_kit::component::Root::render_notification_layer(
+                window, cx,
+            ))
     }
 }
 

@@ -1,5 +1,6 @@
-use super::{ControlSize, Icon, Tone, radius, theme, typography};
-use gpui::{prelude::*, *};
+use super::{ControlSize, Icon, Tone, radius, theme};
+use gpui_kit::component::{self as kit, Disableable, Selectable, Sizable, button::ButtonVariants};
+use gpui_kit::{prelude::*, *};
 use std::rc::Rc;
 
 pub type ClickHandler = Rc<dyn Fn(&ClickEvent, &mut Window, &mut App)>;
@@ -29,13 +30,11 @@ pub struct Button {
     variant: ButtonVariant,
     size: ControlSize,
     disabled: bool,
-    tab_stop: bool,
     loading: bool,
     icon: Option<Icon>,
     icon_only: bool,
     trailing: Option<Icon>,
     tooltip: Option<SharedString>,
-    focus: Option<FocusHandle>,
     preview: PreviewState,
     on_click: Option<ClickHandler>,
     style: StyleRefinement,
@@ -48,13 +47,11 @@ impl Button {
             variant: ButtonVariant::Secondary,
             size: ControlSize::Medium,
             disabled: false,
-            tab_stop: true,
             loading: false,
             icon: None,
             icon_only: false,
             trailing: None,
             tooltip: None,
-            focus: None,
             preview: PreviewState::Rest,
             on_click: None,
             style: StyleRefinement::default(),
@@ -81,10 +78,6 @@ impl Button {
         self.disabled = disabled;
         self
     }
-    pub fn tab_stop(mut self, tab_stop: bool) -> Self {
-        self.tab_stop = tab_stop;
-        self
-    }
     pub fn loading(mut self, loading: bool) -> Self {
         self.loading = loading;
         self
@@ -101,11 +94,7 @@ impl Button {
         self.tooltip = Some(text.into());
         self
     }
-    pub fn focus_handle(mut self, focus: &FocusHandle) -> Self {
-        self.focus = Some(focus.clone());
-        self
-    }
-    /// Gallery の比較用。イベントによる実際の hover/focus も同じスタイルを使う。
+    /// Gallery の静的な状態見本。通常の操作状態は Kit が管理する。
     pub fn preview(mut self, state: PreviewState) -> Self {
         self.preview = state;
         self
@@ -126,106 +115,39 @@ impl Styled for Button {
 impl RenderOnce for Button {
     fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
         let p = theme(cx);
-        let (bg, hover, pressed, fg, border) = match self.variant {
-            ButtonVariant::Primary => (
-                p.accent,
-                p.accent_hover,
-                p.accent_pressed,
-                p.on_accent,
-                p.accent,
-            ),
-            ButtonVariant::Secondary => (p.elevated, p.hover, p.pressed, p.text, p.border),
-            ButtonVariant::Ghost => (p.surface, p.hover, p.pressed, p.secondary, p.surface),
-            ButtonVariant::Danger => (
-                p.danger_solid,
-                0xa42b42,
-                0x8e2036,
-                p.on_accent,
-                p.danger_solid,
-            ),
-        };
-        let blocked = self.disabled || self.loading;
-        let fill = match self.preview {
-            PreviewState::Hover => hover,
-            PreviewState::Pressed => pressed,
-            _ => bg,
-        };
-        let ghost = self.variant == ButtonVariant::Ghost;
-        let mut view = div()
-            .id(self.id)
-            .flex()
-            .items_center()
-            .justify_center()
-            .gap(px(6.))
-            .flex_shrink_0()
+        let mut button = kit::button::Button::new(self.id)
+            .with_variant(match self.variant {
+                ButtonVariant::Primary => kit::button::ButtonVariant::Primary,
+                ButtonVariant::Secondary => kit::button::ButtonVariant::Default,
+                ButtonVariant::Ghost => kit::button::ButtonVariant::Ghost,
+                ButtonVariant::Danger => kit::button::ButtonVariant::Danger,
+            })
+            .with_size(match self.size {
+                ControlSize::Small => kit::Size::Small,
+                ControlSize::Medium => kit::Size::Medium,
+                ControlSize::Large => kit::Size::Large,
+            })
             .h(px(self.size.height()))
-            .px(px(self.size.padding()))
-            .rounded(px(radius::CONTROL))
             .text_size(px(self.size.font_size()))
-            .line_height(px(18.))
-            .font_weight(FontWeight::MEDIUM)
-            .border_1()
-            .border_color(rgb(if self.preview == PreviewState::Focus {
-                p.focus
-            } else {
-                border
-            }))
-            .bg(rgb(fill))
-            .when(ghost && self.preview != PreviewState::Focus, |v| {
-                v.border_color(rgba(0))
+            .when(self.icon_only, |b| b.w(px(self.size.height())))
+            .disabled(self.disabled)
+            .loading(self.loading)
+            .tab_stop(!self.loading)
+            .accessibility_label(self.label.clone())
+            .when(!self.icon_only, |b| b.label(self.label))
+            .when_some(self.icon, |b, icon| b.icon(icon.kit()))
+            .when_some(self.trailing, |b, icon| b.child(icon.kit().size(px(14.))))
+            .when_some(self.tooltip, |b, text| b.tooltip(text))
+            .when(self.preview == PreviewState::Hover, |b| b.bg(rgb(p.hover)))
+            .when(self.preview == PreviewState::Pressed, |b| b.selected(true))
+            .when(self.preview == PreviewState::Focus, |b| {
+                b.border_color(rgb(p.focus))
             })
-            .when(
-                ghost && matches!(self.preview, PreviewState::Rest | PreviewState::Focus),
-                |v| v.bg(rgba(0)),
-            )
-            .text_color(rgb(fg))
-            .when(self.icon_only, |v| v.w(px(self.size.height())).px_0())
-            .when(self.disabled, |v| v.opacity(0.4).cursor_default())
-            .when(!blocked, |v| {
-                v.focusable()
-                    .tab_stop(self.tab_stop)
-                    .cursor_pointer()
-                    .hover(move |s| s.bg(rgb(hover)))
-                    .active(move |s| s.bg(rgb(pressed)))
-                    .focus(move |s| s.border_color(rgb(p.focus)))
-            })
-            .when_some(self.focus, |v, focus| {
-                v.track_focus(&focus).tab_stop(!blocked && self.tab_stop)
-            })
-            .when_some(self.tooltip, |v, text| {
-                v.tooltip(move |_, cx| cx.new(|_| Tooltip(text.clone())).into())
-            })
-            .when(self.loading, |v| v.child(Icon::Spinner.view(fg)))
-            .when(!self.loading, |v| {
-                v.when_some(self.icon, |v, icon| v.child(icon.view(fg)))
-            })
-            .when(!self.icon_only, |v| {
-                v.child(div().min_w_0().truncate().child(self.label))
-            })
-            .when_some(self.trailing, |v, icon| v.child(icon.view(fg)));
-        if !blocked && let Some(handler) = self.on_click {
-            view = view.on_click(move |event, window, cx| handler(event, window, cx));
-        }
-        view.style().refine(&self.style);
-        view
-    }
-}
-
-pub struct Tooltip(pub SharedString);
-impl Render for Tooltip {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let p = theme(cx);
-        div()
-            .px_3()
-            .py_2()
-            .rounded(px(radius::CONTROL))
-            .bg(rgb(p.elevated))
-            .border_1()
-            .border_color(rgb(p.border))
-            .shadow_md()
-            .text_size(px(typography::LABEL))
-            .text_color(rgb(p.text))
-            .child(self.0.clone())
+            .when_some(self.on_click, |b, handler| {
+                b.on_click(move |e, w, cx| handler(e, w, cx))
+            });
+        button.style().refine(&self.style);
+        button
     }
 }
 
@@ -240,11 +162,9 @@ pub struct Toggle {
     id: ElementId,
     label: SharedString,
     checked: bool,
-    mixed: bool,
     disabled: bool,
     kind: ToggleKind,
     on_change: Option<ChangeHandler>,
-    focus: Option<FocusHandle>,
 }
 impl Toggle {
     pub fn new(
@@ -258,10 +178,8 @@ impl Toggle {
             label: label.into(),
             kind,
             checked,
-            mixed: false,
             disabled: false,
             on_change: None,
-            focus: None,
         }
     }
     pub fn checkbox(
@@ -277,16 +195,8 @@ impl Toggle {
     pub fn switch(id: impl Into<ElementId>, label: impl Into<SharedString>, checked: bool) -> Self {
         Self::new(id, label, ToggleKind::Switch, checked)
     }
-    pub fn mixed(mut self, mixed: bool) -> Self {
-        self.mixed = mixed;
-        self
-    }
     pub fn disabled(mut self, disabled: bool) -> Self {
         self.disabled = disabled;
-        self
-    }
-    pub fn focus_handle(mut self, focus: &FocusHandle) -> Self {
-        self.focus = Some(focus.clone());
         self
     }
     pub fn on_change(mut self, handler: impl Fn(&bool, &mut Window, &mut App) + 'static) -> Self {
@@ -295,137 +205,59 @@ impl Toggle {
     }
 }
 impl RenderOnce for Toggle {
-    fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
-        let p = theme(cx);
-        let selected = self.checked || self.mixed;
-        let mark = match self.kind {
-            ToggleKind::Checkbox => div()
-                .size(px(16.))
-                .flex()
-                .items_center()
-                .justify_center()
-                .rounded(px(4.))
-                .border_1()
-                .border_color(rgb(if selected { p.accent } else { p.control_border }))
-                .bg(rgb(if selected { p.accent } else { p.surface }))
-                .when(selected, |v| {
-                    v.child(
-                        if self.mixed { Icon::Minus } else { Icon::Check }
-                            .view(p.on_accent)
-                            .size(px(12.)),
-                    )
-                })
-                .into_any_element(),
-            ToggleKind::Radio => div()
-                .size(px(16.))
-                .flex()
-                .items_center()
-                .justify_center()
-                .rounded_full()
-                .border_1()
-                .border_color(rgb(if selected {
-                    p.accent_text
-                } else {
-                    p.control_border
-                }))
-                .when(selected, |v| {
-                    v.child(div().size(px(8.)).rounded_full().bg(rgb(p.accent_text)))
-                })
-                .into_any_element(),
-            ToggleKind::Switch => div()
-                .w(px(30.))
-                .h(px(18.))
-                .flex()
-                .items_center()
-                .px(px(2.))
-                .rounded_full()
-                .bg(rgb(if selected { p.accent } else { p.control_border }))
-                .when(selected, |v| v.justify_end())
-                .child(div().size(px(14.)).rounded_full().bg(rgb(0xffffff)))
-                .into_any_element(),
+    fn render(self, _: &mut Window, _: &mut App) -> impl IntoElement {
+        let handler = self.on_change;
+        let on_change = move |value: &bool, window: &mut Window, cx: &mut App| {
+            if let Some(handler) = &handler {
+                handler(value, window, cx);
+            }
         };
-        let mut view = div()
-            .id(self.id)
-            .flex()
-            .items_center()
-            .gap_2()
-            .min_h(px(30.))
-            .px(px(3.))
-            .rounded(px(radius::SMALL))
-            .border_1()
-            .border_color(rgba(0))
-            .text_size(px(typography::BODY))
-            .text_color(rgb(p.text))
-            .when(self.disabled, |v| v.opacity(0.4))
-            .when(!self.disabled, |v| {
-                v.focusable()
-                    .tab_stop(true)
-                    .cursor_pointer()
-                    .focus(move |s| s.border_color(rgb(p.focus)))
-            })
-            .when_some(self.focus, |v, focus| {
-                v.track_focus(&focus).tab_stop(!self.disabled)
-            })
-            .child(mark)
-            .child(self.label);
-        if !self.disabled
-            && let Some(handler) = self.on_change
-        {
-            let next = self.kind == ToggleKind::Radio || !self.checked;
-            view = view.on_click(move |_, window, cx| handler(&next, window, cx));
+        match self.kind {
+            ToggleKind::Checkbox => kit::checkbox::Checkbox::new(self.id)
+                .label(self.label)
+                .checked(self.checked)
+                .disabled(self.disabled)
+                .on_change(on_change)
+                .into_any_element(),
+            ToggleKind::Radio => kit::radio::Radio::new(self.id)
+                .label(self.label)
+                .checked(self.checked)
+                .disabled(self.disabled)
+                .on_change(on_change)
+                .into_any_element(),
+            ToggleKind::Switch => kit::switch::Switch::new(self.id)
+                .label(self.label)
+                .checked(self.checked)
+                .disabled(self.disabled)
+                .on_change(on_change)
+                .into_any_element(),
         }
-        view
     }
 }
 
-pub fn badge(label: impl Into<SharedString>, tone: Tone, cx: &App) -> Div {
+pub fn badge(label: impl Into<SharedString>, tone: Tone, cx: &App) -> kit::tag::Tag {
     let (fg, bg) = theme(cx).tone(tone);
-    div()
-        .flex()
-        .items_center()
-        .gap(px(5.))
-        .px_2()
-        .h(px(22.))
-        .rounded(px(radius::SMALL))
-        .bg(rgb(bg))
-        .text_color(rgb(fg))
-        .text_size(px(typography::CAPTION))
-        .font_weight(FontWeight::MEDIUM)
-        .child(div().size(px(5.)).rounded_full().bg(rgb(fg)))
+    kit::tag::Tag::custom(rgb(bg).into(), rgb(fg).into(), rgb(bg).into())
+        .small()
         .child(label.into())
 }
-pub fn avatar(initials: impl Into<SharedString>, tone: Tone, cx: &App) -> Div {
+pub fn avatar(initials: impl Into<SharedString>, tone: Tone, cx: &App) -> kit::avatar::Avatar {
     let (fg, bg) = theme(cx).tone(tone);
-    div()
-        .size(px(28.))
-        .flex_shrink_0()
-        .flex()
-        .items_center()
-        .justify_center()
-        .rounded_full()
+    kit::avatar::Avatar::new()
+        .name(initials)
+        .with_size(px(28.))
         .bg(rgb(bg))
         .text_color(rgb(fg))
-        .text_size(px(11.))
-        .font_weight(FontWeight::MEDIUM)
-        .child(initials.into())
 }
-pub fn keycap(label: impl Into<SharedString>, cx: &App) -> Div {
-    let p = theme(cx);
-    div()
-        .min_w(px(20.))
-        .h(px(21.))
-        .px(px(5.))
-        .flex()
-        .items_center()
-        .justify_center()
-        .rounded(px(4.))
-        .border_1()
-        .border_color(rgb(p.border))
-        .bg(rgb(p.canvas))
-        .text_color(rgb(p.muted))
-        .text_size(px(11.))
-        .font_family(typography::MONO)
-        .child(label.into())
+pub fn keycap(label: impl Into<SharedString>, _: &App) -> kit::kbd::Kbd {
+    let label = label.into();
+    let key = match label.as_ref() {
+        "⌘ ⇧ L" => "cmd-shift-l",
+        "⌘ ↵" => "cmd-enter",
+        "⌘ K" => "cmd-k",
+        _ => label.as_ref(),
+    };
+    kit::kbd::Kbd::new(Keystroke::parse(key).expect("valid shortcut"))
 }
 pub fn card(cx: &App) -> Div {
     let p = theme(cx);
@@ -444,135 +276,52 @@ pub fn divider(cx: &App) -> Div {
         .bg(rgb(theme(cx).border))
         .flex_shrink_0()
 }
-pub fn progress(value: f32, tone: Tone, cx: &App) -> Div {
-    let p = theme(cx);
-    let (color, _) = p.tone(tone);
+pub fn progress(value: f32, tone: Tone, cx: &App) -> kit::progress::Progress {
     let value = if value.is_finite() {
         value.clamp(0., 1.)
     } else {
         0.
     };
-    div()
+    kit::progress::Progress::new("progress")
+        .value(value * 100.)
+        .color(rgb(theme(cx).tone(tone).0))
         .w_full()
-        .h(px(4.))
-        .rounded_full()
-        .bg(rgb(p.hover))
-        .overflow_hidden()
-        .child(
-            div()
-                .h_full()
-                .w(relative(value))
-                .rounded_full()
-                .bg(rgb(color)),
-        )
 }
-pub fn skeleton(width: f32, cx: &App) -> Div {
-    div()
-        .w(px(width))
-        .h(px(10.))
-        .rounded(px(3.))
-        .bg(rgb(theme(cx).hover))
+pub fn skeleton(width: f32, _: &App) -> kit::skeleton::Skeleton {
+    kit::skeleton::Skeleton::new().w(px(width)).h(px(10.))
 }
 pub fn empty_state(
     icon: Icon,
     title: impl Into<SharedString>,
     description: impl Into<SharedString>,
-    cx: &App,
-) -> Div {
-    let p = theme(cx);
-    div()
-        .flex()
-        .flex_col()
-        .items_center()
-        .justify_center()
-        .py_8()
-        .px_6()
-        .gap_3()
-        .child(
-            div()
-                .size(px(40.))
-                .flex()
-                .items_center()
-                .justify_center()
-                .rounded(px(10.))
-                .border_1()
-                .border_color(rgb(p.border))
-                .child(icon.view(p.muted).size(px(20.))),
-        )
-        .child(
-            div()
-                .font_weight(FontWeight::MEDIUM)
-                .text_color(rgb(p.text))
-                .child(title.into()),
-        )
-        .child(
-            div()
-                .text_size(px(12.))
-                .text_color(rgb(p.muted))
-                .child(description.into()),
-        )
+    _: &App,
+) -> kit::empty::Empty {
+    use kit::empty::*;
+    Empty::new().flex_none().header(
+        EmptyHeader::new()
+            .media(EmptyMedia::new().child(icon.kit()))
+            .title(EmptyTitle::new().child(title.into()))
+            .description(EmptyDescription::new().child(description.into())),
+    )
 }
 pub fn alert(
     title: impl Into<SharedString>,
     description: impl Into<SharedString>,
     tone: Tone,
-    cx: &App,
+    _: &App,
 ) -> Div {
-    let (fg, bg) = theme(cx).tone(tone);
-    div()
-        .flex()
-        .gap_3()
-        .p_4()
-        .rounded(px(radius::CONTROL))
-        .bg(rgb(bg))
-        .child(
-            if matches!(tone, Tone::Warning | Tone::Danger) {
-                Icon::Warning
-            } else {
-                Icon::Info
-            }
-            .view(fg),
-        )
-        .child(
-            div()
-                .flex_1()
-                .min_w_0()
-                .flex()
-                .flex_col()
-                .gap_1()
-                .text_color(rgb(fg))
-                .child(div().font_weight(FontWeight::MEDIUM).child(title.into()))
-                .child(div().text_size(px(12.)).child(description.into())),
-        )
-}
-
-/// 選択状態とキーボード操作を Button と共通にする。
-pub fn tab(
-    id: impl Into<ElementId>,
-    label: impl Into<SharedString>,
-    selected: bool,
-    cx: &App,
-) -> Button {
-    let p = theme(cx);
-    Button::new(id, label)
-        .variant(ButtonVariant::Ghost)
-        .control_size(ControlSize::Small)
-        .bg(rgb(if selected { p.hover } else { p.surface }))
-        .text_color(rgb(if selected { p.text } else { p.secondary }))
-}
-pub fn nav_item(
-    id: impl Into<ElementId>,
-    icon: Icon,
-    label: impl Into<SharedString>,
-    selected: bool,
-    cx: &App,
-) -> Button {
-    let p = theme(cx);
-    Button::new(id, label)
-        .variant(ButtonVariant::Ghost)
-        .with_icon(icon)
-        .w_full()
-        .justify_start()
-        .bg(rgb(if selected { p.hover } else { p.sidebar }))
-        .text_color(rgb(if selected { p.text } else { p.secondary }))
+    let title = title.into();
+    let description: SharedString = description.into();
+    let variant = match tone {
+        Tone::Success => kit::alert::AlertVariant::Success,
+        Tone::Warning => kit::alert::AlertVariant::Warning,
+        Tone::Danger => kit::alert::AlertVariant::Error,
+        _ => kit::alert::AlertVariant::Info,
+    };
+    div().flex().items_start().gap_2().child(
+        kit::alert::Alert::new(title.clone(), description)
+            .title(title)
+            .with_variant(variant)
+            .flex_1(),
+    )
 }

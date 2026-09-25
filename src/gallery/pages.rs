@@ -4,7 +4,7 @@ impl Gallery {
     pub(super) fn overview(&self, cx: &mut Context<Self>) -> AnyElement {
         let p = theme(cx);
         stack()
-            .child(row().gap_2().child(badge("Native GPUI", Tone::Neutral, cx)).child(badge("Light & Dark", Tone::Neutral, cx)).child(badge("Keyboard ready", Tone::Neutral, cx)))
+            .child(row().gap_2().child(badge("GPUI Kit 0.6.6", Tone::Neutral, cx)).child(badge("Light & Dark", Tone::Neutral, cx)).child(badge("Keyboard ready", Tone::Neutral, cx)))
             .child(div().flex().gap_5()
                 .child(card(cx).flex_1().min_w_0().p_6().gap_5()
                     .child(div().flex().items_center().justify_between().child(label("COMPONENT COMPOSITION", cx)).child(Icon::Layers.view(p.muted)))
@@ -242,7 +242,7 @@ impl Gallery {
             .child(
                 section(
                     "Iconography",
-                    "16px グリッド、1.4px の線幅。アイコンだけの操作には名前を添える。",
+                    "GPUI Kit の Lucide アイコン。アイコンだけの操作には名前を添える。",
                     cx,
                 )
                 .child(card(cx).p_4().child(row().gap_2().children(
@@ -269,7 +269,7 @@ impl Gallery {
         stack()
             .child(section("Hierarchy", "Primary は主操作にひとつ。補助操作には Secondary、Ghost を使います。", cx)
                 .child(example("Variants", cx).child(row()
-                    .child(Button::new("primary-probe", "新しいセッション").variant(ButtonVariant::Primary).with_icon(Icon::Plus).focus_handle(&self.probe_focus)
+                    .child(Button::new("primary-probe", "新しいセッション").variant(ButtonVariant::Primary).with_icon(Icon::Plus)
                         .on_click(cx.listener(|this, _, _, cx| this.record_click(cx))))
                     .child(Button::new("secondary-example", "変更を保存").with_icon(Icon::Check).on_click(cx.listener(|this, _, _, cx| this.record_click(cx))))
                     .child(Button::new("ghost-example", "詳細を見る").variant(ButtonVariant::Ghost).trailing_icon(Icon::ArrowRight).on_click(cx.listener(|this, _, _, cx| this.record_click(cx))))
@@ -286,7 +286,7 @@ impl Gallery {
                 ].into_iter().enumerate().map(|(i, (name, state))| {
                     div().flex().flex_col().gap_3().child(label(name, cx)).child(Button::new(("state", i), "ボタン").preview(state).on_click(cx.listener(|this, _, _, cx| this.record_click(cx))))
                 }))
-                    .child(div().flex().flex_col().gap_3().child(label("Disabled", cx)).child(Button::new("disabled-probe", "ボタン").disabled(true).focus_handle(&self.disabled_focus)
+                    .child(div().flex().flex_col().gap_3().child(label("Disabled", cx)).child(Button::new("disabled-probe", "ボタン").disabled(true)
                         .on_click(cx.listener(|this, _, _, cx| { this.record_click(cx); }))))
                     .child(div().flex().flex_col().gap_3().child(label("Loading", cx)).child(Button::new("loading-preview", "保存中…").variant(ButtonVariant::Primary).loading(true))))))
             .child(section("Icon buttons & loading", "名前は tooltip で確認できます。保存ボタンは読み込み中の多重実行を防ぎます。", cx)
@@ -384,6 +384,28 @@ impl Gallery {
                     ),
                 ),
             )
+            .child(
+                section(
+                    "Textarea",
+                    "会話と同じ複数行入力。Enter で改行、⌘ Enter で送信します。",
+                    cx,
+                )
+                .child(
+                    card(cx).p_5().gap_3().child(self.composer.clone()).child(
+                        row()
+                            .justify_between()
+                            .child(label(format!("送信済み {} 件", self.submissions.len()), cx))
+                            .child(
+                                Button::new("composer-preview-send", "送信")
+                                    .variant(ButtonVariant::Primary)
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.composer
+                                            .update(cx, |input, cx| input.submit(window, cx))
+                                    })),
+                            ),
+                    ),
+                ),
+            )
             .child(alert(
                 "日本語入力の確認",
                 "変換、候補選択、確定、絵文字・結合文字の削除、コピーと貼付けを試せます。",
@@ -417,21 +439,6 @@ impl Gallery {
                                     .on_change(cx.listener(
                                         |this, value: &bool, _, cx| {
                                             this.checked = *value;
-                                            cx.notify();
-                                        },
-                                    )),
-                                )
-                                .child(
-                                    Toggle::checkbox(
-                                        "check-mixed",
-                                        "一部の項目を選択",
-                                        self.checked && !self.mixed,
-                                    )
-                                    .mixed(self.mixed)
-                                    .on_change(cx.listener(
-                                        |this, value: &bool, _, cx| {
-                                            this.checked = *value;
-                                            this.mixed = false;
                                             cx.notify();
                                         },
                                     )),
@@ -475,33 +482,15 @@ impl Gallery {
                     cx,
                 )
                 .child(
-                    example("表示密度", cx)
-                        .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
-                            let step = match event.keystroke.key.as_str() {
-                                "right" | "down" => 1,
-                                "left" | "up" => 2,
-                                _ => return,
-                            };
-                            this.radio = (this.radio + step) % 3;
-                            this.radio_focus[this.radio].focus(window);
-                            cx.stop_propagation();
-                            cx.notify();
-                        }))
-                        .child(
-                            row().gap_6().children(
-                                ["コンパクト", "標準", "ゆったり"]
-                                    .into_iter()
-                                    .enumerate()
-                                    .map(|(i, text)| {
-                                        Toggle::radio(("radio", i), text, self.radio == i)
-                                            .focus_handle(&self.radio_focus[i])
-                                            .on_change(cx.listener(move |this, _, _, cx| {
-                                                this.radio = i;
-                                                cx.notify();
-                                            }))
-                                    }),
-                            ),
-                        ),
+                    example("表示密度", cx).child(
+                        gpui_kit::component::radio::RadioGroup::horizontal("density")
+                            .selected_index(Some(self.radio))
+                            .children(["コンパクト", "標準", "ゆったり"])
+                            .on_change(cx.listener(|this, index: &usize, _, cx| {
+                                this.radio = *index;
+                                cx.notify();
+                            })),
+                    ),
                 ),
             )
             .child(
@@ -554,15 +543,13 @@ impl Gallery {
                         .p_5()
                         .gap_5()
                         .child(
-                            div()
-                                .flex()
-                                .gap_1()
-                                .children(tabs.into_iter().enumerate().map(|(i, title)| {
-                                    tab(("example-tab", i), title, self.selected_tab == i, cx)
-                                        .on_click(cx.listener(move |this, _, _, cx| {
-                                            this.selected_tab = i;
-                                            cx.notify();
-                                        }))
+                            TabBar::new("gallery-tabs")
+                                .segmented()
+                                .selected_index(self.selected_tab)
+                                .children(tabs.map(|title| KitTab::new().label(title)))
+                                .on_click(cx.listener(|this, index: &usize, _, cx| {
+                                    this.selected_tab = *index;
+                                    cx.notify();
                                 })),
                         )
                         .child(divider(cx))
@@ -601,36 +588,32 @@ impl Gallery {
                             .flex()
                             .gap_6()
                             .child(
-                                div()
+                                Sidebar::new("sidebar-example")
                                     .w(px(220.))
-                                    .p_2()
-                                    .flex()
-                                    .flex_col()
-                                    .gap_1()
-                                    .rounded(px(radius::CONTROL))
-                                    .bg(rgb(p.sidebar))
-                                    .children(
-                                        [
-                                            (Icon::Folder, "Workspace"),
-                                            (Icon::Layers, "Sessions"),
-                                            (Icon::Settings, "Settings"),
-                                        ]
-                                        .into_iter()
-                                        .enumerate()
-                                        .map(
-                                            |(i, (icon, title))| {
-                                                nav_item(
-                                                    ("sample-nav", i),
-                                                    icon,
-                                                    title,
-                                                    self.selected_nav == i,
-                                                    cx,
-                                                )
-                                                .on_click(cx.listener(move |this, _, _, cx| {
-                                                    this.selected_nav = i;
-                                                    cx.notify();
-                                                }))
-                                            },
+                                    .h(px(160.))
+                                    .collapsible(false)
+                                    .child(
+                                        SidebarMenu::new().children(
+                                            [
+                                                (Icon::Folder, "Workspace"),
+                                                (Icon::Layers, "Sessions"),
+                                                (Icon::Settings, "Settings"),
+                                            ]
+                                            .into_iter()
+                                            .enumerate()
+                                            .map(
+                                                |(i, (icon, title))| {
+                                                    SidebarMenuItem::new(title)
+                                                        .icon(icon.kit())
+                                                        .active(self.selected_nav == i)
+                                                        .on_click(cx.listener(
+                                                            move |this, _, _, cx| {
+                                                                this.selected_nav = i;
+                                                                cx.notify();
+                                                            },
+                                                        ))
+                                                },
+                                            ),
                                         ),
                                     ),
                             )
@@ -678,8 +661,7 @@ impl Gallery {
                             .child(Icon::ChevronRight.view(p.disabled).size(px(12.)))
                             .child(div().px_2().child("Design system"))
                             .child(div().flex_1())
-                            .child(keycap("⌘", cx))
-                            .child(keycap("K", cx)),
+                            .child(keycap("⌘ K", cx)),
                     ),
                 ),
             )
@@ -839,7 +821,7 @@ impl Gallery {
             .child(section("Dialog", "背景の操作を止めて確認する。Tab はダイアログ内を移動し、閉じると元の操作へ戻ります。", cx)
                 .child(card(cx).child(empty_state(Icon::Window, "大切な操作を、確かめてから。", "確認・取り消し・フォーカス復帰までをひとつのコンポーネントに。", cx))
                     .child(div().flex().justify_center().gap_3().pb_6()
-                        .child(Button::new("open-dialog", "ダイアログを開く").variant(ButtonVariant::Primary).focus_handle(&self.probe_focus)
+                        .child(Button::new("open-dialog", "ダイアログを開く").variant(ButtonVariant::Primary)
                             .on_click(cx.listener(|this, _, window, cx| this.dialog.update(cx, |dialog, cx| {
                                 dialog.title = "変更を保存しますか？".into(); dialog.description = "ワークスペースの表示設定を保存します。後から設定画面で変更できます。".into(); dialog.confirm_label = "保存する".into(); dialog.destructive = false; dialog.show(window, cx);
                             }))))

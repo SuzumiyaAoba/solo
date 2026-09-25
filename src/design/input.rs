@@ -1,54 +1,20 @@
-// TextElement's layout/painting follows GPUI 0.2.2 examples/input.rs.
-// Copyright 2022–2025 Zed Industries, Inc. Apache-2.0; see THIRD_PARTY_NOTICES.md.
-// Modified: independent Unicode buffer, composition ranges, focus and horizontal scrolling.
-use super::{ControlSize, Icon, radius, theme};
-use crate::text::TextBuffer;
-use gpui::{prelude::*, *};
+//! Input / Textarea の編集、選択、IME、Undo は GPUI Kit に委ねる。
+//! Solo 固有の送信条件と worker からの下書き復元だけをここで扱う。
+use super::{ControlSize, Icon, theme};
+use gpui_kit::component::{
+    Sizable,
+    input::{Input, InputEvent, InputState, Textarea, TextareaState},
+};
+use gpui_kit::{prelude::*, *};
 use std::ops::Range;
 
-actions!(
-    composer,
-    [
-        Backspace,
-        Delete,
-        Left,
-        Right,
-        SelectLeft,
-        SelectRight,
-        SelectAll,
-        Home,
-        End,
-        SelectHome,
-        SelectEnd,
-        Paste,
-        Cut,
-        Copy,
-        Submit,
-        CharacterPalette
-    ]
-);
-
+actions!(solo_input, [Submit]);
 pub fn bind_keys(cx: &mut App) {
-    cx.bind_keys([
-        KeyBinding::new("backspace", Backspace, Some("TextInput")),
-        KeyBinding::new("delete", Delete, Some("TextInput")),
-        KeyBinding::new("left", Left, Some("TextInput")),
-        KeyBinding::new("right", Right, Some("TextInput")),
-        KeyBinding::new("shift-left", SelectLeft, Some("TextInput")),
-        KeyBinding::new("shift-right", SelectRight, Some("TextInput")),
-        KeyBinding::new("cmd-left", Home, Some("TextInput")),
-        KeyBinding::new("cmd-right", End, Some("TextInput")),
-        KeyBinding::new("cmd-shift-left", SelectHome, Some("TextInput")),
-        KeyBinding::new("cmd-shift-right", SelectEnd, Some("TextInput")),
-        KeyBinding::new("home", Home, Some("TextInput")),
-        KeyBinding::new("end", End, Some("TextInput")),
-        KeyBinding::new("cmd-a", SelectAll, Some("TextInput")),
-        KeyBinding::new("cmd-v", Paste, Some("TextInput")),
-        KeyBinding::new("cmd-c", Copy, Some("TextInput")),
-        KeyBinding::new("cmd-x", Cut, Some("TextInput")),
-        KeyBinding::new("cmd-enter", Submit, Some("TextInput")),
-        KeyBinding::new("ctrl-cmd-space", CharacterPalette, Some("TextInput")),
-    ]);
+    cx.bind_keys([KeyBinding::new(
+        "cmd-enter",
+        Submit,
+        Some("SoloInput > Input"),
+    )]);
 }
 
 pub struct Submitted(pub String);
@@ -56,30 +22,78 @@ pub struct InputChanged {
     pub text: String,
     pub composing: bool,
 }
+
+enum State {
+    Single(Entity<InputState>),
+    Multi(Entity<TextareaState>),
+}
+macro_rules! with_state {
+    ($this:expr, $state:ident, $body:expr) => {
+        match &$this.state {
+            State::Single($state) => $body,
+            State::Multi($state) => $body,
+        }
+    };
+}
+
 pub struct TextInput {
-    pub buffer: TextBuffer,
+    state: State,
     pub can_submit: bool,
     pub disabled: bool,
     pub read_only: bool,
     pub invalid: bool,
-    pub placeholder: SharedString,
-    pub size: ControlSize,
-    pub leading: Option<Icon>,
-    pub clear_on_submit: bool,
-    focus: FocusHandle,
-    layout: Option<ShapedLine>,
-    bounds: Option<Bounds<Pixels>>,
-    scroll_x: Pixels,
-    selecting: bool,
+    placeholder: SharedString,
+    size: ControlSize,
+    leading: Option<Icon>,
+    clear_on_submit: bool,
+    pending_value: Option<SharedString>,
+    _subscription: Subscription,
 }
-
 impl EventEmitter<Submitted> for TextInput {}
 impl EventEmitter<InputChanged> for TextInput {}
-
+impl Focusable for TextInput {
+    fn focus_handle(&self, cx: &App) -> FocusHandle {
+        with_state!(self, state, state.focus_handle(cx))
+    }
+}
 impl TextInput {
-    pub fn new(cx: &mut Context<Self>) -> Self {
+    pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let state = State::Single(cx.new(|cx| InputState::new(window, cx)));
+        Self::with_state(state, window, cx)
+    }
+    pub fn multiline(window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let state = State::Multi(cx.new(|cx| TextareaState::new(window, cx).auto_grow(2, 5)));
+        Self::with_state(state, window, cx)
+    }
+    fn with_state(state: State, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        macro_rules! subscribe {
+            ($entity:expr) => {
+                cx.subscribe_in(
+                    $entity,
+                    window,
+                    |this, _, event: &InputEvent, window, cx| match event {
+                        InputEvent::Change => {
+                            let composing = this.marked_text_range(window, cx).is_some();
+                            cx.emit(InputChanged {
+                                text: this.value(cx).to_string(),
+                                composing,
+                            });
+                            cx.notify();
+                        }
+                        InputEvent::PressEnter {
+                            secondary: true, ..
+                        } => this.submit(window, cx),
+                        _ => {}
+                    },
+                )
+            };
+        }
+        let subscription = match &state {
+            State::Single(entity) => subscribe!(entity),
+            State::Multi(entity) => subscribe!(entity),
+        };
         Self {
-            buffer: TextBuffer::default(),
+            state,
             can_submit: true,
             disabled: false,
             read_only: false,
@@ -88,20 +102,16 @@ impl TextInput {
             size: ControlSize::Medium,
             leading: None,
             clear_on_submit: false,
-            focus: cx.focus_handle().tab_stop(true),
-            layout: None,
-            bounds: None,
-            scroll_x: px(0.),
-            selecting: false,
+            pending_value: None,
+            _subscription: subscription,
         }
     }
-
     pub fn placeholder(mut self, text: impl Into<SharedString>) -> Self {
         self.placeholder = text.into();
         self
     }
     pub fn default_value(mut self, text: &str) -> Self {
-        self.buffer.replace(None, text);
+        self.pending_value = Some(text.to_owned().into());
         self
     }
     pub fn control_size(mut self, size: ControlSize) -> Self {
@@ -122,483 +132,139 @@ impl TextInput {
     }
     pub fn disabled(mut self, disabled: bool) -> Self {
         self.disabled = disabled;
-        self.focus = self.focus.tab_stop(!disabled);
         self
     }
     pub fn clear_on_submit(mut self, clear: bool) -> Self {
         self.clear_on_submit = clear;
         self
     }
-    pub fn editable(&self) -> bool {
-        !self.disabled && !self.read_only
+    pub fn value(&self, cx: &App) -> SharedString {
+        self.pending_value
+            .clone()
+            .unwrap_or_else(|| with_state!(self, state, state.read(cx).value()))
     }
-    fn changed(&self, cx: &mut Context<Self>) {
-        cx.emit(InputChanged {
-            text: self.buffer.content.clone(),
-            composing: self.buffer.marked.is_some(),
-        });
+    /// Worker のコールバックからも復元できる。次の描画または入力処理前に適用する。
+    pub fn set_value(&mut self, value: impl Into<SharedString>, cx: &mut Context<Self>) {
+        self.pending_value = Some(value.into());
         cx.notify();
     }
-
-    pub fn submit(&mut self, cx: &mut Context<Self>) {
+    fn sync(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let value = self.pending_value.take();
+        with_state!(
+            self,
+            entity,
+            entity.update(cx, |state, cx| {
+                if let Some(value) = value {
+                    state.set_value(value, window, cx);
+                }
+                state.set_disabled(self.disabled, cx);
+                state.set_readonly(self.read_only, cx);
+                if state.presentation().placeholder() != &self.placeholder {
+                    state.set_placeholder(self.placeholder.clone(), window, cx);
+                }
+            })
+        );
+    }
+    pub fn submit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.sync(window, cx);
         if !self.can_submit
-            || !self.editable()
-            || self.buffer.marked.is_some()
-            || self.buffer.content.trim().is_empty()
+            || self.disabled
+            || self.read_only
+            || self.marked_text_range(window, cx).is_some()
         {
             return;
         }
-        let text = if self.clear_on_submit {
-            self.buffer.take_committed().expect("committed text")
-        } else {
-            self.buffer.content.clone()
-        };
+        let text = self.value(cx).to_string();
+        if text.trim().is_empty() {
+            return;
+        }
         if self.clear_on_submit {
-            self.scroll_x = px(0.);
-            self.changed(cx);
+            self.set_value("", cx);
+            self.sync(window, cx);
+            cx.emit(InputChanged {
+                text: String::new(),
+                composing: false,
+            });
         }
         cx.emit(Submitted(text));
         cx.notify();
     }
-
-    fn index_at(&self, position: Point<Pixels>) -> usize {
-        match (&self.layout, self.bounds) {
-            (Some(line), Some(bounds)) => line
-                .closest_index_for_x(position.x - bounds.left() + self.scroll_x)
-                .min(self.buffer.content.len()),
-            _ => 0,
-        }
-    }
-
-    fn copy(&self, cx: &mut App) {
-        if !self.buffer.selection.is_empty() {
-            cx.write_to_clipboard(ClipboardItem::new_string(
-                self.buffer.content[self.buffer.selection.clone()].into(),
-            ));
-        }
-    }
-}
-
-impl Focusable for TextInput {
-    fn focus_handle(&self, _: &App) -> FocusHandle {
-        self.focus.clone()
-    }
-}
-
-impl EntityInputHandler for TextInput {
-    fn text_for_range(
+    pub fn marked_text_range(
         &mut self,
-        range: Range<usize>,
-        actual: &mut Option<Range<usize>>,
-        _: &mut Window,
-        _: &mut Context<Self>,
-    ) -> Option<String> {
-        let range = self.buffer.range_from_utf16(range);
-        *actual = Some(self.buffer.range_to_utf16(range.clone()));
-        Some(self.buffer.content[range].into())
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<Range<usize>> {
+        with_state!(
+            self,
+            entity,
+            entity.update(cx, |state, cx| state.marked_text_range(window, cx))
+        )
     }
-    fn selected_text_range(
-        &mut self,
-        _: bool,
-        _: &mut Window,
-        _: &mut Context<Self>,
-    ) -> Option<UTF16Selection> {
-        Some(UTF16Selection {
-            range: self.buffer.range_to_utf16(self.buffer.selection.clone()),
-            reversed: self.buffer.reversed,
-        })
-    }
-    fn marked_text_range(&self, _: &mut Window, _: &mut Context<Self>) -> Option<Range<usize>> {
-        self.buffer
-            .marked
-            .clone()
-            .map(|range| self.buffer.range_to_utf16(range))
-    }
-    fn unmark_text(&mut self, _: &mut Window, cx: &mut Context<Self>) {
-        self.buffer.marked = None;
-        self.changed(cx);
-    }
-    fn replace_text_in_range(
+    /// 実際の Kit の native input handler を smoke 検証からも使う。
+    pub fn replace_text_in_range(
         &mut self,
         range: Option<Range<usize>>,
         text: &str,
-        _: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !self.editable() {
-            return;
-        }
-        self.buffer.replace(range, &text.replace(['\n', '\r'], " "));
-        self.changed(cx);
+        self.sync(window, cx);
+        let len = self.value(cx).encode_utf16().count();
+        let range = range.map(|r| r.start.min(len)..r.end.min(len));
+        with_state!(
+            self,
+            entity,
+            entity.update(cx, |state, cx| state
+                .replace_text_in_range(range, text, window, cx))
+        );
     }
-    fn replace_and_mark_text_in_range(
+    pub fn replace_and_mark_text_in_range(
         &mut self,
         range: Option<Range<usize>>,
         text: &str,
         selected: Option<Range<usize>>,
-        _: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !self.editable() {
-            return;
-        }
-        self.buffer.replace_and_mark(range, text, selected);
-        self.changed(cx);
-    }
-    fn bounds_for_range(
-        &mut self,
-        range: Range<usize>,
-        _: Bounds<Pixels>,
-        _: &mut Window,
-        _: &mut Context<Self>,
-    ) -> Option<Bounds<Pixels>> {
-        let bounds = self.bounds?;
-        let line = self.layout.as_ref()?;
-        let range = self.buffer.range_from_utf16(range);
-        Some(Bounds::from_corners(
-            point(
-                bounds.left() + line.x_for_index(range.start) - self.scroll_x,
-                bounds.top(),
-            ),
-            point(
-                bounds.left() + line.x_for_index(range.end) - self.scroll_x + px(1.),
-                bounds.bottom(),
-            ),
-        ))
-    }
-    fn character_index_for_point(
-        &mut self,
-        point: Point<Pixels>,
-        _: &mut Window,
-        _: &mut Context<Self>,
-    ) -> Option<usize> {
-        self.bounds?;
-        Some(crate::text::to_utf16(
-            &self.buffer.content,
-            self.index_at(point),
-        ))
+        self.sync(window, cx);
+        with_state!(
+            self,
+            entity,
+            entity.update(cx, |state, cx| state
+                .replace_and_mark_text_in_range(range, text, selected, window, cx))
+        );
     }
 }
-
 impl Render for TextInput {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.sync(window, cx);
         let p = theme(cx);
-        let invalid = self.invalid;
+        let input = match &self.state {
+            State::Single(state) => Input::new(state)
+                .with_size(match self.size {
+                    ControlSize::Small => gpui_kit::component::Size::Small,
+                    ControlSize::Medium => gpui_kit::component::Size::Medium,
+                    ControlSize::Large => gpui_kit::component::Size::Large,
+                })
+                .h(px(self.size.height()))
+                .w_full()
+                .aria_label(self.placeholder.clone())
+                .disabled(self.disabled)
+                .readonly(self.read_only)
+                .when_some(self.leading, |input, icon| input.prefix(icon.view(p.muted)))
+                .when(self.invalid, |input| input.border_color(rgb(p.danger)))
+                .into_any_element(),
+            State::Multi(state) => Textarea::new(state)
+                .aria_label(self.placeholder.clone())
+                .disabled(self.disabled)
+                .readonly(self.read_only)
+                .w_full()
+                .into_any_element(),
+        };
         div()
-            .id("composer")
-            .key_context("TextInput")
-            .track_focus(&self.focus)
-            .tab_stop(!self.disabled)
-            .cursor(CursorStyle::IBeam)
-            .flex()
-            .items_center()
-            .gap_2()
+            .key_context("SoloInput")
             .w_full()
-            .h(px(self.size.height()))
-            .px(px(self.size.padding()))
-            .py(px((self.size.height() - 22.) / 2.))
-            .overflow_hidden()
-            .rounded(px(radius::CONTROL))
-            .bg(rgb(p.canvas))
-            .border_1()
-            .border_color(rgb(if self.invalid {
-                p.danger
-            } else {
-                p.control_border
-            }))
-            .text_color(rgb(p.text))
-            .text_size(px(self.size.font_size()))
-            .line_height(px(22.))
-            .when(self.disabled, |v| v.opacity(0.4).cursor_default())
-            .when(!self.disabled, |v| {
-                v.focus(move |s| s.border_color(rgb(if invalid { p.danger } else { p.focus })))
-            })
-            .when(!self.disabled, |view| {
-                view.on_action(cx.listener(|this, _: &Backspace, _, cx| {
-                    if !this.editable() {
-                        return;
-                    }
-                    this.buffer.backspace();
-                    this.changed(cx);
-                }))
-                .on_action(cx.listener(|this, _: &Delete, _, cx| {
-                    if !this.editable() {
-                        return;
-                    }
-                    this.buffer.delete();
-                    this.changed(cx);
-                }))
-                .on_action(cx.listener(|this, _: &Left, _, cx| {
-                    let offset = if this.buffer.selection.is_empty() {
-                        this.buffer.previous()
-                    } else {
-                        this.buffer.selection.start
-                    };
-                    this.buffer.move_to(offset, false);
-                    cx.notify();
-                }))
-                .on_action(cx.listener(|this, _: &Right, _, cx| {
-                    let offset = if this.buffer.selection.is_empty() {
-                        this.buffer.next()
-                    } else {
-                        this.buffer.selection.end
-                    };
-                    this.buffer.move_to(offset, false);
-                    cx.notify();
-                }))
-                .on_action(cx.listener(|this, _: &SelectLeft, _, cx| {
-                    this.buffer.move_to(this.buffer.previous(), true);
-                    cx.notify();
-                }))
-                .on_action(cx.listener(|this, _: &SelectRight, _, cx| {
-                    this.buffer.move_to(this.buffer.next(), true);
-                    cx.notify();
-                }))
-                .on_action(cx.listener(|this, _: &Home, _, cx| {
-                    this.buffer.move_to(0, false);
-                    cx.notify();
-                }))
-                .on_action(cx.listener(|this, _: &End, _, cx| {
-                    this.buffer.move_to(this.buffer.content.len(), false);
-                    cx.notify();
-                }))
-                .on_action(cx.listener(|this, _: &SelectHome, _, cx| {
-                    this.buffer.move_to(0, true);
-                    cx.notify();
-                }))
-                .on_action(cx.listener(|this, _: &SelectEnd, _, cx| {
-                    this.buffer.move_to(this.buffer.content.len(), true);
-                    cx.notify();
-                }))
-                .on_action(cx.listener(|this, _: &SelectAll, _, cx| {
-                    this.buffer.move_to(0, false);
-                    this.buffer.move_to(this.buffer.content.len(), true);
-                    cx.notify();
-                }))
-                .on_action(cx.listener(|this, _: &Copy, _, cx| this.copy(cx)))
-                .on_action(cx.listener(|this, _: &Cut, _, cx| {
-                    if this.editable() && !this.buffer.selection.is_empty() {
-                        this.copy(cx);
-                        this.buffer.replace(None, "");
-                        this.changed(cx);
-                    }
-                }))
-                .on_action(cx.listener(|this, _: &Paste, window, cx| {
-                    if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
-                        this.replace_text_in_range(None, &text, window, cx);
-                    }
-                }))
-                .on_action(cx.listener(|this, _: &Submit, _, cx| this.submit(cx)))
-                .on_action(
-                    cx.listener(|_, _: &CharacterPalette, window, _| {
-                        window.show_character_palette()
-                    }),
-                )
-                .on_mouse_down(
-                    MouseButton::Left,
-                    cx.listener(|this, event: &MouseDownEvent, window, cx| {
-                        this.focus.focus(window);
-                        this.selecting = true;
-                        this.buffer
-                            .move_to(this.index_at(event.position), event.modifiers.shift);
-                        cx.notify();
-                    }),
-                )
-                .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _, cx| {
-                    if this.selecting {
-                        this.buffer.move_to(this.index_at(event.position), true);
-                        cx.notify();
-                    }
-                }))
-                .on_mouse_up(
-                    MouseButton::Left,
-                    cx.listener(|this, _, _, _| this.selecting = false),
-                )
-                .on_mouse_up_out(
-                    MouseButton::Left,
-                    cx.listener(|this, _, _, _| this.selecting = false),
-                )
-            })
-            .when_some(self.leading, |v, icon| v.child(icon.view(p.muted)))
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .overflow_hidden()
-                    .child(TextElement { input: cx.entity() }),
-            )
-    }
-}
-
-struct TextElement {
-    input: Entity<TextInput>,
-}
-struct TextPaint {
-    line: Option<ShapedLine>,
-    cursor: PaintQuad,
-    selection: Option<PaintQuad>,
-    scroll_x: Pixels,
-}
-impl IntoElement for TextElement {
-    type Element = Self;
-    fn into_element(self) -> Self {
-        self
-    }
-}
-impl Element for TextElement {
-    type RequestLayoutState = ();
-    type PrepaintState = TextPaint;
-    fn id(&self) -> Option<ElementId> {
-        None
-    }
-    fn source_location(&self) -> Option<&'static std::panic::Location<'static>> {
-        None
-    }
-    fn request_layout(
-        &mut self,
-        _: Option<&GlobalElementId>,
-        _: Option<&InspectorElementId>,
-        window: &mut Window,
-        cx: &mut App,
-    ) -> (LayoutId, ()) {
-        let mut style = Style::default();
-        style.size.width = relative(1.).into();
-        style.size.height = window.line_height().into();
-        (window.request_layout(style, [], cx), ())
-    }
-    fn prepaint(
-        &mut self,
-        _: Option<&GlobalElementId>,
-        _: Option<&InspectorElementId>,
-        bounds: Bounds<Pixels>,
-        _: &mut (),
-        window: &mut Window,
-        cx: &mut App,
-    ) -> TextPaint {
-        let input = self.input.read(cx);
-        let style = window.text_style();
-        let empty = input.buffer.content.is_empty();
-        let text: SharedString = if empty {
-            input.placeholder.clone()
-        } else {
-            input.buffer.content.clone().into()
-        };
-        let run = TextRun {
-            len: text.len(),
-            font: style.font(),
-            color: if empty {
-                rgb(theme(cx).muted).into()
-            } else {
-                style.color
-            },
-            background_color: None,
-            underline: None,
-            strikethrough: None,
-        };
-        let runs = if let Some(marked) = &input.buffer.marked {
-            vec![
-                TextRun {
-                    len: marked.start,
-                    ..run.clone()
-                },
-                TextRun {
-                    len: marked.len(),
-                    underline: Some(UnderlineStyle {
-                        color: Some(run.color),
-                        thickness: px(1.),
-                        wavy: false,
-                    }),
-                    ..run.clone()
-                },
-                TextRun {
-                    len: text.len() - marked.end,
-                    ..run
-                },
-            ]
-            .into_iter()
-            .filter(|run| run.len > 0)
-            .collect()
-        } else {
-            vec![run]
-        };
-        let line = window.text_system().shape_line(
-            text,
-            style.font_size.to_pixels(window.rem_size()),
-            &runs,
-            None,
-        );
-        let cursor_x = line.x_for_index(input.buffer.cursor());
-        let scroll_x = input
-            .scroll_x
-            .min(cursor_x)
-            .max(cursor_x - bounds.size.width + px(4.))
-            .max(px(0.));
-        let selection = (!input.buffer.selection.is_empty()).then(|| {
-            fill(
-                Bounds::from_corners(
-                    point(
-                        bounds.left() + line.x_for_index(input.buffer.selection.start) - scroll_x,
-                        bounds.top(),
-                    ),
-                    point(
-                        bounds.left() + line.x_for_index(input.buffer.selection.end) - scroll_x,
-                        bounds.bottom(),
-                    ),
-                ),
-                rgba((theme(cx).accent << 8) | 0x4d),
-            )
-        });
-        TextPaint {
-            line: Some(line),
-            scroll_x,
-            selection,
-            cursor: fill(
-                Bounds::new(
-                    point(bounds.left() + cursor_x - scroll_x, bounds.top()),
-                    size(px(2.), bounds.size.height),
-                ),
-                rgb(theme(cx).focus),
-            ),
-        }
-    }
-    fn paint(
-        &mut self,
-        _: Option<&GlobalElementId>,
-        _: Option<&InspectorElementId>,
-        bounds: Bounds<Pixels>,
-        _: &mut (),
-        state: &mut TextPaint,
-        window: &mut Window,
-        cx: &mut App,
-    ) {
-        let focus = self.input.read(cx).focus.clone();
-        if !self.input.read(cx).disabled {
-            window.handle_input(
-                &focus,
-                ElementInputHandler::new(bounds, self.input.clone()),
-                cx,
-            );
-        }
-        if let Some(selection) = state.selection.take() {
-            window.paint_quad(selection);
-        }
-        let line = state.line.take().expect("prepaint shapes a line");
-        let _ = line.paint(
-            point(bounds.left() - state.scroll_x, bounds.top()),
-            window.line_height(),
-            window,
-            cx,
-        );
-        if !self.input.read(cx).disabled
-            && focus.is_focused(window)
-            && self.input.read(cx).buffer.selection.is_empty()
-        {
-            window.paint_quad(state.cursor.clone());
-        }
-        self.input.update(cx, |input, _| {
-            input.layout = Some(line);
-            input.bounds = Some(bounds);
-            input.scroll_x = state.scroll_x;
-        });
+            .on_action(cx.listener(|this, _: &Submit, window, cx| this.submit(window, cx)))
+            .child(input)
     }
 }
