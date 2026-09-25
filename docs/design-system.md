@@ -8,9 +8,13 @@
 
 ## 独立したアプリで確認する
 
+Nix の実行環境から直接起動できます。`minimal` は外部実行用 CLI を省いた環境です。
+
 ```sh
-rtk cargo run --locked --bin solo-design
+rtk proxy nix develop .#minimal --command cargo run --locked --bin solo-design
 ```
+
+以降の Cargo コマンドは `nix develop` 内で実行します。環境の詳細は [README](../README.md#nix-で環境を用意する) を参照してください。
 
 `solo-design` はメインの `solo` とは別の実行ファイルです。同時に起動でき、
 セッションや疑似 worker を起動しません。操作例の状態は確認アプリ内だけで保持します。
@@ -32,7 +36,7 @@ rtk cargo run --locked --bin solo-design -- --smoke
 | 項目 | 基準 |
 | --- | --- |
 | 色 | Canvas / Sidebar / Surface / Elevated と、用途に対応した文字・状態色 |
-| テーマ | Dark / Light。メインアプリは Dark を採用 |
+| テーマ | Dark / Light。メインと確認アプリの両方で切替可能 |
 | フォント | macOS のシステムフォント。コードと色値は Menlo |
 | 文字サイズ | 11 / 12 / 13 / 15 / 20 / 30px |
 | 余白 | 4 / 8 / 12 / 16 / 24 / 32 / 40px |
@@ -108,7 +112,13 @@ src/design/overlays.rs   ダイアログと通知
 src/design/icons.rs      アイコンと組込み assets
 src/gallery/             確認アプリのページ、操作例、smoke test
 src/bin/solo-design.rs   独立したエントリーポイント
+src/ui/views.rs          メイン画面への共通コンポーネント適用
+src/ui/smoke.rs          メインのテーマ・操作・負荷の検証
 ```
+
+メイン画面もサイドバー、タブ、シナリオ選択、会話、差分、ログ、状態表示、コピー通知に
+同じ部品とテーマを使用します。色を `DARK` で固定せず、描画時に `ds::theme(cx)` から取得します。
+両アプリとも **⌘ Shift L** でテーマを切り替えられます。
 
 ## 検証
 

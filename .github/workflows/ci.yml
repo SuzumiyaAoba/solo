@@ -7,18 +7,16 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.98.0
-        with:
-          components: rustfmt, clippy
-      - run: cargo fmt --all -- --check
-      - run: cargo clippy --locked --no-default-features --all-targets -- -D warnings
-      - run: cargo test --locked --no-default-features --all-targets
+      - uses: cachix/install-nix-action@v31
+      - run: nix flake check --all-systems --no-build
+      - run: nix develop .#minimal --command nixfmt --check flake.nix
+      - run: nix develop .#minimal --command cargo fmt --all -- --check
+      - run: nix develop .#minimal --command cargo clippy --locked --no-default-features --all-targets -- -D warnings
+      - run: nix develop .#minimal --command cargo test --locked --no-default-features --all-targets
   gpui:
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.98.0
-        with:
-          components: clippy
-      - run: cargo clippy --locked --all-targets -- -D warnings
-      - run: cargo build --locked --bins
+      - uses: cachix/install-nix-action@v31
+      - run: nix develop .#minimal --command cargo clippy --locked --all-targets -- -D warnings
+      - run: nix develop .#minimal --command cargo build --locked --bins

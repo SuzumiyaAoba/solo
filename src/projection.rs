@@ -336,14 +336,14 @@ impl Session {
                 cwd,
             } => {
                 self.tools.insert(invocation_id, None);
-                self.notice(format!("疑似実行開始: {command}  ({cwd})"));
+                self.notice(format!("実行開始: {command}  ({cwd})"));
             }
             Event::ToolFinished {
                 invocation_id,
                 exit_code,
             } => {
                 self.tools.insert(invocation_id.clone(), Some(exit_code));
-                self.notice(format!("疑似実行終了: {invocation_id} / exit {exit_code}"));
+                self.notice(format!("実行終了: {invocation_id} / exit {exit_code}"));
             }
             Event::DiffUpdated { path, unified_diff } => {
                 let diff = Diff::parse(path.clone(), &unified_diff);

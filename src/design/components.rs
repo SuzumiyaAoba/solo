@@ -199,7 +199,9 @@ impl RenderOnce for Button {
             .when(!self.loading, |v| {
                 v.when_some(self.icon, |v, icon| v.child(icon.view(fg)))
             })
-            .when(!self.icon_only, |v| v.child(self.label))
+            .when(!self.icon_only, |v| {
+                v.child(div().min_w_0().truncate().child(self.label))
+            })
             .when_some(self.trailing, |v, icon| v.child(icon.view(fg)));
         if !blocked && let Some(handler) = self.on_click {
             view = view.on_click(move |event, window, cx| handler(event, window, cx));

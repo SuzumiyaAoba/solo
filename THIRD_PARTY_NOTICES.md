@@ -15,9 +15,13 @@
 | --- | --- | --- |
 | gpui | 0.2.2 | Apache-2.0 |
 | async-channel | 2.5.0 | Apache-2.0 OR MIT |
+| futures | 0.3.31 | MIT OR Apache-2.0 |
+| genai-agentprism | 0.7.0-beta.19.1-agentprism | MIT OR Apache-2.0 |
 | serde | 1.0.229 | MIT OR Apache-2.0 |
 | serde_json | 1.0.151 | MIT OR Apache-2.0 |
 | tempfile | 3.27.0 | MIT OR Apache-2.0 |
+| tokio | 1.53.1 | MIT |
+| tokio-util | 0.7.19 | MIT |
 | unicode-segmentation | 1.13.3 | MIT OR Apache-2.0 |
 
 GPUI の対象は公開 crate です。Zed アプリケーション全体を組み込んでいません。
