@@ -301,7 +301,7 @@ impl Workspace {
                 self.start_failed(
                     index,
                     prompt,
-                    "ACP の接続が終了しました。続けるには新しいタスクを作成してください".into(),
+                    "ACP の接続が終了しました。続けるには新しいチャンネルを作成してください".into(),
                     cx,
                 );
                 return;
@@ -350,7 +350,7 @@ impl Workspace {
             return;
         }
         if session.uses_workspace() {
-            self.message = "デモを試すには新しいタスクを作成してください".into();
+            self.message = "デモを試すには新しいチャンネルを作成してください".into();
             cx.notify();
             return;
         }

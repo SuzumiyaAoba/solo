@@ -164,7 +164,7 @@ impl Workspace {
             let weak = weak.clone();
             let id = id.clone();
             dialog
-                .title("タスクを閉じる")
+                .title("チャンネルを閉じる")
                 .w(px(440.))
                 .child(div().font_weight(FontWeight::MEDIUM).child(title.clone()))
                 .child(

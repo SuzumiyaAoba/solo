@@ -194,6 +194,7 @@ fn completion_with_unfinished_tool_remains_uncertain() {
     session.apply(event(
         2,
         Event::ToolStarted {
+            agent_id: None,
             invocation_id: "tool-1".into(),
             command: "fixture".into(),
             cwd: "/fixture".into(),
@@ -302,6 +303,7 @@ fn overlapping_turn_does_not_clear_unfinished_tool() {
     session.apply(event(
         2,
         Event::ToolStarted {
+            agent_id: None,
             invocation_id: "tool-1".into(),
             command: "fixture".into(),
             cwd: "fixture".into(),
@@ -342,6 +344,7 @@ fn tool_completion_cannot_be_rewritten_with_new_id() {
     session.apply(event(
         2,
         Event::ToolStarted {
+            agent_id: None,
             invocation_id: "tool-1".into(),
             command: "fixture".into(),
             cwd: "fixture".into(),

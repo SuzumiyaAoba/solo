@@ -34,6 +34,7 @@ pub struct Button {
     toggled: Option<bool>,
     icon: Option<Icon>,
     icon_only: bool,
+    align_start: bool,
     trailing: Option<Icon>,
     tooltip: Option<SharedString>,
     preview: PreviewState,
@@ -52,6 +53,7 @@ impl Button {
             toggled: None,
             icon: None,
             icon_only: false,
+            align_start: false,
             trailing: None,
             tooltip: None,
             preview: PreviewState::Rest,
@@ -90,6 +92,11 @@ impl Button {
     }
     pub fn with_icon(mut self, icon: Icon) -> Self {
         self.icon = Some(icon);
+        self
+    }
+    /// Kit の内容行を伸ばして、アイコンとラベルを左端にそろえる。
+    pub fn align_start(mut self) -> Self {
+        self.align_start = true;
         self
     }
     pub fn trailing_icon(mut self, icon: Icon) -> Self {
@@ -141,7 +148,12 @@ impl RenderOnce for Button {
             .when_some(self.toggled, |b, value| b.selected(value).toggled(value))
             .tab_stop(!self.loading)
             .accessibility_label(self.label.clone())
-            .when(!self.icon_only, |b| b.label(self.label))
+            .when(!self.icon_only && !self.align_start, |b| {
+                b.label(self.label.clone())
+            })
+            .when(!self.icon_only && self.align_start, |b| {
+                b.child(div().flex_1().min_w_0().truncate().child(self.label))
+            })
             .when_some(self.icon, |b, icon| b.icon(icon.kit()))
             .when_some(self.trailing, |b, icon| b.child(icon.kit().size(px(14.))))
             .when_some(self.tooltip, |b, text| b.tooltip(text))

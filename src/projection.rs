@@ -1,5 +1,10 @@
 mod diff;
+mod thread;
 pub use diff::{Diff, DiffKind, DiffLine, MAX_DIFF_LINES};
+pub use thread::{
+    ActivityKind, ActivityState, ExecutionActivity, ExecutionThread, MAX_EXECUTION_THREADS,
+    MAX_THREAD_ACTIVITIES,
+};
 
 use crate::event::{Decoded, Envelope, Event, Usage, preview};
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -51,6 +56,7 @@ pub struct ChatBlock {
     pub speaker: Speaker,
     pub message_id: String,
     pub text: String,
+    pub thread_id: Option<u64>,
 }
 
 #[derive(Clone, Debug)]
@@ -86,6 +92,9 @@ pub struct Session {
     pub diffs: Vec<Diff>,
     pub tools: HashMap<String, Option<i32>>,
     pub tool_activity: VecDeque<ToolActivity>,
+    pub threads: VecDeque<ExecutionThread>,
+    pub threads_discarded: usize,
+    pub thread_revision: u64,
     pub last_sequence: u64,
     pub accepted: u64,
     pub duplicates: u64,
@@ -95,6 +104,7 @@ pub struct Session {
     pub incomplete: bool,
     turn_open: bool,
     seen: HashSet<String>,
+    agents: HashMap<String, bool>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -122,6 +132,9 @@ impl Session {
             diffs: Vec::new(),
             tools: HashMap::new(),
             tool_activity: VecDeque::new(),
+            threads: VecDeque::new(),
+            threads_discarded: 0,
+            thread_revision: 0,
             last_sequence: 0,
             accepted: 0,
             duplicates: 0,
@@ -131,6 +144,7 @@ impl Session {
             incomplete: false,
             turn_open: false,
             seen: HashSet::new(),
+            agents: HashMap::new(),
         }
     }
 
@@ -209,7 +223,16 @@ impl Session {
             return Apply::Rejected;
         }
         let invalid_tool = match &event {
-            Event::ToolStarted { invocation_id, .. } => self.tools.contains_key(invocation_id),
+            Event::ToolStarted {
+                invocation_id,
+                agent_id,
+                ..
+            } => {
+                self.tools.contains_key(invocation_id)
+                    || agent_id
+                        .as_ref()
+                        .is_some_and(|id| self.agents.get(id) != Some(&false))
+            }
             Event::ToolFinished { invocation_id, .. } => {
                 !matches!(self.tools.get(invocation_id), Some(None))
             }
@@ -219,6 +242,31 @@ impl Session {
             self.incomplete = true;
             self.reject("tool の開始・終了記録が一致しません");
             return Apply::Rejected;
+        }
+        let invalid_agent = match &event {
+            Event::AgentStarted {
+                agent_id,
+                parent_agent_id,
+                ..
+            } => {
+                agent_id.is_empty()
+                    || self.agents.contains_key(agent_id)
+                    || parent_agent_id
+                        .as_ref()
+                        .is_some_and(|id| self.agents.get(id) != Some(&false))
+            }
+            Event::AgentFinished { agent_id, .. } => self.agents.get(agent_id) != Some(&false),
+            _ => false,
+        };
+        if invalid_agent {
+            self.incomplete = true;
+            self.reject("サブエージェントの開始・終了記録が一致しません");
+            return Apply::Rejected;
+        }
+        if let Some(thread) = self.threads.back_mut()
+            && thread.record(&event)
+        {
+            self.thread_revision += 1;
         }
         self.accepted += 1;
         match event {
@@ -239,8 +287,19 @@ impl Session {
                 self.usage = Usage::default();
                 self.incomplete = gap;
                 self.tools.clear();
+                self.agents.clear();
                 self.tool_activity.clear();
                 self.turn_id = envelope.turn_id;
+                if self.threads.len() == MAX_EXECUTION_THREADS {
+                    self.threads.pop_front();
+                    self.threads_discarded += 1;
+                }
+                self.threads.push_back(ExecutionThread::new(
+                    envelope.sequence,
+                    self.turn_id.clone().expect("validated turn id"),
+                    &prompt,
+                ));
+                self.thread_revision += 1;
                 self.append(
                     Speaker::User,
                     &format!("prompt-{}", envelope.sequence),
@@ -271,6 +330,7 @@ impl Session {
                 invocation_id,
                 command,
                 cwd,
+                ..
             } => {
                 self.tools.insert(invocation_id.clone(), None);
                 if self.tool_activity.len() == MAX_TOOL_ACTIVITIES {
@@ -298,6 +358,21 @@ impl Session {
                 }
                 self.notice(format!("実行終了: {invocation_id} / exit {exit_code}"));
             }
+            Event::AgentStarted { agent_id, name, .. } => {
+                self.agents.insert(agent_id, false);
+                self.notice(format!("サブエージェント開始: {name}"));
+            }
+            Event::AgentFinished {
+                agent_id,
+                success,
+                summary,
+            } => {
+                self.agents.insert(agent_id.clone(), true);
+                self.notice(format!(
+                    "サブエージェント終了: {agent_id} / {} / {summary}",
+                    if success { "完了" } else { "失敗" }
+                ));
+            }
             Event::DiffUpdated { path, unified_diff } => {
                 let diff = Diff::parse(path.clone(), &unified_diff);
                 if let Some(existing) = self.diffs.iter_mut().find(|diff| diff.path == path) {
@@ -308,10 +383,13 @@ impl Session {
             }
             Event::TurnCompleted { reason, usage } => {
                 self.usage = usage;
-                if self.tools.values().any(Option::is_none) || self.incomplete {
+                if self.tools.values().any(Option::is_none)
+                    || self.agents.values().any(|done| !done)
+                    || self.incomplete
+                {
                     self.finish(
                         Status::Disconnected,
-                        "完了通知を受信しましたが、未完了の tool またはイベントの欠落があります"
+                        "完了通知を受信しましたが、未完了の実行またはイベントの欠落があります"
                             .into(),
                     );
                 } else {
@@ -334,6 +412,15 @@ impl Session {
         }
     }
 
+    pub fn transport_failed(&mut self, reason: String) {
+        let status = if self.status == Status::Cancelling {
+            Status::Cancelled
+        } else {
+            Status::Failed
+        };
+        self.finish(status, reason);
+    }
+
     pub fn unreviewed_count(&self) -> usize {
         self.diffs.iter().filter(|diff| !diff.reviewed).count()
     }
@@ -354,6 +441,14 @@ impl Session {
         self.turn_open = false;
         self.status = status;
         self.reason = reason.clone();
+        if let Some(thread) = self
+            .threads
+            .back_mut()
+            .filter(|thread| thread.status.is_active())
+        {
+            thread.finish(status, &reason);
+            self.thread_revision += 1;
+        }
         self.append(
             Speaker::Notice,
             &format!("end-{}", self.last_sequence),
@@ -400,6 +495,7 @@ impl Session {
                     speaker: speaker.clone(),
                     message_id: message_id.into(),
                     text: String::new(),
+                    thread_id: self.threads.back().map(|thread| thread.id),
                 });
             }
             let block = self.chat.back_mut().expect("a block was just added");

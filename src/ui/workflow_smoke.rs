@@ -187,7 +187,7 @@ fn closed_acp_conversation(this: &mut Workspace, window: &mut Window, cx: &mut C
     session.model.turn_id = Some("previous-turn".into());
     session.model.status = Status::Completed;
     this.start_selected(index, "続きの依頼を保持".into(), cx);
-    assert!(this.message.contains("新しいタスク"));
+    assert!(this.message.contains("新しいチャンネル"));
     assert!(this.sessions[index].controller.is_none());
     assert_eq!(this.sessions[index].model.status, Status::Completed);
     assert_eq!(

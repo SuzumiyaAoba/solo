@@ -7,6 +7,7 @@ mod projects;
 mod projects_smoke;
 mod smoke;
 mod stream;
+mod threads_smoke;
 mod views;
 mod workflow;
 mod workflow_smoke;
@@ -36,8 +37,9 @@ use solo::{
 use std::{path::PathBuf, sync::Arc, time::Instant};
 use tempfile::TempPath;
 
-const SCENARIOS: [Scenario; 5] = [
+const SCENARIOS: [Scenario; 6] = [
     Scenario::Demo,
+    Scenario::Threads,
     Scenario::Events10k,
     Scenario::Events100k,
     Scenario::Log100MiB,
@@ -55,6 +57,7 @@ actions!(
         ShowDiff,
         ShowLogs,
         ShowOverview,
+        ShowThread,
         NextAttention
     ]
 );
@@ -86,6 +89,7 @@ pub fn run() {
                 KeyBinding::new("cmd-2", ShowDiff, None),
                 KeyBinding::new("cmd-3", ShowLogs, None),
                 KeyBinding::new("cmd-0", ShowOverview, None),
+                KeyBinding::new("cmd-shift-t", ShowThread, None),
                 KeyBinding::new("cmd-shift-a", NextAttention, None),
                 KeyBinding::new("cmd-shift-o", projects::AddProject, None),
                 KeyBinding::new("cmd-shift-p", projects::ShowProjects, None),
@@ -148,6 +152,9 @@ struct SessionView {
     diff_scroll: UniformListScrollHandle,
     diff_index: usize,
     tab: Tab,
+    selected_thread: Option<u64>,
+    thread_scroll: ScrollHandle,
+    expanded_activity: Option<String>,
     follow_logs: bool,
     artifacts: Vec<Arc<TempPath>>,
     controller: Option<UiController>,
@@ -172,6 +179,7 @@ struct SessionView {
 }
 
 struct Workspace {
+    focus: FocusHandle,
     sessions: Vec<SessionView>,
     selected: usize,
     serial: u64,
@@ -192,7 +200,6 @@ struct Workspace {
     show_metrics: bool,
     rendered: usize,
     queue: RunQueue,
-    attention_only: bool,
     is_visible: bool,
     other_project_attention: usize,
 }
@@ -243,6 +250,7 @@ impl Workspace {
         let rule_editor =
             cx.new(|cx| command_rules::CommandRuleEditor::new(command_rules.clone(), window, cx));
         let mut this = Self {
+            focus: cx.focus_handle(),
             command_rules,
             rule_editor,
             _rule_temp: rule_temp,
@@ -263,7 +271,6 @@ impl Workspace {
             show_metrics: false,
             rendered: 0,
             queue: RunQueue::default(),
-            attention_only: false,
             is_visible: true,
             other_project_attention: 0,
         };
@@ -284,7 +291,7 @@ impl Workspace {
         let id = format!("session-{}", self.serial);
         let composer = cx.new(|cx| {
             Composer::multiline(window, cx)
-                .placeholder("依頼を入力…")
+                .placeholder("このチャンネルに依頼を送る…")
                 .control_size(ControlSize::Large)
                 .clear_on_submit(true)
         });
@@ -306,7 +313,7 @@ impl Workspace {
                 }
                 cx.notify();
             });
-        let mut model = Session::new(id, format!("新しいタスク {}", self.serial));
+        let mut model = Session::new(id, format!("新しいセッション {}", self.serial));
         model.provider = "Codex / ChatGPT Subscription".into();
         self.sessions.push(SessionView {
             model,
@@ -315,7 +322,10 @@ impl Workspace {
             log_scroll: UniformListScrollHandle::new(),
             diff_scroll: UniformListScrollHandle::new(),
             diff_index: 0,
-            tab: Tab::Overview,
+            tab: Tab::Chat,
+            selected_thread: None,
+            thread_scroll: ScrollHandle::new(),
+            expanded_activity: None,
             follow_logs: true,
             artifacts: Vec::new(),
             controller: None,
@@ -339,7 +349,6 @@ impl Workspace {
             _change_subscription: change_subscription,
         });
         self.selected = self.sessions.len() - 1;
-        self.attention_only = false;
         self.scenario_picker.update(cx, |picker, cx| {
             picker.selected = 0;
             picker.close(cx);
@@ -376,8 +385,21 @@ impl Workspace {
             picker.close(cx);
         });
         self.sync_controls(cx);
-        window.focus(&self.sessions[index].composer.focus_handle(cx), cx);
+        let focus = self.content_focus(window, cx);
+        window.focus(&focus, cx);
         cx.notify();
+    }
+
+    fn content_focus(&self, window: &Window, cx: &App) -> FocusHandle {
+        let session = &self.sessions[self.selected];
+        if session.tab == Tab::Chat
+            && session.selected_thread.is_some()
+            && window.viewport_size().width < px(1120.)
+        {
+            self.focus.clone()
+        } else {
+            session.composer.focus_handle(cx)
+        }
     }
 
     fn close_session(&mut self, window: &mut Window, cx: &mut Context<Self>) {

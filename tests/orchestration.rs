@@ -147,6 +147,7 @@ fn activity_tracks_tool_outcomes_and_resets_for_the_next_turn() {
     session.apply(event(
         2,
         Event::ToolStarted {
+            agent_id: None,
             invocation_id: "build".into(),
             command: "cargo test".into(),
             cwd: "/workspace".into(),
@@ -186,6 +187,7 @@ fn activity_is_bounded_without_losing_tool_completion_validation() {
         session.apply(event(
             2 + n as u64,
             Event::ToolStarted {
+                agent_id: None,
                 invocation_id: n.to_string(),
                 command: "read".into(),
                 cwd: ".".into(),

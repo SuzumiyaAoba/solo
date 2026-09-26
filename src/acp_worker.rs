@@ -287,6 +287,7 @@ impl Bridge {
                     if tool.phase == ToolPhase::Proposed {
                         tool.phase = ToolPhase::Running;
                         out.emit(Event::ToolStarted {
+                            agent_id: None,
                             invocation_id: id.into(),
                             command: update["title"].as_str().unwrap_or("ACP tool").into(),
                             cwd: String::new(),

@@ -95,10 +95,24 @@ pub enum Event {
         invocation_id: String,
         command: String,
         cwd: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        agent_id: Option<String>,
     },
     ToolFinished {
         invocation_id: String,
         exit_code: i32,
+    },
+    AgentStarted {
+        agent_id: String,
+        name: String,
+        task: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        parent_agent_id: Option<String>,
+    },
+    AgentFinished {
+        agent_id: String,
+        success: bool,
+        summary: String,
     },
     Log {
         level: String,
@@ -133,6 +147,8 @@ impl Event {
         "message_delta",
         "tool_started",
         "tool_finished",
+        "agent_started",
+        "agent_finished",
         "log",
         "diff_updated",
         "turn_completed",

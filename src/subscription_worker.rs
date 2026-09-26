@@ -237,6 +237,7 @@ fn run(
                     edit_snapshots.insert(call.id.clone(), (relative.into(), before));
                 }
                 emitter.emit(Event::ToolStarted {
+                    agent_id: None,
                     invocation_id: call.id,
                     command: format!("{} {}", call.name, call.arguments),
                     cwd: workspace.display().to_string(),

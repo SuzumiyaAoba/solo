@@ -1,6 +1,10 @@
+mod navigation;
+
 use super::*;
 use gpui_kit::component::{WindowExt, dialog::DialogButtonProps};
+use gpui_kit::component::{h_resizable, resizable_panel};
 use solo::projects::{Catalog, MAX_PROJECTS, Project, ProjectStore};
+use std::collections::HashSet;
 
 actions!(solo_projects, [AddProject, ShowProjects]);
 
@@ -50,6 +54,8 @@ pub(super) struct ProjectManager {
     focus: FocusHandle,
     choosing_folder: bool,
     smoke: bool,
+    collapsed_projects: HashSet<u64>,
+    attention_only: bool,
     pub(super) temporary: Option<tempfile::TempDir>,
 }
 
@@ -92,6 +98,8 @@ impl ProjectManager {
             focus: cx.focus_handle(),
             choosing_folder: false,
             smoke,
+            collapsed_projects: HashSet::new(),
+            attention_only: false,
             temporary,
         };
         this.activate(window, cx);
@@ -188,8 +196,8 @@ impl ProjectManager {
                 {
                     opened.activity = activity;
                     this.sync_attention(cx);
-                    cx.notify();
                 }
+                cx.notify();
             });
             self.opened.push(OpenProject {
                 id,
@@ -253,13 +261,8 @@ impl ProjectManager {
             return;
         }
         if let Some(view) = self.catalog.active.and_then(|id| self.workspace(id)) {
-            let workspace = view.read(cx);
-            window.focus(
-                &workspace.sessions[workspace.selected]
-                    .composer
-                    .focus_handle(cx),
-                cx,
-            );
+            let focus = view.read(cx).content_focus(window, cx);
+            window.focus(&focus, cx);
         } else {
             window.focus(&self.focus, cx);
         }
@@ -578,6 +581,10 @@ impl Render for ProjectManager {
             .on_action(|_: &CloseWindow, window, _| window.remove_window())
             .on_action(|_: &ToggleTheme, _, cx| ds::set_theme(ds::scheme(cx).opposite(), cx))
             .on_action(cx.listener(|this, _: &NewSession, window, cx| {
+                this.attention_only = false;
+                if let Some(id) = this.catalog.active {
+                    this.collapsed_projects.remove(&id);
+                }
                 this.with_active(window, cx, |workspace, window, cx| {
                     workspace.new_session(window, cx);
                     window.focus(
@@ -598,6 +605,11 @@ impl Render for ProjectManager {
                     workspace.show_tab(Tab::Chat, cx)
                 })
             }))
+            .on_action(cx.listener(|this, _: &ShowThread, window, cx| {
+                this.with_active(window, cx, |workspace, window, cx| {
+                    workspace.toggle_thread(window, cx)
+                })
+            }))
             .on_action(cx.listener(|this, _: &ShowDiff, window, cx| {
                 this.with_active(window, cx, |workspace, _, cx| {
                     workspace.show_tab(Tab::Diff, cx)
@@ -613,68 +625,86 @@ impl Render for ProjectManager {
                     workspace.next_attention(window, cx)
                 })
             }))
+            .child(self.titlebar(cx))
             .child(
-                div()
-                    .relative()
-                    .flex_1()
-                    .min_h_0()
-                    .w_full()
-                    .when_some(view.clone(), |v, view| v.child(view))
-                    .when(view.is_none(), |v| {
-                        v.child(
+                h_resizable("project-channel-layout")
+                    .child(
+                        resizable_panel()
+                            .size(px(244.))
+                            .size_range(px(210.)..px(330.))
+                            .child(self.navigation(window, cx)),
+                    )
+                    .child(
+                        resizable_panel().size_range(px(480.)..px(5000.)).child(
                             div()
+                                .relative()
                                 .size_full()
-                                .flex()
-                                .flex_col()
-                                .child(
-                                    div()
-                                        .h(px(46.))
-                                        .window_control_area(WindowControlArea::Drag),
-                                )
-                                .child(
-                                    div()
-                                        .flex_1()
-                                        .flex()
-                                        .flex_col()
-                                        .items_center()
-                                        .justify_center()
-                                        .gap_4()
-                                        .child(Icon::Folder.view(p.muted).size(px(32.)))
-                                        .child(
-                                            div()
-                                                .text_color(rgb(p.muted))
-                                                .child("プロジェクトなし"),
-                                        )
-                                        .child(
-                                            div()
-                                                .flex()
-                                                .gap_2()
-                                                .child(
-                                                    Button::icon(
-                                                        "empty-add-project",
-                                                        Icon::Plus,
-                                                        "プロジェクトを追加 · ⌘ ⇧ O",
+                                .when_some(view.clone(), |v, view| v.child(view))
+                                .when(view.is_none(), |v| {
+                                    v.child(
+                                        div()
+                                            .size_full()
+                                            .flex()
+                                            .flex_col()
+                                            .child(
+                                                div()
+                                                    .h(px(46.))
+                                                    .window_control_area(WindowControlArea::Drag),
+                                            )
+                                            .child(
+                                                div()
+                                                    .flex_1()
+                                                    .flex()
+                                                    .flex_col()
+                                                    .items_center()
+                                                    .justify_center()
+                                                    .gap_4()
+                                                    .child(Icon::Folder.view(p.muted).size(px(32.)))
+                                                    .child(
+                                                        div()
+                                                            .text_color(rgb(p.muted))
+                                                            .child("プロジェクトなし"),
                                                     )
-                                                    .variant(ButtonVariant::Primary)
-                                                    .disabled(self.choosing_folder)
-                                                    .on_click(cx.listener(|this, _, window, cx| {
-                                                        this.choose_folder(window, cx)
-                                                    })),
-                                                )
-                                                .child(
-                                                    Button::icon(
-                                                        "empty-project-list",
-                                                        Icon::Folder,
-                                                        "プロジェクト一覧 · ⌘ ⇧ P",
-                                                    )
-                                                    .on_click(cx.listener(|this, _, window, cx| {
-                                                        this.show_projects(window, cx)
-                                                    })),
-                                                ),
-                                        ),
-                                ),
-                        )
-                    }),
+                                                    .child(
+                                                        div()
+                                                            .flex()
+                                                            .gap_2()
+                                                            .child(
+                                                                Button::icon(
+                                                                    "empty-add-project",
+                                                                    Icon::Plus,
+                                                                    "プロジェクトを追加 · ⌘ ⇧ O",
+                                                                )
+                                                                .variant(ButtonVariant::Primary)
+                                                                .disabled(self.choosing_folder)
+                                                                .on_click(cx.listener(
+                                                                    |this, _, window, cx| {
+                                                                        this.choose_folder(
+                                                                            window, cx,
+                                                                        )
+                                                                    },
+                                                                )),
+                                                            )
+                                                            .child(
+                                                                Button::icon(
+                                                                    "empty-project-list",
+                                                                    Icon::Folder,
+                                                                    "プロジェクト一覧 · ⌘ ⇧ P",
+                                                                )
+                                                                .on_click(cx.listener(
+                                                                    |this, _, window, cx| {
+                                                                        this.show_projects(
+                                                                            window, cx,
+                                                                        )
+                                                                    },
+                                                                )),
+                                                            ),
+                                                    ),
+                                            ),
+                                    )
+                                }),
+                        ),
+                    ),
             )
             .when_some(self.error.clone(), |v, error| {
                 v.child(

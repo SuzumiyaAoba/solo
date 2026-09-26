@@ -69,19 +69,13 @@ impl SessionView {
             UiDelivery::Acp(AcpDelivery::SessionId(_)) => {}
             UiDelivery::Mock(MockDelivery::Error(error))
             | UiDelivery::Subscription(SubscriptionDelivery::Error(error)) => {
-                self.model.status = Status::Failed;
-                self.model.reason = error;
+                self.model.transport_failed(error);
                 if self.login_only {
                     self.finish_login();
                 }
             }
             UiDelivery::Acp(AcpDelivery::Error(error)) => {
-                self.model.status = if self.model.status == Status::Cancelling {
-                    Status::Cancelled
-                } else {
-                    Status::Failed
-                };
-                self.model.reason = error;
+                self.model.transport_failed(error);
                 self.controller = None;
             }
         }
@@ -154,6 +148,7 @@ impl Workspace {
         let old_discarded = session.model.chat_discarded;
         let old_tail_bytes = session.model.chat.back().map(|block| block.text.len());
         let old_logs = (session.model.logs.len(), session.model.logs_discarded);
+        let old_thread_revision = session.model.thread_revision;
         let was_active = session.model.status.is_active();
         for delivery in batch {
             if let Some(request) = session.apply_delivery(delivery, cx) {
@@ -214,6 +209,16 @@ impl Workspace {
             session.chat_list.update(cx, |list, cx| {
                 list.splice(from..old_len, session.model.chat.len() - from, cx)
             });
+        }
+        if old_thread_revision != session.model.thread_revision
+            && let Some(thread) = session.model.threads.back()
+            && let Some(row) = session.model.chat.iter().position(|block| {
+                block.speaker == Speaker::User && block.thread_id == Some(thread.id)
+            })
+        {
+            session
+                .chat_list
+                .update(cx, |list, cx| list.splice(row..row + 1, 1, cx));
         }
         if session.follow_logs
             && !session.model.logs.is_empty()

@@ -128,6 +128,7 @@ pub(super) fn start(window: &Window, cx: &mut Context<Workspace>) {
         approval_checks(&this, cx).await;
         approval_modes_smoke::check(&this, cx).await;
         workflow_smoke::run(&this, cx).await;
+        threads_smoke::run(&this, cx).await;
         this.update_in(cx, |this, _, cx| {
             assert_eq!(ds::scheme(cx), ColorScheme::Light);
             assert!(this.rendered > 30);

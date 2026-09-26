@@ -67,7 +67,9 @@ pub(super) fn start(window: &Window, cx: &mut Context<ProjectManager>) {
             assert!(alpha.read(cx).sessions[0].tab == Tab::Logs);
             assert_eq!(alpha.read(cx).sessions[0].composer.read(cx).value(cx), "Alpha の下書き🙂");
             assert!(!beta.read(cx).is_visible);
-            assert!(this.select_project(b, window, cx));
+            let beta_channel = beta.read(cx).sessions[1].model.id.clone();
+            this.select_channel(b, &beta_channel, window, cx);
+            assert_eq!(this.catalog.active, Some(b));
             assert_eq!(beta.read(cx).selected, 1);
             assert_eq!(beta.read(cx).sessions[1].composer.read(cx).value(cx), "Beta の下書き🧪");
             // フォルダが移動・削除されても、既に開いたセッションへのアクセスを失わない。

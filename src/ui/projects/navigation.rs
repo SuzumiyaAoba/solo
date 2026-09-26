@@ -1,0 +1,287 @@
+use super::super::views::{caption, status_icon};
+use super::*;
+use gpui_kit::component::{
+    Sizable,
+    sidebar::{SidebarItem, SidebarMenu, SidebarMenuItem},
+    tab::{Tab as KitTab, TabBar},
+};
+
+impl ProjectManager {
+    pub(super) fn titlebar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let p = ds::theme(cx);
+        div()
+            .h(px(44.))
+            .flex_shrink_0()
+            .pl(px(96.))
+            .pr_4()
+            .bg(rgb(p.sidebar))
+            .border_b_1()
+            .border_color(rgb(p.border))
+            .flex()
+            .items_center()
+            .gap_2()
+            .window_control_area(WindowControlArea::Drag)
+            .child(div().font_weight(FontWeight::SEMIBOLD).child("Solo"))
+            .child(Icon::ChevronRight.view(p.disabled).size(px(12.)))
+            .child(caption(
+                self.catalog
+                    .active
+                    .and_then(|id| self.catalog.get(id))
+                    .map(|p| p.name.clone())
+                    .unwrap_or_else(|| "プロジェクトを追加".into()),
+                cx,
+            ))
+            .child(div().flex_1())
+            .child(caption("エージェントワークスペース", cx))
+    }
+
+    pub(in crate::ui) fn select_channel(
+        &mut self,
+        project: u64,
+        session: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.select_project(project, window, cx) {
+            self.collapsed_projects.remove(&project);
+            self.with_active(window, cx, |workspace, window, cx| {
+                workspace.select_session(session, window, cx)
+            });
+        }
+    }
+
+    fn new_channel(&mut self, project: u64, window: &mut Window, cx: &mut Context<Self>) {
+        let was_open = self.workspace(project).is_some();
+        if self.select_project(project, window, cx) {
+            self.collapsed_projects.remove(&project);
+            self.attention_only = false;
+            if was_open {
+                self.with_active(window, cx, |workspace, window, cx| {
+                    workspace.new_session(window, cx)
+                });
+            }
+            self.focus_active(window, cx);
+        }
+    }
+
+    pub(super) fn navigation(
+        &self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let p = ds::theme(cx);
+        let attention: usize = self.opened.iter().map(|p| p.activity.attention).sum();
+        let groups = self
+            .catalog
+            .projects
+            .iter()
+            .map(|project| {
+                let id = project.id;
+                let active = self.catalog.active == Some(id);
+                let collapsed = self.collapsed_projects.contains(&id);
+                let workspace = self.workspace(id);
+                let project_attention = self.activity(id, cx).attention;
+                let count = workspace
+                    .as_ref()
+                    .map(|w| w.read(cx).sessions.len())
+                    .unwrap_or(0);
+                let mut menu = SidebarMenu::new();
+                if let Some(workspace) = &workspace {
+                    let workspace = workspace.read(cx);
+                    for (index, session) in workspace.sessions.iter().enumerate() {
+                        let selected = active && index == workspace.selected;
+                        if self.attention_only && !session.needs_attention() && !selected {
+                            continue;
+                        }
+                        let session_id = session.model.id.clone();
+                        let queued = workspace.queue.position(&session_id);
+                        let tone = session.state_tone();
+                        let state = queued
+                            .map(|n| format!("順番待ち {n}"))
+                            .unwrap_or_else(|| session.state_label().into());
+                        let icon = if session.needs_attention() {
+                            Icon::Bell
+                        } else if queued.is_some() {
+                            Icon::Clock
+                        } else {
+                            status_icon(session.model.status)
+                        };
+                        menu = menu.child(
+                            SidebarMenuItem::new(format!("#  {}", session.model.title))
+                                .active(selected)
+                                .suffix(move |_, cx| {
+                                    ds::indicator(
+                                        ("channel-state", index),
+                                        icon,
+                                        "",
+                                        state.clone(),
+                                        tone,
+                                        cx,
+                                    )
+                                })
+                                .on_click(cx.listener(move |this, _, window, cx| {
+                                    this.select_channel(id, &session_id, window, cx)
+                                })),
+                        );
+                    }
+                } else {
+                    menu = menu.child(
+                        SidebarMenuItem::new("チャンネルを開く")
+                            .icon(Icon::MessageSquare.kit())
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.select_project(id, window, cx);
+                            })),
+                    );
+                }
+                div()
+                    .mb_3()
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_1()
+                            .px_1()
+                            .child(
+                                Button::new(("project-group", id as usize), project.name.clone())
+                                    .variant(ButtonVariant::Ghost)
+                                    .control_size(ControlSize::Small)
+                                    .with_icon(if collapsed {
+                                        Icon::ChevronRight
+                                    } else {
+                                        Icon::ChevronDown
+                                    })
+                                    .flex_1()
+                                    .min_w_0()
+                                    .align_start()
+                                    .overflow_hidden()
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .tooltip(project.path.display().to_string())
+                                    .on_click(cx.listener(move |this, _, window, cx| {
+                                        if this.workspace(id).is_none() {
+                                            this.select_project(id, window, cx);
+                                        } else if !this.collapsed_projects.remove(&id) {
+                                            this.collapsed_projects.insert(id);
+                                        }
+                                        cx.notify();
+                                    })),
+                            )
+                            .when(project_attention > 0, |v| {
+                                v.child(ds::indicator(
+                                    ("project-attention-badge", id as usize),
+                                    Icon::Bell,
+                                    project_attention.to_string(),
+                                    "要対応のチャンネル",
+                                    Tone::Warning,
+                                    cx,
+                                ))
+                            })
+                            .child(
+                                Button::icon(
+                                    ("new-channel", id as usize),
+                                    Icon::Plus,
+                                    "このプロジェクトにチャンネルを作成",
+                                )
+                                .control_size(ControlSize::Small)
+                                .disabled(count >= 8)
+                                .on_click(cx.listener(
+                                    move |this, _, window, cx| this.new_channel(id, window, cx),
+                                )),
+                            ),
+                    )
+                    .when(!collapsed, |v| {
+                        v.child(menu.render(("project-menu", id as usize), window, cx))
+                    })
+                    .into_any_element()
+            })
+            .collect::<Vec<_>>();
+        div()
+            .id("project-channel-sidebar")
+            .size_full()
+            .bg(rgb(p.sidebar))
+            .flex()
+            .flex_col()
+            .overflow_hidden()
+            .child(
+                div()
+                    .w_full()
+                    .flex()
+                    .flex_col()
+                    .gap_4()
+                    .p_2()
+                    .pb_4()
+                    .child(
+                        div()
+                            .h(px(36.))
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .child(
+                                div()
+                                    .text_size(px(18.))
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .child("チャンネル"),
+                            )
+                            .child(
+                                Button::icon(
+                                    "manage-projects",
+                                    Icon::Sliders,
+                                    "プロジェクトを管理 · ⌘ ⇧ P",
+                                )
+                                .control_size(ControlSize::Small)
+                                .on_click(
+                                    cx.listener(|this, _, window, cx| {
+                                        this.show_projects(window, cx)
+                                    }),
+                                ),
+                            ),
+                    )
+                    .child(
+                        TabBar::new("channel-filter")
+                            .segmented()
+                            .small()
+                            .selected_index(usize::from(self.attention_only))
+                            .child(KitTab::new().label("すべて"))
+                            .child(KitTab::new().label(format!("要対応 {attention}")))
+                            .on_click(cx.listener(|this, index: &usize, _, cx| {
+                                this.attention_only = *index == 1;
+                                if this.attention_only {
+                                    this.collapsed_projects.clear();
+                                }
+                                cx.notify();
+                            })),
+                    ),
+            )
+            .child(
+                div()
+                    .id("project-groups")
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scroll()
+                    .px_2()
+                    .child(caption("プロジェクト", cx).px_2().pb_2())
+                    .children(groups),
+            )
+            .child(
+                div()
+                    .w_full()
+                    .p_2()
+                    .border_t_1()
+                    .border_color(rgb(p.border))
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .child(
+                        Button::new("add-project", "プロジェクトを追加")
+                            .with_icon(Icon::Plus)
+                            .variant(ButtonVariant::Ghost)
+                            .w_full()
+                            .align_start()
+                            .disabled(self.choosing_folder)
+                            .on_click(
+                                cx.listener(|this, _, window, cx| this.choose_folder(window, cx)),
+                            ),
+                    )
+                    .child(caption("⌘ N  新しいチャンネル", cx)),
+            )
+    }
+}

@@ -21,6 +21,7 @@ pub const FRAME_INTERVAL: Duration = Duration::from_millis(16);
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Scenario {
     Demo,
+    Threads,
     Events10k,
     Events100k,
     Log100MiB,
@@ -31,6 +32,7 @@ impl Scenario {
     pub fn label(self) -> &'static str {
         match self {
             Self::Demo => "会話と差分",
+            Self::Threads => "ツールとサブエージェント",
             Self::Events10k => "1万イベント",
             Self::Events100k => "10万イベント",
             Self::Log100MiB => "100 MiB ログ",
@@ -40,6 +42,7 @@ impl Scenario {
     pub fn count(self) -> usize {
         match self {
             Self::Demo => 120,
+            Self::Threads => 1,
             Self::Events10k => 10_000,
             Self::Events100k => 100_000,
             Self::Log100MiB => 25_600,
@@ -232,6 +235,11 @@ impl Producer {
             return Ok(());
         }
 
+        if self.config.scenario == Scenario::Threads {
+            self.run_thread_demo();
+            return Ok(());
+        }
+
         let file = tempfile::Builder::new()
             .prefix("solo-phase0-")
             .suffix(".log")
@@ -245,6 +253,7 @@ impl Producer {
         let invocation = format!("mock-check-{}", self.config.start_sequence);
         if !self.emit(
             Event::ToolStarted {
+                agent_id: None,
                 invocation_id: invocation.clone(),
                 command: "fixture::validate (simulation)".into(),
                 cwd: self.config.workspace.clone(),
@@ -362,5 +371,32 @@ impl Producer {
             self.interrupted();
         }
         Ok(())
+    }
+
+    fn run_thread_demo(&mut self) {
+        let events = vec![
+            Event::MessageDelta { message_id: "thread-plan".into(), text: "画面構成と操作の流れを確認します。調査と検証の進み具合は、この依頼の実行スレッドで確認できます。\n\nこれは表示確認用の疑似シナリオです。".into() },
+            Event::ToolStarted { invocation_id: "read".into(), command: "read src/ui/views.rs".into(), cwd: self.config.workspace.clone(), agent_id: None },
+            Event::ToolFinished { invocation_id: "read".into(), exit_code: 0 },
+            Event::AgentStarted { agent_id: "research".into(), name: "UI リサーチ".into(), task: "チャンネルの構成とスレッドへの導線を調べる".into(), parent_agent_id: None },
+            Event::ToolStarted { invocation_id: "search".into(), command: "search チャンネル src/ui".into(), cwd: self.config.workspace.clone(), agent_id: Some("research".into()) },
+            Event::ToolFinished { invocation_id: "search".into(), exit_code: 0 },
+            Event::AgentFinished { agent_id: "research".into(), success: true, summary: "プロジェクト別の一覧と、依頼ごとのスレッドを確認しました。".into() },
+            Event::AgentStarted { agent_id: "validation".into(), name: "表示の検証".into(), task: "テーマと小さいウィンドウでの表示を確認する".into(), parent_agent_id: None },
+            Event::ToolStarted { invocation_id: "test".into(), command: "fixture::check_channel_layout (simulation)".into(), cwd: self.config.workspace.clone(), agent_id: Some("validation".into()) },
+            Event::ToolFinished { invocation_id: "test".into(), exit_code: 0 },
+            Event::AgentFinished { agent_id: "validation".into(), success: true, summary: "ライト・ダークとコンパクト表示の疑似検証が完了しました。".into() },
+            Event::MessageDelta { message_id: "thread-result".into(), text: "チャンネルの会話と実行スレッドの表示を確認しました。\n\n次の依頼を送った後も、以前の依頼にある「スレッドを開く」から実行履歴を参照できます。".into() },
+            Event::TurnCompleted { reason: "スレッド表示の疑似シナリオが完了しました。".into(), usage: Usage::default() },
+        ];
+        for event in events {
+            if !self.emit(event, true) {
+                self.interrupted();
+                return;
+            }
+            if !self.config.delay.is_zero() {
+                thread::park_timeout(self.config.delay);
+            }
+        }
     }
 }
