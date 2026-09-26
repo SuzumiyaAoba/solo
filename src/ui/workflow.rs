@@ -2,12 +2,6 @@ use super::*;
 use gpui_kit::component::{WindowExt, dialog::DialogButtonProps};
 
 impl SessionView {
-    pub(super) fn begin_run(&mut self) {
-        self.started_at = Some(Instant::now());
-        self.elapsed = None;
-        self.unread_result = false;
-    }
-
     pub(super) fn needs_attention(&self) -> bool {
         self.approval.is_some()
             || self.login.is_some()
@@ -38,9 +32,9 @@ impl SessionView {
 
 impl Workspace {
     pub(super) fn workspace_busy(&self) -> bool {
-        self.sessions.iter().any(|session| {
-            session.model.status.is_active() && (session.is_subscription || session.is_acp)
-        })
+        self.sessions
+            .iter()
+            .any(|session| session.model.status.is_active() && session.uses_workspace())
     }
 
     pub(super) fn enqueue(&mut self, index: usize, prompt: String, cx: &mut Context<Self>) {

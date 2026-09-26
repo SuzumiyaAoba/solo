@@ -1,5 +1,6 @@
 use super::*;
 use solo::auto_approval::{ReviewInput, Verdict};
+use solo::subscription_worker::Delivery as SubscriptionDelivery;
 use std::{
     sync::{
         Mutex,
@@ -109,7 +110,7 @@ async fn wait_manual(this: &WeakEntity<Workspace>, cx: &mut AsyncWindowContext) 
                 this.sessions[this.selected]
                     .approval
                     .as_ref()
-                    .is_some_and(|request| request.auto_settings.is_none())
+                    .is_some_and(|request| !request.is_reviewing())
             })
             .unwrap()
         {

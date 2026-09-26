@@ -47,10 +47,7 @@ impl TextBuffer {
     }
 
     pub fn move_to(&mut self, offset: usize, extend: bool) {
-        let mut offset = offset.min(self.content.len());
-        while !self.content.is_char_boundary(offset) {
-            offset -= 1;
-        }
+        let offset = self.content.floor_char_boundary(offset);
         if extend {
             let anchor = if self.reversed {
                 self.selection.end

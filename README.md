@@ -108,14 +108,18 @@ workspace に `.solo/agents.json` を作ると、登録した ACP v1 対応 agen
 ```
 
 CLI がアプリの `PATH` で見つからない場合は `command` を絶対パスにしてください。
-設定を読み直すには Solo を再起動します。
+設定は最大16件・ファイル全体で1 MiBまでです。読み直すには Solo を再起動します。
 実行先で選んで送信すると、その UI セッション専用の agent プロセスを起動します。
 続きの入力には同じ ACP セッションとプロセスを使い、別の UI セッションでは独立して動きます。
+ACP の接続終了後に依頼を続ける場合は、新しいタスクを作成してください。送信前の依頼文は入力欄に保持します。
 同じ workspace への実 agent の依頼は順番待ちに追加され、先の turn が完了してから
 順に開始します。失敗・切断・中止時には自動実行を一時停止します。
 承認要求は概要画面に表示し、`allow_once` が提示された場合だけ「今回だけ許可」を選べます。
-中止は `session/cancel` を送ります。agent 主導のログインに対応し、terminal ログインが必要な
+実行中の中止は `session/cancel` を送り、UI の返答がなくても承認待ちを解除します。
+接続準備中の中止や通知を送れない場合は接続を切断します。
+agent 主導のログインに対応し、terminal ログインが必要な
 agent は先にその CLI でログインしてください。
+認証要求と実行中止は ACP のエラーコードで判定するため、エラー文面の言語に依存しません。
 
 ACP agent は Solo と同じ OS 権限で別プロセスとして動きます。承認表示は agent が ACP で
 要求した操作を対象とし、agent 自体を隔離しません。信頼できるコマンドを登録してください。
@@ -195,8 +199,11 @@ YAML の設定形式は `version: 1` です。YAML がまだ存在しない場�
 `harness::run` は会話履歴、モデルの tool call、tool 結果を循環させ、完了・中止・
 モデルエラー・呼出し上限を明示して終了します。`Model`、`ToolExecutor`、`Policy`、
 `Update` が接続点です。実行権限は呼出し側の `Policy` が毎回判定します。
+組み込みエージェントは `Cancellation` の中止要求を通信と承認待ちに伝えます。
 `WorkspaceTools` は `read`、`search`、`edit`、`exec` を提供します。
 `edit` は既存ファイルの一意な文字列だけを置換し、読み取り後の変更を検出します。
+`exec` は終了コードが非ゼロなら tool エラーを返し、標準出力と標準エラーの本文を
+合わせて出力上限内に収めます。中止・timeout・I/O エラーでも起動した shell を回収します。
 `read` と `edit` は workspace 外のパスを拒否します。`exec` は shell を起動するため、
 許可する場合は呼出し側で適切な隔離環境を用意してください。timeout は直接起動した
 shell の終了を制御しますが、その子プロセスまで停止する保証はありません。
@@ -293,19 +300,32 @@ GPUI window / Composer
     ← bounded channel (256件)
 Solo ハーネス + Codex モデル / ACP agent / 疑似 worker / 一時ログ I/O
 
-event.rs       version付き envelope と event の decode
+event.rs       共通 envelope の生成と version 付き event の decode
 projection.rs  session ごとの順序・重複・turn 検査、表示状態
+projection/diff.rs 差分の行番号・追加削除数・表示上限
 orchestration.rs  workspace の順番待ち、停止・再開と依頼名の生成
 projects.rs    フォルダ単位のプロジェクト登録と設定の保存・競合検出
+storage.rs     ファイル読み取りの上限と設定ストアの排他更新・アトミック保存
 mock.rs        疑似イベント、backpressure、中止、障害注入、ログ退避
+harness.rs     モデル・tool・承認を接続する実行ループと中止・呼出し上限
+harness/workspace.rs ワークスペース内のファイル操作と tool の引数・結果の変換
+harness/workspace/command.rs コマンドの起動・出力制限・中止・終了処理
 codex_subscription.rs  ChatGPT OAuth と Codex モデルを使う Model アダプター
 config.rs      ~/.config/solo/config.yml の読み込み・検証・保存
 auto_approval.rs  指定モデルによるツール承認の判定と手動確認への復帰
 subscription_worker.rs Solo ハーネスの更新から Solo event への変換
 acp.rs         ACP v1 の設定・JSON-RPC 契約
-acp_worker.rs  ACP プロセスと Solo event への変換
+acp_worker.rs  ACP の要求・応答から Solo event への変換
+acp_worker/connection.rs ACP 接続の状態とプロセス・ワーカーの寿命
+acp_worker/stdio.rs 中止可能な非同期の標準入出力
+acp_worker/reader.rs 受信サイズを制限した同期 client への橋渡し
+acp_worker/writer.rs ACP の送信順序を保ち、制御通知で UI を待たせない書込み
 text.rs        UTF-16 / UTF-8、grapheme、IME composition のコア契約（GPUI 非依存）
-ui/            GPUI の Entity・focus・リスト・入力・window寿命
+ui/mod.rs      GPUI の起動、ワークスペース・セッションの表示状態と寿命
+ui/execution.rs 実行先の選択、ワーカー起動、入力復元とストリーム接続
+ui/stream.rs   イベントの一括受信、表示の更新、承認要求と順番待ちへの反映
+ui/views.rs    ワークスペースの共通レイアウトとナビゲーション
+ui/views/      会話・差分・ログ・入力欄それぞれの描画
 design/        GPUI Kit の部品・入力・テーマと Solo のイベント契約の接続
 gallery/       デザイン確認用アプリのページと操作例
 ```

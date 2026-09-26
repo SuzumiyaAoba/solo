@@ -1,4 +1,5 @@
 use super::*;
+use solo::subscription_worker::Delivery as SubscriptionDelivery;
 use std::time::Duration;
 
 pub(super) fn start(window: &Window, cx: &mut Context<Workspace>) {
@@ -29,6 +30,7 @@ pub(super) fn start(window: &Window, cx: &mut Context<Workspace>) {
                         assert_eq!(input.value(cx), "前🙂日本語");
                     });
                     let done = !s.model.status.is_active();
+                    assert_eq!(s.chat_list.read(cx).item_count(), s.model.chat.len(), "visible conversation rows must follow the projection");
                     assert_eq!(this.scenario_picker.read(cx).disabled, !done);
                     if done {
                         assert_eq!(s.model.status, if scenario == Scenario::Faults { Status::Disconnected } else { Status::Completed });

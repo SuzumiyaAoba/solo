@@ -1,8 +1,8 @@
 //! Solo 自身のハーネスを動かし、Codex モデルの応答を UI イベントに変換する。
 use crate::{
-    approval::ApprovalRequest,
+    approval::{ApprovalRequest, wait_for_reply},
     codex_subscription::{Authentication, DEFAULT_MODEL, DeviceLogin},
-    event::{Envelope, Event, SCHEMA_VERSION, Usage, preview},
+    event::{Envelope, Event, Usage, preview},
     harness::{
         self, Cancellation, Limits, Message, StopReason, ToolCall, Update,
         workspace::WorkspaceTools,
@@ -16,11 +16,8 @@ use std::{
     panic::{AssertUnwindSafe, catch_unwind},
     path::PathBuf,
     process::Command,
-    sync::atomic::{AtomicU64, Ordering},
     thread,
-    time::{SystemTime, UNIX_EPOCH},
 };
-use tokio_util::sync::CancellationToken;
 
 pub enum Delivery {
     Event(Envelope),
@@ -47,13 +44,11 @@ pub struct Config {
 
 pub struct Controller {
     cancellation: Cancellation,
-    network_cancel: CancellationToken,
 }
 
 impl Controller {
     pub fn cancel(&self) {
         self.cancellation.cancel();
-        self.network_cancel.cancel();
     }
 
     pub fn disconnect(&self) {
@@ -73,10 +68,8 @@ pub fn start(config: Config) -> io::Result<(Controller, Receiver<Delivery>)> {
         return Err(io::Error::other("workspace がディレクトリではありません"));
     }
     let cancellation = Cancellation::default();
-    let network_cancel = CancellationToken::new();
     let controller = Controller {
         cancellation: cancellation.clone(),
-        network_cancel: network_cancel.clone(),
     };
     let (sender, receiver) = async_channel::bounded(256);
     thread::Builder::new()
@@ -98,14 +91,7 @@ pub fn start(config: Config) -> io::Result<(Controller, Receiver<Delivery>)> {
                 prompt: config.prompt.clone(),
             });
             let result = catch_unwind(AssertUnwindSafe(|| {
-                run(
-                    config,
-                    workspace,
-                    &sender,
-                    &mut emitter,
-                    &cancellation,
-                    &network_cancel,
-                )
+                run(config, workspace, &sender, &mut emitter, &cancellation)
             }));
             match result {
                 Ok(Ok(())) => {}
@@ -138,15 +124,14 @@ fn panic_message(payload: &Box<dyn std::any::Any + Send>) -> &str {
 
 pub fn start_login() -> io::Result<(Controller, Receiver<Delivery>)> {
     let cancellation = Cancellation::default();
-    let network_cancel = CancellationToken::new();
     let controller = Controller {
         cancellation: cancellation.clone(),
-        network_cancel: network_cancel.clone(),
     };
     let (sender, receiver) = async_channel::bounded(4);
     thread::Builder::new()
         .name("solo-chatgpt-login".into())
         .spawn(move || {
+            let network_cancel = cancellation.child_token();
             let result = (|| -> io::Result<()> {
                 let auth = Authentication::new()?;
                 auth.login_device(
@@ -174,15 +159,15 @@ fn run(
     sender: &Sender<Delivery>,
     emitter: &mut Emitter,
     cancellation: &Cancellation,
-    network_cancel: &CancellationToken,
 ) -> io::Result<()> {
+    let network_cancel = cancellation.child_token();
     let auth = Authentication::new()?;
     if !auth.is_logged_in()? {
         auth.login_device(
             |login| {
                 let _ = sender.send_blocking(Delivery::Login(login));
             },
-            network_cancel,
+            &network_cancel,
         )?;
     }
     let _ = sender.send_blocking(Delivery::Authenticated);
@@ -194,7 +179,7 @@ fn run(
     } else {
         config.model
     };
-    let mut model = auth.model(model_name.clone(), network_cancel.clone())?;
+    let mut model = auth.model(model_name.clone(), network_cancel)?;
     let mut tools = WorkspaceTools::new(&workspace)?.with_cancellation(cancellation.clone());
     let mut messages = config.history;
     messages.push(Message::User {
@@ -202,6 +187,7 @@ fn run(
     });
     let approval_sender = sender.clone();
     let approval_workspace = workspace.clone();
+    let approval_cancellation = cancellation.clone();
     let mut policy = move |call: &ToolCall| {
         if matches!(call.name.as_str(), "read" | "search") {
             return true;
@@ -216,7 +202,7 @@ fn run(
         {
             return false;
         }
-        answer.recv_blocking().unwrap_or(false)
+        wait_for_reply(answer, &approval_cancellation)
     };
     let mut model_requests = 0;
     let mut log_offset = 0;
@@ -257,8 +243,8 @@ fn run(
                 });
             }
             Update::ToolFinished { call_id, result } => {
-                if !result.is_error
-                    && let Some((relative, before)) = edit_snapshots.remove(&call_id)
+                if let Some((relative, before)) = edit_snapshots.remove(&call_id)
+                    && !result.is_error
                     && let Some(after) = read_workspace_file(&workspace, &relative)
                     && let Some(diff) = unified_diff(&relative, &before, &after)
                 {
@@ -303,10 +289,14 @@ fn run(
 
 fn read_workspace_file(workspace: &std::path::Path, relative: &str) -> Option<String> {
     let path = workspace.join(relative).canonicalize().ok()?;
-    if !path.starts_with(workspace) || fs::metadata(&path).ok()?.len() > 1024 * 1024 {
+    if !path.starts_with(workspace) {
         return None;
     }
-    fs::read_to_string(path).ok()
+    let metadata = fs::metadata(&path).ok()?;
+    if !metadata.is_file() || metadata.len() > 1024 * 1024 {
+        return None;
+    }
+    crate::storage::read_text(&path, 1024 * 1024, "差分の読み取り上限です").ok()
 }
 
 fn unified_diff(relative: &str, before: &str, after: &str) -> Option<String> {
@@ -335,7 +325,7 @@ fn unified_diff(relative: &str, before: &str, after: &str) -> Option<String> {
 
 struct Emitter {
     session_id: String,
-    sequence: AtomicU64,
+    sequence: u64,
     turn_id: String,
     sender: Sender<Delivery>,
 }
@@ -344,33 +334,103 @@ impl Emitter {
     fn new(session_id: String, start_sequence: u64, sender: Sender<Delivery>) -> Self {
         Self {
             session_id,
-            sequence: AtomicU64::new(start_sequence),
+            sequence: start_sequence,
             turn_id: format!("solo-turn-{}", start_sequence + 1),
             sender,
         }
     }
 
-    fn emit(&self, event: Event) {
-        let sequence = self.sequence.fetch_add(1, Ordering::Relaxed) + 1;
-        let envelope = Envelope {
-            schema_version: SCHEMA_VERSION,
-            event_id: format!("{}-{sequence}", self.session_id),
-            session_id: self.session_id.clone(),
-            sequence,
-            timestamp_ms: SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_millis() as u64,
-            turn_id: Some(self.turn_id.clone()),
-            payload: serde_json::to_value(event).expect("serializable event"),
-        };
+    fn emit(&mut self, event: Event) {
+        self.sequence += 1;
+        let envelope = Envelope::new(&self.session_id, self.sequence, self.turn_id.clone(), event);
         let _ = self.sender.send_blocking(Delivery::Event(envelope));
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::unified_diff;
+    use super::*;
+
+    #[test]
+    fn approval_answers_are_preserved_and_closed_or_cancelled_waits_decline() {
+        for allowed in [false, true] {
+            let (reply, answer) = async_channel::bounded(1);
+            reply.send_blocking(allowed).unwrap();
+            assert_eq!(wait_for_reply(answer, &Cancellation::default()), allowed);
+        }
+        let (reply, answer) = async_channel::bounded(1);
+        drop(reply);
+        assert!(!wait_for_reply(answer, &Cancellation::default()));
+
+        let cancelled = Cancellation::default();
+        cancelled.cancel();
+        let (reply, answer) = async_channel::bounded(1);
+        reply.send_blocking(true).unwrap();
+        assert!(!wait_for_reply(answer, &cancelled));
+    }
+
+    #[test]
+    fn cancellation_interrupts_approval_wait_even_if_the_reply_is_still_owned_by_the_ui() {
+        let cancellation = Cancellation::default();
+        let controller = Controller {
+            cancellation: cancellation.clone(),
+        };
+        let (reply, answer) = async_channel::bounded(1);
+        let (done, result) = std::sync::mpsc::channel();
+        let worker = thread::spawn(move || {
+            let _ = done.send(wait_for_reply(answer, &cancellation));
+        });
+        controller.cancel();
+        let completed = result.recv_timeout(std::time::Duration::from_secs(1));
+        drop(reply);
+        worker.join().unwrap();
+        assert!(!completed.expect("cancellation must not wait for a UI reply"));
+    }
+
+    #[test]
+    fn diff_snapshots_only_read_bounded_workspace_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        fs::write(root.join("small"), "日本語").unwrap();
+        fs::write(root.join("large"), vec![b'x'; 1024 * 1024 + 1]).unwrap();
+        fs::write(outside.path().join("file"), "outside").unwrap();
+        assert_eq!(
+            read_workspace_file(&root, "small").as_deref(),
+            Some("日本語")
+        );
+        assert!(read_workspace_file(&root, "large").is_none());
+        assert!(read_workspace_file(&root, ".").is_none());
+        assert!(
+            read_workspace_file(&root, outside.path().join("file").to_str().unwrap()).is_none()
+        );
+    }
+
+    #[test]
+    fn controller_cancellation_reaches_io_without_reverse_propagation() {
+        for explicit in [false, true] {
+            let cancellation = Cancellation::default();
+            let network = cancellation.child_token();
+            let independent_request = cancellation.child_token();
+            independent_request.cancel();
+            assert!(!cancellation.is_cancelled());
+            assert!(!network.is_cancelled());
+            let controller = Controller {
+                cancellation: cancellation.clone(),
+            };
+            if explicit {
+                controller.cancel();
+            } else {
+                drop(controller);
+            }
+            assert!(cancellation.is_cancelled());
+            assert!(network.is_cancelled());
+            assert!(
+                cancellation.child_token().is_cancelled(),
+                "a late worker must inherit an earlier stop request"
+            );
+        }
+    }
 
     #[test]
     fn edit_diff_uses_workspace_path_and_correct_hunk() {

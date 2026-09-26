@@ -1,6 +1,6 @@
 use solo::{
     approval::{ApprovalPlan, ApprovalRequest},
-    auto_approval::{self, CodexReviewer, ReviewInput, Reviewer},
+    auto_approval::{self, CodexReviewer, ReviewInput},
     codex_subscription::{Authentication, DEFAULT_MODEL},
     command_rules::{RuleList, RuleStore},
     harness::{
@@ -13,7 +13,6 @@ use std::{
     io::{self, Write},
     path::PathBuf,
 };
-use tokio_util::sync::CancellationToken;
 
 fn main() {
     if let Err(error) = run() {
@@ -54,7 +53,8 @@ fn run() -> io::Result<()> {
         rule_store.approval_policy()?;
     }
     let auth = Authentication::new()?;
-    let cancel = CancellationToken::new();
+    let cancellation = Cancellation::default();
+    let cancel = cancellation.child_token();
     if login || !auth.is_logged_in()? {
         auth.login_device(
             |device| {
@@ -70,7 +70,7 @@ fn run() -> io::Result<()> {
         return Ok(());
     }
     let mut model = auth.model(model_name.clone(), cancel.clone())?;
-    let mut tools = WorkspaceTools::new(&cwd)?;
+    let mut tools = WorkspaceTools::new(&cwd)?.with_cancellation(cancellation.clone());
     let user_prompt = prompt.join(" ");
     let review_prompt = user_prompt.clone();
     let mut policy = |call: &ToolCall| {
@@ -97,10 +97,7 @@ fn run() -> io::Result<()> {
             ApprovalPlan::Auto(settings) => {
                 eprintln!("\n[Auto] {} で承認を判定中", settings.model);
                 let input = ReviewInput::new(&request, &review_prompt, &cwd);
-                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    CodexReviewer.review(&settings, &input, &cancel)
-                }))
-                .unwrap_or_else(|_| Err("Auto 判定のワーカーが終了しました".into()));
+                let result = auto_approval::review(&CodexReviewer, &settings, &input, &cancel);
                 let current = match request.plan(&rule_store) {
                     Ok(plan) => plan,
                     Err(error) => {
@@ -179,7 +176,7 @@ fn run() -> io::Result<()> {
         &mut policy,
         vec![Message::User { text: user_prompt }],
         &Limits::default(),
-        &Cancellation::default(),
+        &cancellation,
         |update| match update {
             Update::Assistant(text) | Update::AssistantDelta(text) => {
                 print!("{text}");

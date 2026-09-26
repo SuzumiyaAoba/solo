@@ -88,7 +88,7 @@ pub(super) fn start(window: &Window, cx: &mut Context<ProjectManager>) {
             // プロジェクト A の待機状態・下書きを B に混ぜない。実モデルは起動しない。
             alpha.update(cx, |workspace, cx| {
                 workspace.new_session(window, cx);
-                workspace.sessions[1].is_subscription = true;
+                workspace.sessions[1].backend = Some(Backend::Subscription);
                 workspace.sessions[1].model.status = Status::Running;
                 workspace.new_session(window, cx);
                 workspace.start_selected(2, "Alpha の順番待ち".into(), cx);

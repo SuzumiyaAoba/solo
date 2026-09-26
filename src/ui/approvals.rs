@@ -1,6 +1,38 @@
 use super::*;
 use gpui_kit::component::WindowExt;
 
+pub(super) struct PendingApproval {
+    request: ApprovalRequest,
+    reply: async_channel::Sender<bool>,
+    details_open: bool,
+    pub(super) policy_error: Option<String>,
+    serial: u64,
+    review: Option<RunningReview>,
+    pub(super) review_note: Option<String>,
+}
+
+impl PendingApproval {
+    pub(super) fn respond(self, accepted: bool) {
+        let _ = self.reply.try_send(accepted);
+    }
+
+    pub(super) fn is_reviewing(&self) -> bool {
+        self.review.is_some()
+    }
+}
+
+/// 判定に使った設定とその判定を止める token を同じ寿命で管理する。
+struct RunningReview {
+    settings: AutoSettings,
+    cancel: tokio_util::sync::CancellationToken,
+}
+
+impl Drop for RunningReview {
+    fn drop(&mut self) {
+        self.cancel.cancel();
+    }
+}
+
 #[derive(Default)]
 pub(super) struct PolicyRevision(u64);
 impl Global for PolicyRevision {}
@@ -67,8 +99,7 @@ impl Workspace {
             details_open: false,
             policy_error: decision.as_ref().err().cloned(),
             serial,
-            auto_settings: None,
-            auto_cancel: None,
+            review: None,
             review_note: None,
         });
         match decision {
@@ -102,7 +133,7 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         if let Some(approval) = self.sessions[index].approval.take() {
-            let _ = approval.reply.try_send(accepted);
+            approval.respond(accepted);
             self.sessions[index].approval_note = Some(note.clone());
             self.toast.update(cx, |toast, cx| {
                 toast.push(
@@ -133,23 +164,22 @@ impl Workspace {
         let serial = pending.serial;
         let session_id = session.model.id.clone();
         let generation = session.stream_generation;
-        pending.auto_settings = Some(settings.clone());
-        pending.auto_cancel = Some(cancel.clone());
+        pending.review = Some(RunningReview {
+            settings: settings.clone(),
+            cancel: cancel.clone(),
+        });
         let reviewer = self.approval_reviewer.clone();
         let worker_settings = settings.clone();
         let (sender, receiver) = async_channel::bounded(1);
         if let Err(error) = std::thread::Builder::new()
             .name("solo-auto-approval".into())
             .spawn(move || {
-                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    reviewer.review(&worker_settings, &input, &cancel)
-                }))
-                .unwrap_or_else(|_| Err("Auto 判定のワーカーが終了しました".into()));
+                let result =
+                    auto_approval::review(reviewer.as_ref(), &worker_settings, &input, &cancel);
                 let _ = sender.send_blocking(result);
             })
         {
-            pending.auto_settings = None;
-            pending.auto_cancel = None;
+            pending.review = None;
             pending.review_note = Some(format!(
                 "Auto を開始できません。手動で確認してください: {error}"
             ));
@@ -211,10 +241,7 @@ impl Workspace {
             self.finish_approval(index, accepted, note, cx);
         } else {
             let approval = self.sessions[index].approval.as_mut().unwrap();
-            approval.auto_settings = None;
-            if let Some(cancel) = approval.auto_cancel.take() {
-                cancel.cancel();
-            }
+            approval.review = None;
             approval.policy_error = current.as_ref().err().cloned();
             approval.review_note = Some(match current {
                 Ok(ApprovalPlan::Auto(settings)) if &settings == started => match result {
@@ -234,9 +261,9 @@ impl Workspace {
             .filter_map(|session| {
                 let approval = session.approval.as_ref()?;
                 if let (Some(started), Ok(ApprovalPlan::Auto(current))) = (
-                    &approval.auto_settings,
+                    &approval.review,
                     plan(&self.command_rules, &approval.request),
-                ) && started == &current
+                ) && started.settings == current
                 {
                     return None;
                 }
@@ -244,8 +271,8 @@ impl Workspace {
                     (
                         session.model.id.clone(),
                         session.stream_generation,
-                        approval.request.clone(),
-                        approval.reply.clone(),
+                        approval.request,
+                        approval.reply,
                     )
                 })
             })
@@ -377,10 +404,10 @@ impl Workspace {
             .flex()
             .flex_col()
             .gap_3()
-            .when_some(approval.auto_settings.as_ref(), |v, settings| {
+            .when_some(approval.review.as_ref(), |v, review| {
                 v.child(ds::alert(
                     "Auto 判定中",
-                    format!("判定モデル: {}", settings.model),
+                    format!("判定モデル: {}", review.settings.model),
                     Tone::Accent,
                     cx,
                 ))

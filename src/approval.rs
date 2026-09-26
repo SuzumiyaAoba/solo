@@ -8,6 +8,17 @@ use crate::{
 use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
 
+/// UI が返答を保持したままでも中止できる。切断と中止は許可として扱わない。
+pub(crate) fn wait_for_reply(
+    answer: async_channel::Receiver<bool>,
+    cancellation: &crate::harness::Cancellation,
+) -> bool {
+    let cancel = cancellation.child_token();
+    futures::executor::block_on(cancel.run_until_cancelled(answer.recv()))
+        .and_then(Result::ok)
+        .unwrap_or(false)
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ApprovalPlan {
     Allow(&'static str),

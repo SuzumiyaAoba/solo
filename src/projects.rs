@@ -1,9 +1,9 @@
 //! プロジェクトの登録情報。セッションや実行プロセスは UI 側でプロジェクトごとに保持する。
+use crate::storage::{FileTransaction, read_optional};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashSet,
-    fs,
-    io::{self, Read, Write},
+    io,
     path::{Path, PathBuf},
 };
 
@@ -188,16 +188,14 @@ impl ProjectStore {
     }
 
     pub fn load(&self) -> io::Result<Catalog> {
-        let file = match fs::File::open(&self.path) {
-            Ok(file) => file,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Catalog::default()),
-            Err(error) => return Err(error),
+        let Some(bytes) = read_optional(
+            &self.path,
+            MAX_CATALOG_BYTES,
+            "プロジェクト設定が大きすぎます",
+        )?
+        else {
+            return Ok(Catalog::default());
         };
-        let mut bytes = Vec::new();
-        file.take(MAX_CATALOG_BYTES + 1).read_to_end(&mut bytes)?;
-        if bytes.len() as u64 > MAX_CATALOG_BYTES {
-            return Err(invalid("プロジェクト設定が大きすぎます"));
-        }
         let catalog: Catalog =
             serde_json::from_slice(&bytes).map_err(|error| invalid(&error.to_string()))?;
         catalog.validate()?;
@@ -207,22 +205,12 @@ impl ProjectStore {
     /// 保存完了まで呼び出し元の状態を変えない。古いウィンドウからの上書きも拒否する。
     pub fn save(&self, catalog: &mut Catalog) -> io::Result<()> {
         catalog.validate()?;
-        let parent = self
-            .path
-            .parent()
-            .filter(|path| !path.as_os_str().is_empty())
-            .ok_or_else(|| invalid("プロジェクト設定の保存先が不正です"))?;
-        fs::create_dir_all(parent)?;
-        let lock_path = self.path.with_extension("json.lock");
-        let lock = fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .open(&lock_path)?;
-        lock.try_lock().map_err(|error| {
-            io::Error::other(format!("プロジェクト設定を別の処理が更新中です: {error}"))
-        })?;
+        let transaction = FileTransaction::begin(
+            &self.path,
+            "json.lock",
+            "プロジェクト設定の保存先が不正です",
+            "プロジェクト設定を別の処理が更新中です",
+        )?;
         let current = self.load()?;
         if current.revision != catalog.revision {
             return Err(invalid(
@@ -239,10 +227,7 @@ impl ProjectStore {
         if bytes.len() as u64 > MAX_CATALOG_BYTES {
             return Err(invalid("プロジェクト設定が大きすぎます"));
         }
-        let mut temporary = tempfile::NamedTempFile::new_in(parent)?;
-        temporary.write_all(&bytes)?;
-        temporary.as_file().sync_all()?;
-        temporary.persist(&self.path).map_err(|error| error.error)?;
+        transaction.commit(&bytes)?;
         *catalog = next;
         Ok(())
     }

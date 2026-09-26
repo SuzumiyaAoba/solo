@@ -2,7 +2,7 @@ use serde_json::json;
 use solo::{
     acp::AgentProfile,
     approval::{ApprovalPlan, ApprovalRequest},
-    auto_approval::{self, Assessment, ReviewInput, Verdict},
+    auto_approval::{self, Assessment, ReviewInput, Reviewer, Verdict},
     command_rules::{CommandInvocation, Decision, RuleList, RuleStore},
     config::{AppConfig, ApprovalMode, ApprovalSettings, AutoSettings, ConfigStore},
     harness::{Message, Model, ModelOutput, ToolCall, ToolSpec},
@@ -28,6 +28,28 @@ fn settings(mode: ApprovalMode) -> ApprovalSettings {
             timeout_seconds: 15,
         },
     }
+}
+
+#[test]
+fn a_panicking_reviewer_returns_an_error_for_manual_fallback() {
+    struct PanickingReviewer;
+    impl Reviewer for PanickingReviewer {
+        fn review(
+            &self,
+            _: &AutoSettings,
+            _: &ReviewInput,
+            _: &CancellationToken,
+        ) -> Result<Assessment, String> {
+            panic!("reviewer failed");
+        }
+    }
+    let result = auto_approval::review(
+        &PanickingReviewer,
+        &settings(ApprovalMode::Auto).auto,
+        &ReviewInput { data: json!({}) },
+        &CancellationToken::new(),
+    );
+    assert!(result.is_err());
 }
 
 #[test]

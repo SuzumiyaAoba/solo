@@ -1,24 +1,24 @@
 //! ACP v1 Agent のプロセスを UI セッション単位で保持する。
+mod connection;
+mod reader;
+mod stdio;
+mod writer;
 use crate::{
-    acp::{AgentProfile, Client},
-    approval::ApprovalRequest,
-    event::{Envelope, Event, SCHEMA_VERSION, Usage, preview},
+    acp::{self, AgentProfile, Client},
+    approval::{ApprovalRequest, wait_for_reply},
+    event::{Envelope, Event, Usage, preview},
+    harness::Cancellation,
 };
 use async_channel::{Receiver, Sender};
+pub use connection::Controller;
 use serde_json::{Value, json};
 use std::{
-    cell::RefCell,
-    collections::{HashMap, HashSet},
-    io::{self, BufReader, Write},
+    collections::HashMap,
+    io::{self, BufReader},
     path::PathBuf,
-    process::{Child, ChildStdin, Command, Stdio},
-    sync::{
-        Arc, Mutex,
-        atomic::{AtomicBool, Ordering},
-    },
     thread,
-    time::{SystemTime, UNIX_EPOCH},
 };
+use writer::Writer;
 
 pub enum Delivery {
     Event(Envelope),
@@ -38,120 +38,23 @@ pub struct Config {
     pub start_sequence: u64,
 }
 
-#[derive(Clone)]
-struct Writer(Arc<Mutex<ChildStdin>>);
-
-impl Writer {
-    fn send(&self, value: Value) -> io::Result<()> {
-        let mut line = serde_json::to_vec(&value)?;
-        line.push(b'\n');
-        self.0
-            .lock()
-            .map_err(|_| io::Error::other("ACP stdin lock"))?
-            .write_all(&line)
-    }
-}
-
-impl Write for Writer {
-    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        self.0
-            .lock()
-            .map_err(|_| io::Error::other("ACP stdin lock"))?
-            .write_all(buf)?;
-        Ok(buf.len())
-    }
-    fn flush(&mut self) -> io::Result<()> {
-        Ok(())
-    }
-}
-
-pub struct Controller {
-    child: Arc<Mutex<Child>>,
-    writer: Writer,
-    prompts: Sender<String>,
-    acp_session: Arc<Mutex<Option<String>>>,
-    active: Arc<AtomicBool>,
-    cancelled: Arc<AtomicBool>,
-}
-
-impl Controller {
-    pub fn prompt(&self, text: String) -> io::Result<()> {
-        self.prompts
-            .try_send(text)
-            .map_err(|_| io::Error::other("ACP agent に入力を送れませんでした"))
-    }
-    pub fn cancel(&self) {
-        self.cancelled.store(true, Ordering::Release);
-        let id = self.acp_session.lock().ok().and_then(|id| id.clone());
-        if self.active.load(Ordering::Acquire)
-            && let Some(id) = id
-            && self
-                .writer
-                .send(json!({"jsonrpc":"2.0","method":"session/cancel","params":{"sessionId":id}}))
-                .is_ok()
-        {
-            return;
-        }
-        self.disconnect();
-    }
-    pub fn disconnect(&self) {
-        if let Ok(mut child) = self.child.lock() {
-            let _ = child.kill();
-        }
-    }
-}
-
-impl Drop for Controller {
-    fn drop(&mut self) {
-        self.disconnect();
-    }
-}
-
 pub fn start(config: Config) -> io::Result<(Controller, Receiver<Delivery>)> {
-    let mut child = Command::new(&config.profile.command)
-        .args(&config.profile.args)
-        .current_dir(&config.workspace)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()?;
-    let reader = BufReader::new(child.stdout.take().expect("piped stdout"));
-    let writer = Writer(Arc::new(Mutex::new(
-        child.stdin.take().expect("piped stdin"),
-    )));
-    let child = Arc::new(Mutex::new(child));
-    let acp_session = Arc::new(Mutex::new(None));
-    let active = Arc::new(AtomicBool::new(false));
-    let cancelled = Arc::new(AtomicBool::new(false));
-    let (prompts, input) = async_channel::bounded(1);
-    let (sender, receiver) = async_channel::bounded(256);
-    let controller = Controller {
-        child: child.clone(),
-        writer: writer.clone(),
-        prompts,
-        acp_session: acp_session.clone(),
-        active: active.clone(),
-        cancelled: cancelled.clone(),
-    };
+    let connection::Transport {
+        controller,
+        receiver,
+        mut client,
+        input,
+        cleanup,
+    } = connection::Transport::start(&config)?;
     thread::Builder::new()
         .name(format!("solo-acp-{}", config.local_session_id))
         .spawn(move || {
-            let mut client = Client::new(reader, writer);
-            let result = run(
-                config,
-                &mut client,
-                sender.clone(),
-                input,
-                &acp_session,
-                &active,
-                &cancelled,
-            );
-            if let Err(error) = result {
-                let _ = sender.send_blocking(Delivery::Error(error.to_string()));
-            }
-            if let Ok(mut child) = child.lock() {
-                let _ = child.kill();
-                let _ = child.wait();
+            let guard = cleanup;
+            let connection = &guard.connection;
+            if let Err(error) = run(config, &mut client, input, connection) {
+                let _ = connection
+                    .output
+                    .send_blocking(Delivery::Error(error.to_string()));
             }
         })?;
     Ok((controller, receiver))
@@ -159,13 +62,11 @@ pub fn start(config: Config) -> io::Result<(Controller, Receiver<Delivery>)> {
 
 fn run(
     config: Config,
-    client: &mut Client<BufReader<std::process::ChildStdout>, Writer>,
-    sender: Sender<Delivery>,
+    client: &mut Client<BufReader<reader::Reader>, Writer>,
     input: Receiver<String>,
-    session_slot: &Mutex<Option<String>>,
-    active: &AtomicBool,
-    cancelled: &AtomicBool,
+    connection: &connection::Connection,
 ) -> io::Result<()> {
+    let sender = &connection.output;
     let mut emitter = Emitter::new(
         config.local_session_id,
         config.start_sequence,
@@ -181,18 +82,14 @@ fn run(
     let initialized = client.initialize()?;
     let methods = initialized["authMethods"].as_array();
     let mut session = client.new_session(&config.workspace, &mut |_| None);
-    if session
-        .as_ref()
-        .err()
-        .is_some_and(|error| error.to_string().to_ascii_lowercase().contains("auth"))
-    {
+    if session.as_ref().err().is_some_and(acp::is_auth_required) {
         let method = methods
             .and_then(|methods| {
                 methods
                     .iter()
-                    .find(|m| m["type"].is_null() || m["type"] == "agent")
+                    .filter(|m| m["type"].is_null() || m["type"] == "agent")
+                    .find_map(|m| m["id"].as_str())
             })
-            .and_then(|m| m["id"].as_str())
             .ok_or_else(|| {
                 io::Error::other(
                     "ACP agent のログインが必要です。agent 自身の CLI でログインしてください",
@@ -202,71 +99,76 @@ fn run(
         session = client.new_session(&config.workspace, &mut |_| None);
     }
     let session = session?;
-    if let Ok(mut slot) = session_slot.lock() {
-        *slot = Some(session.clone());
-    }
+    connection.initialized(session.clone())?;
     sender
         .send_blocking(Delivery::SessionId(session.clone()))
         .map_err(|_| io::Error::other("UI が閉じました"))?;
     while let Ok(prompt) = input.recv_blocking() {
-        cancelled.store(false, Ordering::Release);
+        if connection.is_disconnected() {
+            break;
+        }
+        let cancellation = Cancellation::default();
         emitter.begin_turn(&prompt);
         emitter.emit(Event::ModelRequestStarted {
             provider: format!("ACP / {}", config.profile.name),
             model: "agent の設定".into(),
             request_id: format!("acp-{}", emitter.sequence),
         });
-        active.store(true, Ordering::Release);
-        let bridge = RefCell::new(Bridge::default());
-        let result = client.prompt(&session, &prompt, &mut |message| {
-            if message["method"] == "session/update" && message["params"]["sessionId"] == session {
-                bridge
-                    .borrow_mut()
-                    .handle(&message["params"]["update"], &mut emitter);
-                return None;
-            }
-            if message["method"] == "session/request_permission"
-                && message["params"]["sessionId"] == session
-            {
-                let params = bridge.borrow_mut().permission_params(&message["params"]);
-                let (reply, answer) = async_channel::bounded(1);
-                if sender
-                    .send_blocking(Delivery::Approval {
-                        request: Box::new(ApprovalRequest::acp(
-                            params,
-                            &config.profile,
-                            &config.workspace,
-                        )),
-                        reply,
-                    })
-                    .is_err()
+        let mut bridge = Bridge::default();
+        let result = client.prompt_with_start(
+            &session,
+            &prompt,
+            &mut |message| {
+                if message["method"] == "session/update"
+                    && message["params"]["sessionId"] == session
                 {
-                    return Some(json!({"outcome":{"outcome":"cancelled"}}));
+                    bridge.handle(&message["params"]["update"], &mut emitter);
+                    return None;
                 }
-                let accepted = answer.recv_blocking().unwrap_or(false);
-                if cancelled.load(Ordering::Acquire) {
-                    return Some(json!({"outcome":{"outcome":"cancelled"}}));
-                }
-                let kind = if accepted {
-                    "allow_once"
-                } else {
-                    "reject_once"
-                };
-                let option = message["params"]["options"]
-                    .as_array()
-                    .and_then(|options| options.iter().find(|option| option["kind"] == kind))
-                    .and_then(|option| option["optionId"].as_str())
-                    .filter(|id| !id.is_empty());
-                return Some(match option {
-                    Some(option_id) => {
-                        json!({"outcome":{"outcome":"selected","optionId":option_id}})
+                if message["method"] == "session/request_permission"
+                    && message["params"]["sessionId"] == session
+                {
+                    let params = bridge.permission_params(&message["params"]);
+                    let (reply, answer) = async_channel::bounded(1);
+                    if sender
+                        .send_blocking(Delivery::Approval {
+                            request: Box::new(ApprovalRequest::acp(
+                                params,
+                                &config.profile,
+                                &config.workspace,
+                            )),
+                            reply,
+                        })
+                        .is_err()
+                    {
+                        return Some(json!({"outcome":{"outcome":"cancelled"}}));
                     }
-                    None => json!({"outcome":{"outcome":"cancelled"}}),
-                });
-            }
-            None
-        });
-        active.store(false, Ordering::Release);
+                    let accepted = wait_for_reply(answer, &cancellation);
+                    if cancellation.is_cancelled() {
+                        return Some(json!({"outcome":{"outcome":"cancelled"}}));
+                    }
+                    let kind = if accepted {
+                        "allow_once"
+                    } else {
+                        "reject_once"
+                    };
+                    let option = message["params"]["options"]
+                        .as_array()
+                        .and_then(|options| options.iter().find(|option| option["kind"] == kind))
+                        .and_then(|option| option["optionId"].as_str())
+                        .filter(|id| !id.is_empty());
+                    return Some(match option {
+                        Some(option_id) => {
+                            json!({"outcome":{"outcome":"selected","optionId":option_id}})
+                        }
+                        None => json!({"outcome":{"outcome":"cancelled"}}),
+                    });
+                }
+                None
+            },
+            || connection.start_turn(cancellation.clone()),
+        );
+        connection.finish_turn();
         match result {
             Ok(reason) if reason == "end_turn" => emitter.emit(Event::TurnCompleted {
                 reason: format!("{} が完了しました", config.profile.name),
@@ -277,6 +179,9 @@ fn run(
             }),
             Ok(reason) => emitter.emit(Event::TurnFailed {
                 reason: format!("ACP agent の停止理由: {reason}"),
+            }),
+            Err(error) if acp::is_request_cancelled(&error) => emitter.emit(Event::TurnCancelled {
+                reason: error.to_string(),
             }),
             Err(error) => {
                 emitter.emit(Event::Disconnected {
@@ -312,49 +217,53 @@ impl Emitter {
     }
     fn emit(&mut self, event: Event) {
         self.sequence += 1;
-        let envelope = Envelope {
-            schema_version: SCHEMA_VERSION,
-            event_id: format!("{}-{}", self.session_id, self.sequence),
-            session_id: self.session_id.clone(),
-            sequence: self.sequence,
-            timestamp_ms: SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_millis() as u64,
-            turn_id: Some(self.turn_id.clone()),
-            payload: serde_json::to_value(event).expect("event serialization"),
-        };
+        let envelope = Envelope::new(&self.session_id, self.sequence, self.turn_id.clone(), event);
         let _ = self.sender.send_blocking(Delivery::Event(envelope));
     }
 }
 
 #[derive(Default)]
 struct Bridge {
-    tools: HashSet<String>,
-    metadata: HashMap<String, Value>,
+    tools: HashMap<String, ToolState>,
     log_offset: u64,
 }
+
+#[derive(Default, PartialEq, Eq)]
+enum ToolPhase {
+    #[default]
+    Proposed,
+    Running,
+    Finished,
+}
+
+#[derive(Default)]
+struct ToolState {
+    phase: ToolPhase,
+    metadata: serde_json::Map<String, Value>,
+}
+
 impl Bridge {
-    fn remember_tool(&mut self, update: &Value) -> Value {
+    fn remember_tool(&mut self, update: &Value) {
         let Some(id) = update["toolCallId"].as_str() else {
-            return update.clone();
+            return;
         };
-        let entry = self
-            .metadata
-            .entry(id.into())
-            .or_insert_with(|| json!({"toolCallId":id}));
+        let tool = self.tools.entry(id.into()).or_default();
+        tool.metadata.insert("toolCallId".into(), json!(id));
         for key in ["name", "title", "kind", "rawInput"] {
             if let Some(value) = update.get(key).filter(|value| !value.is_null()) {
-                entry[key] = value.clone();
+                tool.metadata.insert(key.into(), value.clone());
             }
         }
-        entry.clone()
     }
     fn permission_params(&mut self, params: &Value) -> Value {
         let mut params = params.clone();
-        let metadata = self.remember_tool(&params["toolCall"]);
-        if let Some(tool) = params["toolCall"].as_object_mut() {
-            for (key, value) in metadata.as_object().into_iter().flatten() {
+        self.remember_tool(&params["toolCall"]);
+        if let Some(state) = params["toolCall"]["toolCallId"]
+            .as_str()
+            .and_then(|id| self.tools.get(id))
+            && let Some(tool) = params["toolCall"].as_object_mut()
+        {
+            for (key, value) in &state.metadata {
                 tool.insert(key.clone(), value.clone());
             }
         }
@@ -374,7 +283,9 @@ impl Bridge {
             Some("tool_call" | "tool_call_update") => {
                 self.remember_tool(update);
                 if let Some(id) = update["toolCallId"].as_str() {
-                    if self.tools.insert(id.into()) {
+                    let tool = self.tools.get_mut(id).expect("tool metadata was recorded");
+                    if tool.phase == ToolPhase::Proposed {
+                        tool.phase = ToolPhase::Running;
                         out.emit(Event::ToolStarted {
                             invocation_id: id.into(),
                             command: update["title"].as_str().unwrap_or("ACP tool").into(),
@@ -405,18 +316,20 @@ impl Bridge {
                             }
                         }
                     }
-                    if matches!(update["status"].as_str(), Some("completed" | "failed"))
-                        && self.tools.remove(id)
-                    {
-                        self.metadata.remove(id);
-                        out.emit(Event::ToolFinished {
-                            invocation_id: id.into(),
-                            exit_code: if update["status"] == "completed" {
-                                0
-                            } else {
-                                -1
-                            },
-                        });
+                    if matches!(update["status"].as_str(), Some("completed" | "failed")) {
+                        if tool.phase != ToolPhase::Finished {
+                            tool.phase = ToolPhase::Finished;
+                            out.emit(Event::ToolFinished {
+                                invocation_id: id.into(),
+                                exit_code: if update["status"] == "completed" {
+                                    0
+                                } else {
+                                    -1
+                                },
+                            });
+                        }
+                        // 完了済みという記録は残し、承認用の入力は次の要求へ引き継がない。
+                        tool.metadata.clear();
                     }
                 }
             }
@@ -463,101 +376,4 @@ fn simple_diff(path: &str, old: &str, new: &str) -> String {
 }
 
 #[cfg(test)]
-mod tests {
-    #[cfg(unix)]
-    use super::*;
-    #[cfg(unix)]
-    use crate::projection::{Apply, Session, Status};
-    #[cfg(unix)]
-    use std::{
-        fs,
-        os::unix::fs::PermissionsExt,
-        time::{Duration, Instant},
-    };
-
-    #[cfg(unix)]
-    #[test]
-    fn permission_request_inherits_tool_metadata_and_updates_do_not_clear_it() {
-        let mut bridge = Bridge::default();
-        bridge.remember_tool(&json!({"toolCallId":"one","kind":"execute","name":"shell","rawInput":{"command":"pwd","cwd":"/tmp"}}));
-        bridge.remember_tool(
-            &json!({"toolCallId":"one","kind":null,"rawInput":null,"title":"Working"}),
-        );
-        let params = bridge.permission_params(&json!({"sessionId":"s","toolCall":{"toolCallId":"one"},"options":[{"kind":"allow_once"}]}));
-        assert_eq!(params["toolCall"]["kind"], "execute");
-        assert_eq!(params["toolCall"]["rawInput"]["command"], "pwd");
-        assert_eq!(params["toolCall"]["title"], "Working");
-        let other = bridge.permission_params(&json!({"toolCall":{"toolCallId":"two"}}));
-        assert!(other["toolCall"]["rawInput"].is_null());
-        let changed = bridge.permission_params(
-            &json!({"toolCall":{"toolCallId":"one","rawInput":{"command":"whoami"}}}),
-        );
-        assert_eq!(changed["toolCall"]["rawInput"], json!({"command":"whoami"}));
-    }
-
-    #[test]
-    fn two_turns_share_one_agent_process_and_permission_is_forwarded() {
-        let dir = tempfile::tempdir().unwrap();
-        let agent = dir.path().join("fake-acp");
-        fs::write(&agent, r##"#!/bin/sh
-IFS= read -r line
-echo '{"jsonrpc":"2.0","id":0,"result":{"protocolVersion":1,"agentCapabilities":{},"authMethods":[]}}'
-IFS= read -r line
-echo '{"jsonrpc":"2.0","id":1,"result":{"sessionId":"acp-1"}}'
-IFS= read -r line
-echo '{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"acp-1","update":{"sessionUpdate":"tool_call","toolCallId":"tool-1","title":"read","status":"pending"}}}'
-echo '{"jsonrpc":"2.0","id":77,"method":"session/request_permission","params":{"sessionId":"acp-1","toolCall":{"toolCallId":"tool-1"},"options":[{"optionId":"a","kind":"allow_once","name":"Allow"},{"optionId":"r","kind":"reject_once","name":"Reject"}]}}'
-IFS= read -r line
-case "$line" in *'"optionId":"a"'*) ;; *) exit 3;; esac
-echo '{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"acp-1","update":{"sessionUpdate":"tool_call_update","toolCallId":"tool-1","status":"completed","content":[{"type":"diff","path":"/tmp/a","oldText":"old","newText":"new"}]}}}'
-echo '{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"acp-1","update":{"sessionUpdate":"agent_message_chunk","messageId":"m1","content":{"type":"text","text":"first"}}}}'
-echo '{"jsonrpc":"2.0","id":2,"result":{"stopReason":"end_turn"}}'
-IFS= read -r line
-echo '{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"acp-1","update":{"sessionUpdate":"agent_message_chunk","messageId":"m2","content":{"type":"text","text":"second"}}}}'
-echo '{"jsonrpc":"2.0","id":3,"result":{"stopReason":"end_turn"}}'
-IFS= read -r line
-"##).unwrap();
-        let mut permissions = fs::metadata(&agent).unwrap().permissions();
-        permissions.set_mode(0o700);
-        fs::set_permissions(&agent, permissions).unwrap();
-        let (controller, receiver) = start(Config {
-            local_session_id: "local".into(),
-            title: "test".into(),
-            workspace: dir.path().to_path_buf(),
-            profile: AgentProfile {
-                id: "a".into(),
-                name: "Agent A".into(),
-                command: agent.display().to_string(),
-                args: vec![],
-            },
-            start_sequence: 0,
-        })
-        .unwrap();
-        let mut session = Session::new("local".into(), "test".into());
-        for (turn, prompt) in ["first prompt", "second prompt"].into_iter().enumerate() {
-            controller.prompt(prompt.into()).unwrap();
-            let deadline = Instant::now() + Duration::from_secs(5);
-            while Instant::now() < deadline {
-                match receiver.try_recv() {
-                    Ok(Delivery::Event(event)) => {
-                        assert_eq!(session.apply(event), Apply::Applied);
-                        if session.status == Status::Completed
-                            && session.accepted > if turn == 0 { 2 } else { 8 }
-                        {
-                            break;
-                        }
-                    }
-                    Ok(Delivery::Approval { reply, .. }) => reply.send_blocking(true).unwrap(),
-                    Ok(Delivery::SessionId(id)) => assert_eq!(id, "acp-1"),
-                    Ok(Delivery::Error(error)) => panic!("{error}"),
-                    Err(_) => thread::sleep(Duration::from_millis(10)),
-                }
-            }
-            assert_eq!(session.status, Status::Completed, "{}", session.reason);
-        }
-        assert!(session.chat.iter().any(|block| block.text == "first"));
-        assert!(session.chat.iter().any(|block| block.text == "second"));
-        assert_eq!(session.diffs.len(), 1);
-        drop(controller);
-    }
-}
+mod tests;

@@ -65,20 +65,26 @@ impl Authentication {
         announce: impl FnOnce(DeviceLogin),
         cancel: &CancellationToken,
     ) -> io::Result<()> {
-        let begin = self
+        let login = async {
+            let begin = self.auth.begin_device_login().await.map_err(auth_error)?;
+            announce(DeviceLogin {
+                verification_url: begin.verification_uri.clone(),
+                user_code: begin.user_code.clone(),
+            });
+            self.auth
+                .poll_device_login(&begin)
+                .await
+                .map_err(auth_error)
+        };
+        let credential = self
             .runtime
-            .block_on(self.auth.begin_device_login())
-            .map_err(auth_error)?;
-        announce(DeviceLogin {
-            verification_url: begin.verification_uri.clone(),
-            user_code: begin.user_code.clone(),
-        });
-        let credential = self.runtime.block_on(async {
-            tokio::select! {
-                result = self.auth.poll_device_login(&begin) => result.map_err(auth_error),
-                _ = cancel.cancelled() => Err(io::Error::new(io::ErrorKind::Interrupted, "ログインを中止しました")),
-            }
-        })?;
+            .block_on(cancel.run_until_cancelled(login))
+            .unwrap_or_else(|| {
+                Err(io::Error::new(
+                    io::ErrorKind::Interrupted,
+                    "ログインを中止しました",
+                ))
+            })?;
         self.store
             .store(OPENAI_CODEX_PROVIDER_ID, &credential)
             .map_err(auth_error)
@@ -250,8 +256,102 @@ async fn review_with_deadline<T>(
 }
 
 #[cfg(test)]
-mod review_tests {
+mod tests {
     use super::*;
+    use std::{
+        io::Read,
+        net::TcpListener,
+        sync::{
+            atomic::{AtomicBool, Ordering},
+            mpsc,
+        },
+        thread,
+        time::Instant,
+    };
+
+    fn authentication_at(path: PathBuf, base_url: String) -> Authentication {
+        let mut auth = Authentication::with_store(path).unwrap();
+        auth.auth = Arc::new(CodexAuth::with_config(CodexConfig {
+            base_url,
+            ..CodexConfig::default()
+        }));
+        auth
+    }
+
+    #[test]
+    fn cancelled_login_does_not_start_authentication() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("auth.json");
+        let auth = authentication_at(path.clone(), "http://127.0.0.1:0".into());
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+        let result = auth.login_device(
+            |_| panic!("cancelled login must not announce a code"),
+            &cancel,
+        );
+        assert_eq!(result.unwrap_err().kind(), io::ErrorKind::Interrupted);
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn cancelling_the_initial_login_request_does_not_wait_for_a_response() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("auth.json");
+        let auth = authentication_at(
+            path.clone(),
+            format!("http://{}", listener.local_addr().unwrap()),
+        );
+        let cancel = CancellationToken::new();
+        let worker_cancel = cancel.clone();
+        let announced = Arc::new(AtomicBool::new(false));
+        let worker_announced = announced.clone();
+        let (done, result) = mpsc::channel();
+        let worker = thread::spawn(move || {
+            let result = auth.login_device(
+                |_| worker_announced.store(true, Ordering::Release),
+                &worker_cancel,
+            );
+            let _ = done.send(result);
+        });
+        let deadline = Instant::now() + Duration::from_secs(3);
+        let mut connection = loop {
+            match listener.accept() {
+                Ok((stream, _)) => break Some(stream),
+                Err(error)
+                    if error.kind() == io::ErrorKind::WouldBlock && Instant::now() < deadline =>
+                {
+                    thread::sleep(Duration::from_millis(5))
+                }
+                Err(_) => break None,
+            }
+        };
+        let received_request = connection.as_mut().is_some_and(|stream| {
+            let _ = stream.set_read_timeout(Some(Duration::from_secs(1)));
+            stream.read(&mut [0; 4096]).is_ok_and(|bytes| bytes > 0)
+        });
+        cancel.cancel();
+        let completed = result.recv_timeout(Duration::from_secs(1));
+        // 旧実装でテストが失敗しても、待機中の通信を閉じて worker を回収する。
+        drop(connection);
+        drop(listener);
+        worker.join().unwrap();
+        assert!(
+            received_request,
+            "the mock server must receive the initial request"
+        );
+        assert_eq!(
+            completed
+                .expect("cancellation must end login before any HTTP response")
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::Interrupted
+        );
+        assert!(!announced.load(Ordering::Acquire));
+        assert!(!path.exists());
+    }
+
     #[test]
     fn deadline_and_cancellation_stop_a_waiting_review() {
         let runtime = Builder::new_current_thread().enable_all().build().unwrap();

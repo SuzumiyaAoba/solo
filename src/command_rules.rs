@@ -1,12 +1,12 @@
 //! User-owned, workspace-scoped command rules with explicit exact / wildcard matching.
 mod matcher;
+use crate::storage::{FileTransaction, read_optional};
 pub(crate) use matcher::command_text;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{
     collections::BTreeMap,
-    fs::{self, File},
-    io::{self, Read, Write},
+    io,
     path::{Path, PathBuf},
 };
 
@@ -381,16 +381,14 @@ impl RuleStore {
         })
     }
     fn read(&self) -> io::Result<Store> {
-        let file = match File::open(&self.path) {
-            Ok(file) => file,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Store::default()),
-            Err(error) => return Err(error),
+        let Some(bytes) = read_optional(
+            &self.path,
+            MAX_STORE_BYTES,
+            "コマンドルールのファイルが 1 MiB を超えています",
+        )?
+        else {
+            return Ok(Store::default());
         };
-        let mut bytes = Vec::new();
-        file.take(MAX_STORE_BYTES + 1).read_to_end(&mut bytes)?;
-        if bytes.len() as u64 > MAX_STORE_BYTES {
-            return Err(invalid("コマンドルールのファイルが 1 MiB を超えています"));
-        }
         let store: Store = serde_json::from_slice(&bytes)
             .map_err(|error| invalid(format!("コマンドルールを読めません: {error}")))?;
         if !matches!(store.version, 1 | 2) {
@@ -417,22 +415,12 @@ impl RuleStore {
                 edit(config.workspaces.entry(self.workspace.clone()).or_default())
             });
         }
-        let parent = self
-            .path
-            .parent()
-            .ok_or_else(|| invalid("ルール保存先が不正です"))?;
-        fs::create_dir_all(parent)?;
-        let lock = File::options()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .open(self.path.with_extension("json.lock"))?;
-        lock.try_lock().map_err(|error| {
-            io::Error::other(format!(
-                "別の画面でルールを更新中です。再試行してください: {error}"
-            ))
-        })?;
+        let transaction = FileTransaction::begin(
+            &self.path,
+            "json.lock",
+            "ルール保存先が不正です",
+            "別の画面でルールを更新中です。再試行してください",
+        )?;
         // Reload under the lock so other windows / CLI changes are not lost.
         let mut store = self.read()?;
         edit(store.workspaces.entry(self.workspace.clone()).or_default())?;
@@ -441,11 +429,7 @@ impl RuleStore {
         if bytes.len() as u64 > MAX_STORE_BYTES {
             return Err(invalid("コマンドルールの保存上限です"));
         }
-        let mut temp = tempfile::NamedTempFile::new_in(parent)?;
-        temp.write_all(&bytes)?;
-        temp.as_file().sync_all()?;
-        temp.persist(&self.path).map_err(|error| error.error)?;
-        Ok(())
+        transaction.commit(&bytes)
     }
 }
 fn invalid(message: impl Into<String>) -> io::Error {

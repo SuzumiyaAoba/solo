@@ -4,10 +4,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashSet;
-use std::sync::{
-    Arc,
-    atomic::{AtomicBool, Ordering},
-};
+use tokio_util::sync::CancellationToken;
 
 pub mod workspace;
 
@@ -119,14 +116,19 @@ impl Default for Limits {
 }
 
 #[derive(Clone, Default)]
-pub struct Cancellation(Arc<AtomicBool>);
+pub struct Cancellation(CancellationToken);
 
 impl Cancellation {
     pub fn cancel(&self) {
-        self.0.store(true, Ordering::Release);
+        self.0.cancel();
     }
     pub fn is_cancelled(&self) -> bool {
-        self.0.load(Ordering::Acquire)
+        self.0.is_cancelled()
+    }
+
+    /// 実行の中止を I/O に伝える。I/O 側だけの中止は実行全体へ逆伝播しない。
+    pub fn child_token(&self) -> CancellationToken {
+        self.0.child_token()
     }
 }
 
@@ -187,12 +189,16 @@ where
         }
         requests += 1;
         on_update(Update::ModelRequested);
+        if cancellation.is_cancelled() {
+            break StopReason::Cancelled;
+        }
         let mut streamed_text = String::new();
         let output = match model.complete_with_updates(&messages, tools.specs(), &mut |delta| {
             streamed_text.push_str(delta);
             on_update(Update::AssistantDelta(delta.into()));
         }) {
             Ok(output) => output,
+            Err(_) if cancellation.is_cancelled() => break StopReason::Cancelled,
             Err(error) => break StopReason::ModelError(error),
         };
         if cancellation.is_cancelled() {
@@ -239,7 +245,7 @@ where
                 calls += 1;
                 tools.execute(&call)
             };
-            result.content = truncate_utf8(&result.content, limits.max_result_bytes);
+            result.content = truncate_utf8(result.content, limits.max_result_bytes);
             on_update(Update::ToolFinished {
                 call_id: call.id.clone(),
                 result: result.clone(),
@@ -259,13 +265,10 @@ where
     }
 }
 
-fn truncate_utf8(value: &str, limit: usize) -> String {
-    if value.len() <= limit {
-        return value.to_owned();
+fn truncate_utf8(mut value: String, limit: usize) -> String {
+    if value.len() > limit {
+        value.truncate(value.floor_char_boundary(limit));
+        value.push_str("\n[出力を省略]");
     }
-    let mut end = limit;
-    while !value.is_char_boundary(end) {
-        end -= 1;
-    }
-    format!("{}\n[出力を省略]", &value[..end])
+    value
 }

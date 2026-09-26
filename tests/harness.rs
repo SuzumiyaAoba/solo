@@ -13,6 +13,89 @@ impl Model for ScriptedModel {
     }
 }
 
+#[test]
+fn cancellation_from_the_request_observer_prevents_the_model_call() {
+    struct CountingModel(usize);
+    impl Model for CountingModel {
+        fn complete(&mut self, _: &[Message], _: &[ToolSpec]) -> Result<ModelOutput, String> {
+            self.0 += 1;
+            Ok(ModelOutput {
+                text: "unexpected".into(),
+                tool_calls: vec![],
+            })
+        }
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let mut tools = WorkspaceTools::new(dir.path()).unwrap();
+    let mut model = CountingModel(0);
+    let cancel = Cancellation::default();
+    let observer_cancel = cancel.clone();
+    let mut stopped = None;
+    let result = run(
+        &mut model,
+        &mut tools,
+        &mut |_: &ToolCall| true,
+        vec![Message::User { text: "run".into() }],
+        &Limits::default(),
+        &cancel,
+        |update| match update {
+            Update::ModelRequested => observer_cancel.cancel(),
+            Update::Stopped(reason) => stopped = Some(reason),
+            _ => {}
+        },
+    );
+    assert_eq!(
+        model.0, 0,
+        "a stop requested while notifying the observer must precede the model call"
+    );
+    assert_eq!(result.stop, StopReason::Cancelled);
+    assert_eq!(stopped, Some(StopReason::Cancelled));
+    assert_eq!(result.messages.len(), 1);
+}
+
+#[test]
+fn model_errors_after_cancellation_finish_as_cancelled() {
+    struct FailingModel(Option<Cancellation>);
+    impl Model for FailingModel {
+        fn complete(&mut self, _: &[Message], _: &[ToolSpec]) -> Result<ModelOutput, String> {
+            if let Some(cancel) = &self.0 {
+                cancel.cancel();
+            }
+            Err("model request interrupted".into())
+        }
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let mut tools = WorkspaceTools::new(dir.path()).unwrap();
+    for cancelled in [false, true] {
+        let token = Cancellation::default();
+        let mut model = FailingModel(cancelled.then(|| token.clone()));
+        let mut stop = None;
+        let run = run(
+            &mut model,
+            &mut tools,
+            &mut |_: &ToolCall| true,
+            vec![Message::User { text: "run".into() }],
+            &Limits::default(),
+            &token,
+            |update| {
+                if let Update::Stopped(reason) = update {
+                    stop = Some(reason);
+                }
+            },
+        );
+        let expected = if cancelled {
+            StopReason::Cancelled
+        } else {
+            StopReason::ModelError("model request interrupted".into())
+        };
+        assert_eq!(run.stop, expected);
+        assert_eq!(stop, Some(expected));
+        assert_eq!(run.model_requests, 1);
+        assert_eq!(run.tool_calls, 0);
+        assert_eq!(run.messages.len(), 1);
+    }
+}
+
 fn call(id: &str, name: &str, arguments: serde_json::Value) -> ToolCall {
     ToolCall {
         id: id.into(),

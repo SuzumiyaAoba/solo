@@ -1,15 +1,18 @@
 use super::*;
 use gpui_kit::component::WindowExt;
+use solo::subscription_worker::Delivery as SubscriptionDelivery;
 use std::time::Duration;
 
 pub(super) async fn run(this: &WeakEntity<Workspace>, cx: &mut AsyncWindowContext) {
+    this.update_in(cx, login_lifecycle).unwrap();
+    this.update_in(cx, closed_acp_conversation).unwrap();
     // 実モデルに接続せず、workspace の占有と待機解除を検証する。
     let (blocker, queued) = this
         .update_in(cx, |this, window, cx| {
             this.new_session(window, cx);
             let blocker = this.selected;
             this.sessions[blocker].model.status = Status::Running;
-            this.sessions[blocker].is_subscription = true;
+            this.sessions[blocker].backend = Some(Backend::Subscription);
             this.new_session(window, cx);
             let queued = this.selected;
             // 表示用 picker と異なっても、依頼元セッションの実行先を使う。
@@ -59,13 +62,13 @@ pub(super) async fn run(this: &WeakEntity<Workspace>, cx: &mut AsyncWindowContex
             this.dispatch_queue(cx);
             assert!(!this.sessions[queued].model.status.is_active());
             this.sessions[blocker].model.status = Status::Idle;
-            this.sessions[blocker].is_subscription = false;
+            this.sessions[blocker].backend = None;
             this.sessions[blocker].unread_result = false;
             this.queue.paused = false;
             this.select_session(&this.sessions[blocker].model.id.clone(), window, cx);
             this.dispatch_queue(cx);
             assert!(this.sessions[queued].model.status.is_active());
-            assert_eq!(this.sessions[queued].backend_id.as_deref(), Some("mock"));
+            assert_eq!(this.sessions[queued].backend, Some(Backend::Mock));
             assert_eq!(
                 this.scenario_picker.read(cx).selected,
                 0,
@@ -160,4 +163,152 @@ pub(super) async fn run(this: &WeakEntity<Workspace>, cx: &mut AsyncWindowContex
         ds::set_theme(ColorScheme::Light, cx);
         println!("Workflow smoke OK: queue/cancel/resume, background backend, drafts, attention navigation, review, close confirmation, themes and compact layout");
     }).unwrap();
+}
+
+fn closed_acp_conversation(this: &mut Workspace, window: &mut Window, cx: &mut Context<Workspace>) {
+    let missing_agent = tempfile::tempdir().unwrap();
+    let id = "closed-acp-regression";
+    this.acp_agents.push(AgentProfile {
+        id: id.into(),
+        name: "Closed ACP".into(),
+        command: missing_agent
+            .path()
+            .join("missing-agent")
+            .display()
+            .to_string(),
+        args: vec![],
+    });
+    this.new_session(window, cx);
+    let index = this.selected;
+    let session = &mut this.sessions[index];
+    session.selected_backend = this.acp_agents.len();
+    session.backend = Some(Backend::Acp(id.into()));
+    session.model.last_sequence = 4;
+    session.model.turn_id = Some("previous-turn".into());
+    session.model.status = Status::Completed;
+    this.start_selected(index, "続きの依頼を保持".into(), cx);
+    assert!(this.message.contains("新しいタスク"));
+    assert!(this.sessions[index].controller.is_none());
+    assert_eq!(this.sessions[index].model.status, Status::Completed);
+    assert_eq!(
+        this.sessions[index].composer.read(cx).value(cx),
+        "続きの依頼を保持"
+    );
+    this.acp_agents.pop();
+    this.close_session(window, cx);
+    println!(
+        "ACP conversation smoke OK: disconnected conversations preserve their drafts and require a new task"
+    );
+}
+
+fn login_lifecycle(this: &mut Workspace, window: &mut Window, cx: &mut Context<Workspace>) {
+    this.new_session(window, cx);
+    for (delivery, expected) in [
+        (SubscriptionDelivery::Authenticated, Status::Idle),
+        (SubscriptionDelivery::LoginCancelled, Status::Idle),
+        (
+            SubscriptionDelivery::Error("login failed".into()),
+            Status::Failed,
+        ),
+    ] {
+        let session = &mut this.sessions[this.selected];
+        session.model.status = Status::Connecting;
+        session.login_only = true;
+        session.stream_generation += 1;
+        let id = session.model.id.clone();
+        let generation = session.stream_generation;
+        this.sync_controls(cx);
+        assert!(this.workspace_busy());
+        assert!(this.scenario_picker.read(cx).disabled);
+        this.consume(
+            &id,
+            generation - 1,
+            vec![UiDelivery::Subscription(SubscriptionDelivery::Error(
+                "stale stream".into(),
+            ))],
+            true,
+            cx,
+        );
+        assert_eq!(
+            this.sessions[this.selected].model.status,
+            Status::Connecting
+        );
+        this.consume(
+            &id,
+            generation,
+            vec![UiDelivery::Subscription(delivery)],
+            true,
+            cx,
+        );
+        let session = &this.sessions[this.selected];
+        assert_eq!(session.model.status, expected);
+        assert_eq!(
+            session.backend, None,
+            "logging in must not bind a new conversation"
+        );
+        assert!(!session.login_only);
+        assert!(!this.workspace_busy());
+        assert!(session.composer.read(cx).can_submit);
+        assert!(!this.scenario_picker.read(cx).disabled);
+    }
+
+    for status in [Status::Cancelling, Status::Completed] {
+        let session = &mut this.sessions[this.selected];
+        session.model.status = status;
+        session.model.provider = "previous provider".into();
+        let id = session.model.id.clone();
+        let generation = session.stream_generation;
+        this.consume(
+            &id,
+            generation,
+            vec![UiDelivery::Subscription(SubscriptionDelivery::Login(
+                DeviceLogin {
+                    verification_url: "about:blank".into(),
+                    user_code: "late-code".into(),
+                },
+            ))],
+            false,
+            cx,
+        );
+        let session = &this.sessions[this.selected];
+        assert!(
+            session.login.is_none(),
+            "late login must not reopen a cancelled or completed task"
+        );
+        assert_eq!(session.model.provider, "previous provider");
+    }
+
+    let session = &mut this.sessions[this.selected];
+    session.backend = Some(Backend::Subscription);
+    session.model.status = Status::Connecting;
+    session.login_only = true;
+    let id = session.model.id.clone();
+    let generation = session.stream_generation;
+    this.consume(
+        &id,
+        generation,
+        vec![UiDelivery::Subscription(
+            SubscriptionDelivery::Authenticated,
+        )],
+        true,
+        cx,
+    );
+    assert_eq!(
+        this.sessions[this.selected].backend,
+        Some(Backend::Subscription)
+    );
+    assert!(
+        this.scenario_picker.read(cx).disabled,
+        "login must preserve an existing conversation backend"
+    );
+    this.scenario(Scenario::Demo, cx);
+    assert_eq!(this.sessions[this.selected].model.status, Status::Idle);
+    assert_eq!(
+        this.sessions[this.selected].backend,
+        Some(Backend::Subscription)
+    );
+    this.close_session(window, cx);
+    println!(
+        "Login smoke OK: completion, cancellation, failure, stale stream, late login and conversation backend"
+    );
 }

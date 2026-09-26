@@ -1,9 +1,9 @@
 //! ACP v1 の最小 client。Agent は stdio の JSON-RPC 2.0 peer として扱う。
+use crate::storage::read_optional;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::{
     collections::HashSet,
-    fs,
     io::{self, BufRead, Read, Write},
     path::Path,
 };
@@ -24,15 +24,20 @@ struct Registry {
     agents: Vec<AgentProfile>,
 }
 
+const MAX_REGISTRY_BYTES: u64 = 1024 * 1024;
+
 /// 未設定は空リスト。設定の不正値は起動時に知らせ、任意の command を自動起動しない。
 pub fn load_agents(workspace: &Path) -> io::Result<Vec<AgentProfile>> {
     let path = workspace.join(".solo/agents.json");
-    let source = match fs::read_to_string(&path) {
-        Ok(source) => source,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(error) => return Err(error),
+    let Some(source) = read_optional(
+        &path,
+        MAX_REGISTRY_BYTES,
+        "ACP agent の設定が 1 MiB を超えています",
+    )?
+    else {
+        return Ok(Vec::new());
     };
-    let registry: Registry = serde_json::from_str(&source).map_err(invalid)?;
+    let registry: Registry = serde_json::from_slice(&source).map_err(invalid)?;
     let mut ids = HashSet::new();
     if registry.agents.len() > 16 {
         return Err(invalid("ACP agent は最大16件です"));
@@ -58,6 +63,50 @@ pub struct Client<R: BufRead, W: Write> {
 }
 
 const MAX_JSON_LINE_BYTES: usize = 16 * 1024 * 1024;
+const AUTH_REQUIRED: i32 = -32000;
+const REQUEST_CANCELLED: i32 = -32800;
+
+#[derive(Debug, Deserialize)]
+struct RpcError {
+    code: i32,
+    message: String,
+}
+
+impl std::fmt::Display for RpcError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.message)
+    }
+}
+impl std::error::Error for RpcError {}
+
+pub(crate) fn is_auth_required(error: &io::Error) -> bool {
+    rpc_error_code(error) == Some(AUTH_REQUIRED)
+}
+
+pub(crate) fn is_request_cancelled(error: &io::Error) -> bool {
+    rpc_error_code(error) == Some(REQUEST_CANCELLED)
+}
+
+fn rpc_error_code(error: &io::Error) -> Option<i32> {
+    error
+        .get_ref()?
+        .downcast_ref::<RpcError>()
+        .map(|error| error.code)
+}
+
+fn rpc_error(method: &str, value: Value) -> io::Error {
+    let mut error: RpcError = match serde_json::from_value(value) {
+        Ok(error) => error,
+        Err(error) => return invalid(format!("ACP error の形式が不正です: {error}")),
+    };
+    error.message = format!("{method}: {}", error.message);
+    let kind = match error.code {
+        AUTH_REQUIRED => io::ErrorKind::PermissionDenied,
+        REQUEST_CANCELLED => io::ErrorKind::Interrupted,
+        _ => io::ErrorKind::Other,
+    };
+    io::Error::new(kind, error)
+}
 
 impl<R: BufRead, W: Write> Client<R, W> {
     pub fn new(reader: R, writer: W) -> Self {
@@ -115,10 +164,22 @@ impl<R: BufRead, W: Write> Client<R, W> {
         text: &str,
         on_message: &mut impl FnMut(&Value) -> Option<Value>,
     ) -> io::Result<String> {
-        let result = self.request(
+        self.prompt_with_start(session_id, text, on_message, || Ok(()))
+    }
+
+    /// prompt の送信完了後、応答を読む前に実行中の状態を公開する。
+    pub(crate) fn prompt_with_start(
+        &mut self,
+        session_id: &str,
+        text: &str,
+        on_message: &mut impl FnMut(&Value) -> Option<Value>,
+        started: impl FnOnce() -> io::Result<()>,
+    ) -> io::Result<String> {
+        let result = self.request_with_start(
             "session/prompt",
             json!({"sessionId":session_id,"prompt":[{"type":"text","text":text}]}),
             on_message,
+            started,
         )?;
         result["stopReason"]
             .as_str()
@@ -136,21 +197,34 @@ impl<R: BufRead, W: Write> Client<R, W> {
         params: Value,
         on_message: &mut impl FnMut(&Value) -> Option<Value>,
     ) -> io::Result<Value> {
+        self.request_with_start(method, params, on_message, || Ok(()))
+    }
+
+    fn request_with_start(
+        &mut self,
+        method: &str,
+        params: Value,
+        on_message: &mut impl FnMut(&Value) -> Option<Value>,
+        started: impl FnOnce() -> io::Result<()>,
+    ) -> io::Result<Value> {
         let id = self.next_id;
         self.next_id += 1;
         self.send(json!({"jsonrpc":"2.0","id":id,"method":method,"params":params}))?;
+        started()?;
         loop {
-            let message = self.read()?;
+            let mut message = self.read()?;
             if message["id"] == id && message.get("method").is_none() {
-                if let Some(error) = message.get("error") {
-                    return Err(invalid(format!(
-                        "{method}: {}",
-                        error["message"].as_str().unwrap_or("ACP error")
-                    )));
+                if message.get("result").is_some() == message.get("error").is_some() {
+                    return Err(invalid(
+                        "ACP 応答には result と error のどちらか一方が必要です",
+                    ));
+                }
+                if let Some(error) = message.get_mut("error") {
+                    return Err(rpc_error(method, error.take()));
                 }
                 return message
-                    .get("result")
-                    .cloned()
+                    .get_mut("result")
+                    .map(Value::take)
                     .ok_or_else(|| invalid("ACP result がありません"));
             }
             if let Some(request_id) = message.get("id")
@@ -170,10 +244,7 @@ impl<R: BufRead, W: Write> Client<R, W> {
     }
 
     fn send(&mut self, value: Value) -> io::Result<()> {
-        let mut line = serde_json::to_vec(&value)?;
-        line.push(b'\n');
-        self.writer.write_all(&line)?;
-        self.writer.flush()
+        write_message(&mut self.writer, value)
     }
 
     fn read(&mut self) -> io::Result<Value> {
@@ -200,6 +271,14 @@ impl<R: BufRead, W: Write> Client<R, W> {
     }
 }
 
+/// 制御通知も通常の要求も、一行全体をまとめて writer へ渡す。
+pub(crate) fn write_message(writer: &mut impl Write, value: Value) -> io::Result<()> {
+    let mut line = serde_json::to_vec(&value)?;
+    line.push(b'\n');
+    writer.write_all(&line)?;
+    writer.flush()
+}
+
 fn invalid(error: impl std::fmt::Display) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, error.to_string())
 }
@@ -207,7 +286,65 @@ fn invalid(error: impl std::fmt::Display) -> io::Error {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::{BufReader, Cursor};
+    use std::{
+        fs,
+        io::{BufReader, Cursor},
+    };
+
+    #[test]
+    fn rpc_error_codes_are_preserved_independently_of_the_message() {
+        for (code, message, expected) in [
+            (
+                AUTH_REQUIRED,
+                "認証が必要です",
+                io::ErrorKind::PermissionDenied,
+            ),
+            (
+                REQUEST_CANCELLED,
+                "停止しました",
+                io::ErrorKind::Interrupted,
+            ),
+            (-32603, "authentication cache failure", io::ErrorKind::Other),
+        ] {
+            let response = json!({"jsonrpc":"2.0","id":0,"error":{"code":code,"message":message,"data":{"detail":"kept off the display"}}});
+            let mut input = serde_json::to_vec(&response).unwrap();
+            input.push(b'\n');
+            let mut client = Client::new(Cursor::new(input), Vec::new());
+            let error = client
+                .new_session(Path::new("/tmp"), &mut |_| None)
+                .unwrap_err();
+            assert_eq!(error.kind(), expected);
+            assert_eq!(error.to_string(), format!("session/new: {message}"));
+            assert_eq!(is_auth_required(&error), code == AUTH_REQUIRED);
+            assert_eq!(is_request_cancelled(&error), code == REQUEST_CANCELLED);
+        }
+    }
+
+    #[test]
+    fn malformed_or_ambiguous_responses_cannot_trigger_authentication() {
+        for body in [
+            json!({"error":{"code":AUTH_REQUIRED}}),
+            json!({"error":{"message":"authentication required"}}),
+            json!({"error":{"code":AUTH_REQUIRED,"message":null}}),
+            json!({"error":{"code":"-32000","message":"authentication required"}}),
+            json!({"error":null}),
+            json!({"error":{"code":AUTH_REQUIRED,"message":"authentication required"},"result":{}}),
+            json!({}),
+        ] {
+            let mut response = body;
+            response["jsonrpc"] = json!("2.0");
+            response["id"] = json!(0);
+            let mut input = serde_json::to_vec(&response).unwrap();
+            input.push(b'\n');
+            let mut client = Client::new(Cursor::new(input), Vec::new());
+            let error = client
+                .new_session(Path::new("/tmp"), &mut |_| None)
+                .unwrap_err();
+            assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+            assert!(!is_auth_required(&error));
+            assert!(!is_request_cancelled(&error));
+        }
+    }
 
     #[test]
     fn protocol_v1_wire_and_updates() {
@@ -250,5 +387,35 @@ mod tests {
         fs::create_dir(dir.path().join(".solo")).unwrap();
         fs::write(dir.path().join(".solo/agents.json"), r#"{"agents":[{"id":"a","name":"A","command":"a"},{"id":"a","name":"B","command":"b"}]}"#).unwrap();
         assert!(load_agents(dir.path()).is_err());
+    }
+
+    #[test]
+    fn registry_distinguishes_missing_invalid_and_oversized_files() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(load_agents(dir.path()).unwrap().is_empty());
+        fs::create_dir(dir.path().join(".solo")).unwrap();
+        let path = dir.path().join(".solo/agents.json");
+        for invalid_source in [b"".as_slice(), b"{", b"\xff"] {
+            fs::write(&path, invalid_source).unwrap();
+            assert_eq!(
+                load_agents(dir.path()).unwrap_err().kind(),
+                io::ErrorKind::InvalidData
+            );
+        }
+        let mut source =
+            r#"{"agents":[{"id":"a","name":"日本語","command":"agent","args":["--stdio"]}]}"#
+                .as_bytes()
+                .to_vec();
+        source.resize(MAX_REGISTRY_BYTES as usize, b' ');
+        fs::write(&path, &source).unwrap();
+        let agents = load_agents(dir.path()).unwrap();
+        assert_eq!(agents.len(), 1);
+        assert_eq!(agents[0].name, "日本語");
+        assert_eq!(agents[0].args, ["--stdio"]);
+        source.push(b' ');
+        fs::write(&path, &source).unwrap();
+        let error = load_agents(dir.path()).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert!(error.to_string().contains("1 MiB"));
     }
 }

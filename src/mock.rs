@@ -1,6 +1,6 @@
 //! 実際のモデル、shell、workspace の書込みは一切呼び出さない。
 //! worker がログ I/O を所有し、bounded channel で UI と接続する。
-use crate::event::{Envelope, Event, SCHEMA_VERSION, Usage, preview};
+use crate::event::{Envelope, Event, Usage, preview};
 use async_channel::{Receiver, Sender, TrySendError};
 use std::{
     io::{self, BufWriter, Write},
@@ -9,7 +9,7 @@ use std::{
         atomic::{AtomicU8, Ordering},
     },
     thread::{self, JoinHandle},
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::Duration,
 };
 use tempfile::TempPath;
 use unicode_segmentation::UnicodeSegmentation;
@@ -172,19 +172,12 @@ impl Producer {
     }
 
     fn envelope(&self, event: Event) -> Envelope {
-        let sequence = self.sequence + 1;
-        Envelope {
-            schema_version: SCHEMA_VERSION,
-            event_id: format!("{}-{sequence}", self.config.session_id),
-            session_id: self.config.session_id.clone(),
-            sequence,
-            timestamp_ms: SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_millis() as u64,
-            turn_id: Some(format!("turn-{}", self.config.start_sequence + 1)),
-            payload: serde_json::to_value(event).expect("event serialization is infallible"),
-        }
+        Envelope::new(
+            &self.config.session_id,
+            self.sequence + 1,
+            format!("turn-{}", self.config.start_sequence + 1),
+            event,
+        )
     }
 
     fn emit(&mut self, event: Event, interruptible: bool) -> bool {
@@ -266,10 +259,7 @@ impl Producer {
         let mut offset = 0;
         // 100 MiB scenario は改行を含まない巨大なログを 4 KiB 単位で退避する。
         let large_chunk = "日本語🙂 long log / ".repeat(220);
-        let mut chunk_end = 4096.min(large_chunk.len());
-        while !large_chunk.is_char_boundary(chunk_end) {
-            chunk_end -= 1;
-        }
+        let chunk_end = large_chunk.floor_char_boundary(4096);
         let large_chunk = format!(
             "{}{}",
             &large_chunk[..chunk_end],

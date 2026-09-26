@@ -1,10 +1,10 @@
 //! Shared user configuration. Credentials and project history are separate data stores.
 use crate::command_rules::Rules;
+use crate::storage::{FileTransaction, read_optional};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::BTreeMap,
-    fs::{self, File},
-    io::{self, Read, Write},
+    io,
     path::{Path, PathBuf},
 };
 
@@ -131,23 +131,19 @@ impl ConfigStore {
         &self.path
     }
     pub fn load(&self) -> io::Result<AppConfig> {
-        let file = match File::open(&self.path) {
-            Ok(file) => file,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                let mut config = AppConfig::default();
-                if let Some(path) = &self.legacy_rules {
-                    config.workspaces = crate::command_rules::load_legacy_workspaces(path)?;
-                }
-                config.validate()?;
-                return Ok(config);
+        let Some(bytes) = read_optional(
+            &self.path,
+            MAX_CONFIG_BYTES,
+            "config.yml は2 MiB以下にしてください",
+        )?
+        else {
+            let mut config = AppConfig::default();
+            if let Some(path) = &self.legacy_rules {
+                config.workspaces = crate::command_rules::load_legacy_workspaces(path)?;
             }
-            Err(error) => return Err(error),
+            config.validate()?;
+            return Ok(config);
         };
-        let mut bytes = Vec::new();
-        file.take(MAX_CONFIG_BYTES + 1).read_to_end(&mut bytes)?;
-        if bytes.len() as u64 > MAX_CONFIG_BYTES {
-            return Err(invalid("config.yml は2 MiB以下にしてください"));
-        }
         let options = serde_saphyr::options! {
             budget: serde_saphyr::budget! { max_documents: 1, max_depth: 64, max_total_scalar_bytes: 8 * 1024 * 1024 },
             reject_unsupported_tags: true,
@@ -170,23 +166,12 @@ impl ConfigStore {
         })
     }
     pub fn update(&self, edit: impl FnOnce(&mut AppConfig) -> io::Result<()>) -> io::Result<()> {
-        let parent = self
-            .path
-            .parent()
-            .filter(|path| !path.as_os_str().is_empty())
-            .ok_or_else(|| invalid("設定の保存先が不正です"))?;
-        fs::create_dir_all(parent)?;
-        let lock = File::options()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .open(self.path.with_extension("yml.lock"))?;
-        lock.try_lock().map_err(|error| {
-            io::Error::other(format!(
-                "設定を別の画面で更新中です。再試行してください: {error}"
-            ))
-        })?;
+        let transaction = FileTransaction::begin(
+            &self.path,
+            "yml.lock",
+            "設定の保存先が不正です",
+            "設定を別の画面で更新中です。再試行してください",
+        )?;
         let mut config = self.load()?;
         edit(&mut config)?;
         config.validate()?;
@@ -194,11 +179,7 @@ impl ConfigStore {
         if yaml.len() as u64 > MAX_CONFIG_BYTES {
             return Err(invalid("config.yml の保存上限です"));
         }
-        let mut file = tempfile::NamedTempFile::new_in(parent)?;
-        file.write_all(yaml.as_bytes())?;
-        file.as_file().sync_all()?;
-        file.persist(&self.path).map_err(|error| error.error)?;
-        Ok(())
+        transaction.commit(yaml.as_bytes())
     }
 }
 fn invalid(message: impl Into<String>) -> io::Error {

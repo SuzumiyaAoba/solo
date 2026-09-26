@@ -1,10 +1,12 @@
+mod diff;
+pub use diff::{Diff, DiffKind, DiffLine, MAX_DIFF_LINES};
+
 use crate::event::{Decoded, Envelope, Event, Usage, preview};
 use std::collections::{HashMap, HashSet, VecDeque};
 
 pub const MAX_LOG_ROWS: usize = 1_000;
 pub const MAX_CHAT_BLOCKS: usize = 16_384;
 pub const CHAT_BLOCK_BYTES: usize = 1_024;
-pub const MAX_DIFF_LINES: usize = 20_000;
 pub const MAX_TOOL_ACTIVITIES: usize = 256;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -57,96 +59,6 @@ pub struct LogRow {
     pub level: String,
     pub text: String,
     pub offset: Option<u64>,
-}
-
-#[derive(Clone, Debug)]
-pub struct DiffLine {
-    pub old: Option<u32>,
-    pub new: Option<u32>,
-    pub text: String,
-    pub kind: DiffKind,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum DiffKind {
-    Header,
-    Context,
-    Added,
-    Removed,
-}
-
-#[derive(Debug)]
-pub struct Diff {
-    pub path: String,
-    pub lines: Vec<DiffLine>,
-    pub truncated: bool,
-    pub reviewed: bool,
-}
-
-impl Diff {
-    pub fn parse(path: String, text: &str) -> Self {
-        let mut old = 0;
-        let mut new = 0;
-        let mut lines = Vec::new();
-        let mut truncated = false;
-        for line in text.lines() {
-            if lines.len() == MAX_DIFF_LINES {
-                truncated = true;
-                break;
-            }
-            truncated |= line.len() > 2_048;
-            let kind = if line.starts_with("@@") {
-                let mut parts = line.split_whitespace().skip(1);
-                old = parts
-                    .next()
-                    .and_then(|p| p.trim_start_matches('-').split(',').next()?.parse().ok())
-                    .unwrap_or(0);
-                new = parts
-                    .next()
-                    .and_then(|p| p.trim_start_matches('+').split(',').next()?.parse().ok())
-                    .unwrap_or(0);
-                DiffKind::Header
-            } else if line.starts_with("+++")
-                || line.starts_with("---")
-                || line.starts_with("diff ")
-                || line.starts_with("index ")
-                || line.starts_with('\\')
-            {
-                DiffKind::Header
-            } else if line.starts_with('+') {
-                DiffKind::Added
-            } else if line.starts_with('-') {
-                DiffKind::Removed
-            } else {
-                DiffKind::Context
-            };
-            let old_number = matches!(kind, DiffKind::Context | DiffKind::Removed).then_some(old);
-            let new_number = matches!(kind, DiffKind::Context | DiffKind::Added).then_some(new);
-            old += u32::from(old_number.is_some());
-            new += u32::from(new_number.is_some());
-            lines.push(DiffLine {
-                old: old_number,
-                new: new_number,
-                text: preview(line, 2_048),
-                kind,
-            });
-        }
-        Self {
-            path,
-            lines,
-            truncated,
-            reviewed: false,
-        }
-    }
-
-    pub fn line_counts(&self) -> (usize, usize) {
-        self.lines.iter().fold((0, 0), |(added, removed), line| {
-            (
-                added + usize::from(line.kind == DiffKind::Added),
-                removed + usize::from(line.kind == DiffKind::Removed),
-            )
-        })
-    }
 }
 
 #[derive(Debug)]
@@ -235,7 +147,8 @@ impl Session {
             self.reject("順序が逆転した、または ID がないイベントを拒否しました");
             return Apply::Rejected;
         }
-        if envelope.sequence != self.last_sequence + 1 {
+        let gap = envelope.sequence != self.last_sequence + 1;
+        if gap {
             self.incomplete = true;
             self.notice(format!(
                 "イベント欠落: {} → {}",
@@ -243,8 +156,8 @@ impl Session {
             ));
         }
         self.last_sequence = envelope.sequence;
-        self.seen.insert(envelope.event_id.clone());
-        let decoded = match envelope.decode() {
+        self.seen.insert(envelope.event_id);
+        let decoded = match Decoded::from_payload(envelope.schema_version, envelope.payload) {
             Ok(decoded) => decoded,
             Err(error) => {
                 self.incomplete = true;
@@ -324,7 +237,7 @@ impl Session {
                 self.turn_open = true;
                 self.reason.clear();
                 self.usage = Usage::default();
-                self.incomplete = false;
+                self.incomplete = gap;
                 self.tools.clear();
                 self.tool_activity.clear();
                 self.turn_id = envelope.turn_id;
@@ -490,10 +403,7 @@ impl Session {
                 });
             }
             let block = self.chat.back_mut().expect("a block was just added");
-            let mut end = text.len().min(CHAT_BLOCK_BYTES - block.text.len());
-            while !text.is_char_boundary(end) {
-                end -= 1;
-            }
+            let end = text.floor_char_boundary(CHAT_BLOCK_BYTES - block.text.len());
             block.text.push_str(&text[..end]);
             text = &text[end..];
         }

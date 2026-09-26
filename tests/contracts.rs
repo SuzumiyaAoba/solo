@@ -128,6 +128,45 @@ fn gap_is_visible_and_prevents_unqualified_completion() {
 }
 
 #[test]
+fn a_gap_at_turn_start_is_preserved_until_the_next_clean_turn() {
+    let mut session = session();
+    session.apply(complete(2));
+    let mut next = event(
+        4,
+        Event::TurnStarted {
+            prompt: "new turn".into(),
+        },
+    );
+    next.turn_id = Some("turn-2".into());
+    session.apply(next);
+    assert!(
+        session.incomplete,
+        "starting a turn must preserve the gap detected on that event"
+    );
+    let mut end = complete(5);
+    end.turn_id = Some("turn-2".into());
+    session.apply(end);
+    assert_eq!(session.status, Status::Disconnected);
+
+    let mut clean = event(
+        6,
+        Event::TurnStarted {
+            prompt: "clean turn".into(),
+        },
+    );
+    clean.turn_id = Some("turn-3".into());
+    session.apply(clean);
+    assert!(
+        !session.incomplete,
+        "a clean new turn must reset earlier incompleteness"
+    );
+    let mut end = complete(7);
+    end.turn_id = Some("turn-3".into());
+    session.apply(end);
+    assert_eq!(session.status, Status::Completed);
+}
+
+#[test]
 fn previous_turn_cannot_complete_current_turn() {
     let mut session = session();
     let mut wrong = complete(2);
