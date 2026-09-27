@@ -50,9 +50,9 @@ impl ApprovalRequest {
         }
         if let Some(command) = &self.command {
             match rules.evaluate(command) {
-                Decision::Allow if self.can_allow => return Ok(ApprovalPlan::Allow("Whitelist")),
+                Decision::Allow if self.can_allow => return Ok(ApprovalPlan::Allow("Allow")),
                 Decision::Allow => return Ok(ApprovalPlan::Manual),
-                Decision::Deny => return Ok(ApprovalPlan::Deny("Blacklist")),
+                Decision::Deny => return Ok(ApprovalPlan::Deny("Deny")),
                 Decision::Ask => {}
             }
         }

@@ -5,6 +5,14 @@ use gpui_kit::component::{
     tab::{Tab as KitTab, TabBar},
 };
 use solo::command_rules::{CommandInvocation, CommandRule, Matching, Rules};
+use solo::harness::workspace::{TOOL_NAMES, is_read_only_tool, tool_description};
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum Page {
+    Commands,
+    Tools,
+    Settings,
+}
 
 pub(super) struct CommandRuleEditor {
     pub(super) store: Result<RuleStore, String>,
@@ -14,11 +22,12 @@ pub(super) struct CommandRuleEditor {
     pub(super) draft: Entity<Composer>,
     pub(super) matching: Matching,
     editing: Option<CommandRule>,
-    pub(super) show_settings: bool,
+    pub(super) page: Page,
     pub(super) approval: ApprovalSettings,
     mode_picker: Entity<Select>,
+    tool_pickers: Vec<Entity<Select>>,
     pub(super) auto_model: Entity<Composer>,
-    _mode_subscription: Subscription,
+    _subscriptions: Vec<Subscription>,
 }
 impl CommandRuleEditor {
     pub(super) fn new(
@@ -31,7 +40,7 @@ impl CommandRuleEditor {
         let auto_model = cx.new(|cx| {
             Composer::new(window, cx).placeholder(solo::codex_subscription::DEFAULT_MODEL)
         });
-        let mode_subscription = cx.subscribe(
+        let mut subscriptions = vec![cx.subscribe(
             &mode_picker,
             |this, _, selected: &ds::SelectionChanged, cx| {
                 this.approval.mode = [
@@ -45,20 +54,39 @@ impl CommandRuleEditor {
                 });
                 cx.notify();
             },
-        );
+        )];
+        let mut tool_pickers = Vec::new();
+        for name in TOOL_NAMES {
+            let picker = cx.new(|cx| Select::new(["既定", "Allow", "Deny", "Ask"], 0, window, cx));
+            let tool = (*name).to_string();
+            subscriptions.push(cx.subscribe(
+                &picker,
+                move |this, _, selected: &ds::SelectionChanged, cx| {
+                    let decision = match selected.index {
+                        1 => Some(Decision::Allow),
+                        2 => Some(Decision::Deny),
+                        3 => Some(Decision::Ask),
+                        _ => None,
+                    };
+                    this.set_tool_decision(&tool, decision, cx);
+                },
+            ));
+            tool_pickers.push(picker);
+        }
         let mut this = Self {
             store,
             rules: Rules::default(),
             error: None,
-            list: RuleList::Whitelist,
+            list: RuleList::Allow,
             draft,
             matching: Matching::Wildcard,
             editing: None,
-            show_settings: false,
+            page: Page::Commands,
             approval: ApprovalSettings::default(),
             mode_picker,
+            tool_pickers,
             auto_model,
-            _mode_subscription: mode_subscription,
+            _subscriptions: subscriptions,
         };
         this.reload(cx);
         this
@@ -83,6 +111,18 @@ impl CommandRuleEditor {
                 self.approval = approval;
                 self.rules = rules;
                 self.error = None;
+                for (picker, name) in self.tool_pickers.iter().zip(TOOL_NAMES) {
+                    let selected = match self.rules.tool_decision(name) {
+                        Some(Decision::Allow) => 1,
+                        Some(Decision::Deny) => 2,
+                        Some(Decision::Ask) => 3,
+                        None => 0,
+                    };
+                    picker.update(cx, |picker, cx| {
+                        picker.selected = selected;
+                        picker.close(cx);
+                    });
+                }
             }
             Err(error) => {
                 self.error = Some(error);
@@ -138,6 +178,29 @@ impl CommandRuleEditor {
         self.draft.update(cx, |input, cx| input.set_value("", cx));
         cx.notify();
     }
+    pub(super) fn set_tool_decision(
+        &mut self,
+        tool: &str,
+        decision: Option<Decision>,
+        cx: &mut Context<Self>,
+    ) {
+        let result = self.store.as_ref().map_err(Clone::clone).and_then(|store| {
+            store
+                .set_tool(tool, decision)
+                .map_err(|error| error.to_string())
+        });
+        match result {
+            Ok(()) => {
+                self.rules.set_tool(tool, decision);
+                self.error = None;
+                super::approvals::changed(cx);
+            }
+            Err(error) => {
+                self.error = Some(error);
+            }
+        }
+        cx.notify();
+    }
     pub(super) fn remove(&mut self, command: &CommandRule, cx: &mut Context<Self>) {
         let result = self.store.as_ref().map_err(Clone::clone).and_then(|store| {
             store
@@ -176,15 +239,91 @@ impl CommandRuleEditor {
             }
         }
     }
+    fn tools_view(&self, cx: &mut Context<Self>) -> AnyElement {
+        let p = ds::theme(cx);
+        div()
+            .id("tool-rules")
+            .flex_1()
+            .min_h_0()
+            .overflow_y_scroll()
+            .flex()
+            .flex_col()
+            .gap_3()
+            .child(
+                ds::card(cx)
+                    .p_4()
+                    .gap_3()
+                    .child(
+                        div()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .child("基本ツール · このプロジェクト"),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(12.))
+                            .text_color(rgb(p.secondary))
+                            .child("Allow は確認を省略し、Deny は常に拒否、Ask はコマンドルールと同じ承認確認に戻します。既定はツールごとの安全な初期値です。"),
+                    )
+                    .children(TOOL_NAMES.iter().enumerate().map(|(index, name)| {
+                        let decision = self.rules.tool_decision(name);
+                        let default = if is_read_only_tool(name) { "許可" } else { "確認" };
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_3()
+                            .child(
+                                div()
+                                    .w(px(56.))
+                                    .flex_shrink_0()
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .child(*name),
+                            )
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .text_size(px(12.))
+                                    .text_color(rgb(p.secondary))
+                                    .truncate()
+                                    .child(format!("{default} · {}", tool_description(name))),
+                            )
+                            .child(
+                                div()
+                                    .w(px(148.))
+                                    .flex_shrink_0()
+                                    .child(self.tool_pickers[index].clone()),
+                            )
+                            .when_some(decision, |v, decision| {
+                                v.child(ds::badge(
+                                    match decision {
+                                        Decision::Allow => "許可",
+                                        Decision::Deny => "拒否",
+                                        Decision::Ask => "確認",
+                                    },
+                                    match decision {
+                                        Decision::Allow => Tone::Success,
+                                        Decision::Deny => Tone::Danger,
+                                        Decision::Ask => Tone::Neutral,
+                                    },
+                                    cx,
+                                ))
+                            })
+                    })),
+            )
+            .when_some(self.error.clone(), |v, error| {
+                v.child(ds::alert("ツール設定を保存できません", error, Tone::Danger, cx))
+            })
+            .into_any_element()
+    }
     fn settings_view(&self, cx: &mut Context<Self>) -> AnyElement {
         let p = ds::theme(cx);
         let description = match self.approval.mode {
             ApprovalMode::Manual => "リストで決まらない要求を、実行前に確認します。",
             ApprovalMode::Bypass => {
-                "承認確認と Whitelist / Blacklist の判定を省略し、すべての要求を許可します。"
+                "承認確認と Allow / Deny の判定を省略し、すべての要求を許可します。"
             }
             ApprovalMode::Auto => {
-                "Blacklist / Whitelist を優先し、未登録の要求を指定モデルで判定します。判断できない場合は手動確認に戻ります。"
+                "Deny / Allow を優先し、未登録の要求を指定モデルで判定します。判断できない場合は手動確認に戻ります。"
             }
         };
         div()
@@ -259,14 +398,23 @@ impl Render for CommandRuleEditor {
         let navigation = TabBar::new("approval-settings-pages")
             .segmented()
             .small()
-            .selected_index(usize::from(self.show_settings))
+            .selected_index(match self.page {
+                Page::Commands => 0,
+                Page::Tools => 1,
+                Page::Settings => 2,
+            })
             .child(KitTab::new().label("コマンドルール"))
+            .child(KitTab::new().label("ツール"))
             .child(KitTab::new().label("承認モード"))
             .on_click(cx.listener(|this, index: &usize, _, cx| {
-                this.show_settings = *index == 1;
+                this.page = match *index {
+                    1 => Page::Tools,
+                    2 => Page::Settings,
+                    _ => Page::Commands,
+                };
                 cx.notify();
             }));
-        if self.show_settings {
+        if self.page != Page::Commands {
             return div()
                 .size_full()
                 .flex()
@@ -274,7 +422,11 @@ impl Render for CommandRuleEditor {
                 .min_h_0()
                 .gap_3()
                 .child(navigation)
-                .child(self.settings_view(cx))
+                .child(if self.page == Page::Tools {
+                    self.tools_view(cx)
+                } else {
+                    self.settings_view(cx)
+                })
                 .into_any_element();
         }
         div()
@@ -293,7 +445,7 @@ impl Render for CommandRuleEditor {
                         "rules-policy",
                         Icon::Info,
                         "",
-                        "* のワイルドカードに対応 · Manual / Auto では Blacklist 優先",
+                        "* のワイルドカードに対応 · Manual / Auto では Deny 優先",
                         Tone::Neutral,
                         cx,
                     )),
@@ -314,22 +466,22 @@ impl Render for CommandRuleEditor {
                 TabBar::new("rule-lists")
                     .segmented()
                     .small()
-                    .selected_index(usize::from(self.list == RuleList::Blacklist))
+                    .selected_index(usize::from(self.list == RuleList::Deny))
                     .child(
                         KitTab::new()
-                            .label(format!("Whitelist {}", self.rules.whitelist.len()))
+                            .label(format!("Allow {}", self.rules.allow.len()))
                             .disabled(self.editing.is_some()),
                     )
                     .child(
                         KitTab::new()
-                            .label(format!("Blacklist {}", self.rules.blacklist.len()))
+                            .label(format!("Deny {}", self.rules.deny.len()))
                             .disabled(self.editing.is_some()),
                     )
                     .on_click(cx.listener(|this, index: &usize, _, cx| {
                         this.list = if *index == 0 {
-                            RuleList::Whitelist
+                            RuleList::Allow
                         } else {
-                            RuleList::Blacklist
+                            RuleList::Deny
                         };
                         cx.notify();
                     })),
@@ -430,15 +582,15 @@ impl Render for CommandRuleEditor {
                                     } else {
                                         format!(
                                             "{} に追加",
-                                            if list == RuleList::Whitelist {
-                                                "Whitelist"
+                                            if list == RuleList::Allow {
+                                                "Allow"
                                             } else {
-                                                "Blacklist"
+                                                "Deny"
                                             }
                                         )
                                     },
                                 )
-                                .variant(if list == RuleList::Whitelist {
+                                .variant(if list == RuleList::Allow {
                                     ButtonVariant::Primary
                                 } else {
                                     ButtonVariant::Danger
@@ -478,7 +630,7 @@ impl Render for CommandRuleEditor {
                                     .gap_2()
                                     .child(ds::badge(
                                         command.executor_label(),
-                                        if list == RuleList::Whitelist {
+                                        if list == RuleList::Allow {
                                             Tone::Success
                                         } else {
                                             Tone::Danger
@@ -583,9 +735,9 @@ impl Render for CommandRuleEditor {
                                     .child(command.cwd.display().to_string()),
                             )
                             .when(
-                                list == RuleList::Whitelist
-                                    && self.rules.blacklist.contains(&command),
-                                |v| v.child(ds::badge("Blacklist 優先", Tone::Warning, cx)),
+                                list == RuleList::Allow
+                                    && self.rules.deny.contains(&command),
+                                |v| v.child(ds::badge("Deny 優先", Tone::Warning, cx)),
                             )
                     })),
             )

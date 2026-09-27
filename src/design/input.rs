@@ -42,6 +42,7 @@ pub struct TextInput {
     pub disabled: bool,
     pub read_only: bool,
     pub invalid: bool,
+    appearance: bool,
     placeholder: SharedString,
     size: ControlSize,
     leading: Option<Icon>,
@@ -98,6 +99,7 @@ impl TextInput {
             disabled: false,
             read_only: false,
             invalid: false,
+            appearance: true,
             placeholder: "メッセージを入力…".into(),
             size: ControlSize::Medium,
             leading: None,
@@ -120,6 +122,11 @@ impl TextInput {
     }
     pub fn leading_icon(mut self, icon: Icon) -> Self {
         self.leading = Some(icon);
+        self
+    }
+    /// 枠・背景を外し、外側のコンテナが見た目を提供するときに使う。
+    pub fn appearance(mut self, appearance: bool) -> Self {
+        self.appearance = appearance;
         self
     }
     pub fn invalid(mut self, invalid: bool) -> Self {
@@ -249,6 +256,7 @@ impl Render for TextInput {
                 .h(px(self.size.height()))
                 .w_full()
                 .aria_label(self.placeholder.clone())
+                .appearance(self.appearance)
                 .disabled(self.disabled)
                 .readonly(self.read_only)
                 .when_some(self.leading, |input, icon| input.prefix(icon.view(p.muted)))
@@ -256,6 +264,7 @@ impl Render for TextInput {
                 .into_any_element(),
             State::Multi(state) => Textarea::new(state)
                 .aria_label(self.placeholder.clone())
+                .appearance(self.appearance)
                 .disabled(self.disabled)
                 .readonly(self.read_only)
                 .w_full()

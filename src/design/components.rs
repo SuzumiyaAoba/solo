@@ -1,4 +1,4 @@
-use super::{ControlSize, Icon, Tone, radius, theme};
+use super::{ControlSize, Icon, Tone, glass, radius, theme};
 use gpui_kit::component::{self as kit, Disableable, Selectable, Sizable, button::ButtonVariants};
 use gpui_kit::{prelude::*, *};
 use std::rc::Rc;
@@ -313,12 +313,11 @@ pub fn keycap(label: impl Into<SharedString>, _: &App) -> kit::kbd::Kbd {
 pub fn card(cx: &App) -> Div {
     let p = theme(cx);
     div()
-        .flex()
         .flex_col()
         .rounded(px(radius::CARD))
         .border_1()
-        .border_color(rgb(p.border))
-        .bg(rgb(p.surface))
+        .border_color(glass(p.border, 0.7))
+        .bg(glass(p.surface, super::GLASS_SURFACE))
 }
 pub fn divider(cx: &App) -> Div {
     div()

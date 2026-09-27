@@ -6,7 +6,7 @@ use solo::command_rules::{CommandInvocation, Matching};
 pub(super) fn smoke(editor: &Entity<CommandRuleEditor>, cx: &mut App) {
     editor.update(cx, |editor, cx| {
         let store = editor.store.as_ref().unwrap().clone();
-        editor.list = RuleList::Whitelist;
+        editor.list = RuleList::Allow;
         editor.matching = Matching::Wildcard;
         editor
             .draft
@@ -17,7 +17,7 @@ pub(super) fn smoke(editor: &Entity<CommandRuleEditor>, cx: &mut App) {
         assert_eq!(store.evaluate(&probe).unwrap(), Decision::Allow);
         let added = editor
             .rules
-            .whitelist
+            .allow
             .iter()
             .find(|rule| rule.command == "cargo test *")
             .unwrap()
@@ -31,13 +31,42 @@ pub(super) fn smoke(editor: &Entity<CommandRuleEditor>, cx: &mut App) {
         assert_eq!(store.evaluate(&probe).unwrap(), Decision::Ask);
         let edited = editor
             .rules
-            .whitelist
+            .allow
             .iter()
             .find(|rule| rule.command == "cargo test --locked*")
             .unwrap()
             .clone();
         editor.remove(&edited, cx);
         assert!(editor.error.is_none());
+        // ツール判定: Deny / Ask / 既定(Allow) への往復と保存を確認する。
+        assert!(store.load().unwrap().tool_decision("exec").is_none());
+        editor.set_tool_decision("exec", Some(Decision::Deny), cx);
+        assert!(editor.error.is_none());
+        assert_eq!(
+            store.load().unwrap().tool_decision("exec"),
+            Some(Decision::Deny)
+        );
+        editor.set_tool_decision("exec", Some(Decision::Ask), cx);
+        assert_eq!(
+            store.load().unwrap().tool_decision("exec"),
+            Some(Decision::Ask)
+        );
+        editor.set_tool_decision("read", Some(Decision::Ask), cx);
+        assert_eq!(
+            store.load().unwrap().tool_decision("read"),
+            Some(Decision::Ask)
+        );
+        editor.set_tool_decision("exec", None, cx);
+        assert!(store.load().unwrap().tool_decision("exec").is_none());
+        assert_eq!(
+            store.load().unwrap().tool_decision("read"),
+            Some(Decision::Ask)
+        );
+
+        // ツールタブの実描画まで通す。
+        editor.page = super::command_rules::Page::Tools;
+        cx.notify();
+
         editor
             .draft
             .update(cx, |input, cx| input.set_value("git *", cx));

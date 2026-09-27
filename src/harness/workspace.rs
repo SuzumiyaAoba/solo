@@ -15,6 +15,20 @@ pub fn is_read_only_tool(name: &str) -> bool {
     matches!(name, "read" | "search")
 }
 
+/// 基本ツールの表示順。`specs` の配列と一致させる。
+pub const TOOL_NAMES: &[&str] = &["read", "search", "edit", "exec"];
+
+/// 基本ツールの1行説明。ツールタブにそのまま表示する。
+pub fn tool_description(name: &str) -> &'static str {
+    match name {
+        "read" => "workspace 内の UTF-8 ファイルを読む",
+        "search" => "workspace 内の UTF-8 ファイルから文字列を探す",
+        "edit" => "既存ファイルの一致する箇所を一度だけ置換する",
+        "exec" => "workspace で shell command を実行する",
+        _ => "外部ツール",
+    }
+}
+
 pub struct WorkspaceTools {
     root: PathBuf,
     specs: Vec<ToolSpec>,
@@ -34,24 +48,19 @@ impl WorkspaceTools {
             cancellation: None,
             timeout: Duration::from_secs(30),
             max_output_bytes: 64 * 1024,
-            specs: vec![
-                spec("read", "workspace 内の UTF-8 ファイルを読む", &["path"]),
-                spec(
-                    "search",
-                    "workspace 内の UTF-8 ファイルから文字列を探す",
-                    &["query"],
-                ),
-                spec(
-                    "edit",
-                    "既存ファイルの一致する箇所を一度だけ置換する",
-                    &["path", "old", "new"],
-                ),
-                spec(
-                    "exec",
-                    "workspace で shell command を実行する",
-                    &["command"],
-                ),
-            ],
+            specs: TOOL_NAMES
+                .iter()
+                .map(|name| {
+                    let fields: &[&str] = match *name {
+                        "read" => &["path"],
+                        "search" => &["query"],
+                        "edit" => &["path", "old", "new"],
+                        "exec" => &["command"],
+                        _ => &[],
+                    };
+                    spec(name, tool_description(name), fields)
+                })
+                .collect(),
         })
     }
 

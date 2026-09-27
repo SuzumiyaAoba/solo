@@ -257,7 +257,7 @@ impl Workspace {
             .flex_shrink_0()
             .px(px(space::LG))
             .py(px(space::XS))
-            .bg(rgb(p.surface))
+            .bg(ds::glass(p.surface, ds::GLASS_SURFACE))
             .flex()
             .flex_col()
             .gap(px(space::SM))
@@ -336,7 +336,7 @@ impl Render for Workspace {
                     cx,
                 )))
             })
-            .child(self.composer(cx))
+            .child(self.composer(window, cx))
             .when(self.show_metrics, |v| v.child(self.footer(cx)));
         let body = if compact_thread {
             self.execution_thread(cx).into_any_element()

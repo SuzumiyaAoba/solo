@@ -307,7 +307,7 @@ impl Workspace {
             .tooltip(tooltip)
             .on_click(cx.listener(|this, _, window, cx| {
                 this.rule_editor.update(cx, |editor, cx| {
-                    editor.show_settings = true;
+                    editor.page = super::command_rules::Page::Settings;
                     cx.notify();
                 });
                 this.open_command_rules(window, cx);
@@ -335,12 +335,11 @@ impl Workspace {
             if !approval.request.can_allow {
                 return;
             }
-            // Recheck at confirmation: another window may have blacklisted this command.
+            // Recheck at confirmation: another window may have denied this command.
             match plan(&self.command_rules, &approval.request) {
                 Ok(ApprovalPlan::Deny(_)) => {
-                    approval.policy_error = Some(
-                        "Blacklist に一致します。実行するにはルールを削除してください。".into(),
-                    );
+                    approval.policy_error =
+                        Some("Deny に一致します。実行するにはルールを削除してください。".into());
                     cx.notify();
                     return;
                 }
@@ -364,7 +363,7 @@ impl Workspace {
         let Some(approval) = self.sessions[self.selected].approval.as_mut() else {
             return;
         };
-        if list == RuleList::Whitelist && !approval.request.can_allow {
+        if list == RuleList::Allow && !approval.request.can_allow {
             return;
         }
         let Some(command) = &approval.request.command else {
@@ -385,7 +384,7 @@ impl Workspace {
             return;
         }
         self.rule_editor.update(cx, |editor, cx| editor.reload(cx));
-        self.answer_approval(list == RuleList::Whitelist, cx);
+        self.answer_approval(list == RuleList::Allow, cx);
         changed(cx);
     }
 
@@ -498,12 +497,12 @@ impl Workspace {
             );
         let footer = div().flex_shrink_0().flex().flex_col().gap_2().pt_2().border_t_1().border_color(rgb(p.border))
             .when(can_remember, |v| v.child(div().flex().flex_wrap().items_center().gap_2()
-                .child(Button::new("approval-blacklist", "登録して拒否").with_icon(Icon::Close).control_size(ControlSize::Small)
-                    .tooltip("Blacklist に登録して今回の要求を拒否")
-                    .on_click(cx.listener(|this, _, _, cx| this.remember_approval(RuleList::Blacklist, cx))))
-                .child(Button::new("approval-whitelist", "登録して許可").with_icon(Icon::Check).control_size(ControlSize::Small)
-                    .tooltip("Whitelist に登録して今回の要求を許可").disabled(!request.can_allow)
-                    .on_click(cx.listener(|this, _, _, cx| this.remember_approval(RuleList::Whitelist, cx))))
+                .child(Button::new("approval-deny", "登録して拒否").with_icon(Icon::Close).control_size(ControlSize::Small)
+                    .tooltip("Deny に登録して今回の要求を拒否")
+                    .on_click(cx.listener(|this, _, _, cx| this.remember_approval(RuleList::Deny, cx))))
+                .child(Button::new("approval-allow", "登録して許可").with_icon(Icon::Check).control_size(ControlSize::Small)
+                    .tooltip("Allow に登録して今回の要求を許可").disabled(!request.can_allow)
+                    .on_click(cx.listener(|this, _, _, cx| this.remember_approval(RuleList::Allow, cx))))
                 .child(ds::indicator("approval-rule-scope", Icon::Info, "", "今回は完全一致で登録。ワイルドカードはコマンド実行ルール画面で編集できます", Tone::Neutral, cx))))
             .child(div().flex().flex_wrap().items_center().justify_between().gap_2()
                 .child(Button::icon("retry-auto-approval", Icon::RotateCcw, "設定を読み直して再判定")
@@ -570,7 +569,7 @@ pub(super) fn command_block(id: impl Into<ElementId>, text: &str, cx: &App) -> S
         .overflow_y_scroll()
         .p_3()
         .rounded(px(ds::radius::CONTROL))
-        .bg(rgb(p.canvas))
+        .bg(glass(p.canvas, 0.5))
         .border_1()
         .border_color(rgb(p.border))
         .font_family(typography::MONO)

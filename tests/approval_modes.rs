@@ -89,7 +89,7 @@ fn mode_updates_preserve_rules_and_rule_updates_preserve_model_settings() {
     let dir = tempfile::tempdir().unwrap();
     let store = RuleStore::at_path(dir.path().join("config.yml"), dir.path()).unwrap();
     let command = CommandInvocation::shell("cargo test --locked", dir.path()).unwrap();
-    store.add(RuleList::Blacklist, command.clone()).unwrap();
+    store.add(RuleList::Deny, command.clone()).unwrap();
     store
         .config_store()
         .unwrap()
@@ -98,7 +98,7 @@ fn mode_updates_preserve_rules_and_rule_updates_preserve_model_settings() {
     assert_eq!(store.evaluate(&command).unwrap(), Decision::Deny);
     store
         .add(
-            RuleList::Whitelist,
+            RuleList::Allow,
             CommandInvocation::shell("pwd", dir.path()).unwrap(),
         )
         .unwrap();
@@ -113,12 +113,12 @@ fn mode_updates_preserve_rules_and_rule_updates_preserve_model_settings() {
 }
 
 #[test]
-fn bypass_skips_blacklist_but_manual_and_auto_respect_it() {
+fn bypass_skips_deny_but_manual_and_auto_respect_it() {
     let dir = tempfile::tempdir().unwrap();
     let store = RuleStore::at_path(dir.path().join("config.yml"), dir.path()).unwrap();
     let request = request(dir.path(), "exec");
     store
-        .add(RuleList::Blacklist, request.command.clone().unwrap())
+        .add(RuleList::Deny, request.command.clone().unwrap())
         .unwrap();
     for mode in [ApprovalMode::Manual, ApprovalMode::Auto] {
         store
@@ -126,10 +126,7 @@ fn bypass_skips_blacklist_but_manual_and_auto_respect_it() {
             .unwrap()
             .set_approval(settings(mode))
             .unwrap();
-        assert_eq!(
-            request.plan(&store).unwrap(),
-            ApprovalPlan::Deny("Blacklist")
-        );
+        assert_eq!(request.plan(&store).unwrap(), ApprovalPlan::Deny("Deny"));
     }
     store
         .config_store()
@@ -157,9 +154,9 @@ fn auto_uses_rules_first_and_only_reviews_unlisted_complete_requests() {
         ApprovalPlan::Auto(settings(ApprovalMode::Auto).auto)
     );
     store
-        .add(RuleList::Whitelist, exec.command.clone().unwrap())
+        .add(RuleList::Allow, exec.command.clone().unwrap())
         .unwrap();
-    assert_eq!(exec.plan(&store).unwrap(), ApprovalPlan::Allow("Whitelist"));
+    assert_eq!(exec.plan(&store).unwrap(), ApprovalPlan::Allow("Allow"));
     let incomplete = ApprovalRequest::acp(
         json!({"toolCall":{"kind":"execute"},"options":[{"kind":"allow_once","optionId":"once"}]}),
         &AgentProfile {
@@ -182,7 +179,7 @@ fn legacy_rules_are_imported_only_when_the_yaml_file_is_missing() {
     let dir = tempfile::tempdir().unwrap();
     let legacy = RuleStore::at_path(dir.path().join("old.json"), dir.path()).unwrap();
     let command = CommandInvocation::shell("git status", dir.path()).unwrap();
-    legacy.add(RuleList::Whitelist, command.clone()).unwrap();
+    legacy.add(RuleList::Allow, command.clone()).unwrap();
     let config =
         ConfigStore::at_path(dir.path().join("config.yml")).with_legacy_rules(legacy.path());
     let imported = config.load().unwrap();
@@ -312,7 +309,7 @@ fn cancelled_and_oversized_requests_never_call_the_judge() {
 }
 
 #[test]
-fn late_results_cannot_override_new_settings_or_blacklists() {
+fn late_results_cannot_override_new_settings_or_denys() {
     let started = settings(ApprovalMode::Auto).auto;
     let allow = Assessment {
         decision: Verdict::Allow,
@@ -323,7 +320,7 @@ fn late_results_cannot_override_new_settings_or_blacklists() {
         Some(true)
     );
     assert_eq!(
-        auto_approval::resolve_result(&ApprovalPlan::Deny("Blacklist"), &started, Some(&allow)),
+        auto_approval::resolve_result(&ApprovalPlan::Deny("Deny"), &started, Some(&allow)),
         Some(false)
     );
     assert_eq!(

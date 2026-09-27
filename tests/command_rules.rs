@@ -31,7 +31,7 @@ fn exact_matching_never_allows_extra_shell_operations_or_different_cwd() {
     let store = store(dir.path());
     let safe = command(dir.path(), "git status");
     assert_eq!(store.evaluate(&safe).unwrap(), Decision::Ask);
-    store.add(RuleList::Whitelist, safe.clone()).unwrap();
+    store.add(RuleList::Allow, safe.clone()).unwrap();
     assert_eq!(store.evaluate(&safe).unwrap(), Decision::Allow);
     for text in [
         "git status --short",
@@ -58,19 +58,19 @@ fn exact_matching_never_allows_extra_shell_operations_or_different_cwd() {
 }
 
 #[test]
-fn blacklist_wins_and_rules_survive_reload_and_removal() {
+fn deny_wins_and_rules_survive_reload_and_removal() {
     let dir = tempfile::tempdir().unwrap();
     let store = store(dir.path());
     let item = command(dir.path(), "cargo test");
-    store.add(RuleList::Blacklist, item.clone()).unwrap();
-    store.add(RuleList::Whitelist, item.clone()).unwrap();
-    store.add(RuleList::Whitelist, item.clone()).unwrap();
+    store.add(RuleList::Deny, item.clone()).unwrap();
+    store.add(RuleList::Allow, item.clone()).unwrap();
+    store.add(RuleList::Allow, item.clone()).unwrap();
     let reopened = RuleStore::at_path(store.path(), dir.path()).unwrap();
-    assert_eq!(reopened.load().unwrap().whitelist.len(), 1);
+    assert_eq!(reopened.load().unwrap().allow.len(), 1);
     assert_eq!(reopened.evaluate(&item).unwrap(), Decision::Deny);
-    reopened.remove(RuleList::Blacklist, &item).unwrap();
+    reopened.remove(RuleList::Deny, &item).unwrap();
     assert_eq!(store.evaluate(&item).unwrap(), Decision::Allow);
-    reopened.remove(RuleList::Whitelist, &item).unwrap();
+    reopened.remove(RuleList::Allow, &item).unwrap();
     assert_eq!(store.evaluate(&item).unwrap(), Decision::Ask);
 }
 
@@ -82,15 +82,15 @@ fn workspaces_and_other_writers_are_preserved() {
     let stale = a.clone();
     let b = RuleStore::at_path(a.path(), other.path()).unwrap();
     let item = command(dir.path(), "pwd");
-    a.add(RuleList::Whitelist, item.clone()).unwrap();
+    a.add(RuleList::Allow, item.clone()).unwrap();
     assert_eq!(b.evaluate(&item).unwrap(), Decision::Ask);
-    b.add(RuleList::Blacklist, command(other.path(), "false"))
+    b.add(RuleList::Deny, command(other.path(), "false"))
         .unwrap();
     stale
-        .add(RuleList::Whitelist, command(dir.path(), "ls"))
+        .add(RuleList::Allow, command(dir.path(), "ls"))
         .unwrap();
-    assert_eq!(a.load().unwrap().whitelist.len(), 2);
-    assert_eq!(b.load().unwrap().blacklist.len(), 1);
+    assert_eq!(a.load().unwrap().allow.len(), 2);
+    assert_eq!(b.load().unwrap().deny.len(), 1);
 }
 
 #[test]
@@ -101,12 +101,12 @@ fn malformed_or_future_configuration_cannot_grant_or_be_overwritten() {
     let item = command(dir.path(), "pwd");
     for source in [
         "{",
-        r#"{"version":3,"workspaces":{}}"#,
+        r#"{"version":4,"workspaces":{}}"#,
         r#"{"version":1,"workspaces":{},"typo":true}"#,
     ] {
         fs::write(store.path(), source).unwrap();
         assert!(store.evaluate(&item).is_err());
-        assert!(store.add(RuleList::Whitelist, item.clone()).is_err());
+        assert!(store.add(RuleList::Allow, item.clone()).is_err());
         assert_eq!(fs::read_to_string(store.path()).unwrap(), source);
     }
 }
@@ -116,16 +116,16 @@ fn busy_store_never_loses_an_update() {
     let dir = tempfile::tempdir().unwrap();
     let store = store(dir.path());
     let item = command(dir.path(), "pwd");
-    store.add(RuleList::Whitelist, item.clone()).unwrap();
+    store.add(RuleList::Allow, item.clone()).unwrap();
     let lock = fs::File::options()
         .write(true)
         .open(store.path().with_extension("json.lock"))
         .unwrap();
     lock.lock().unwrap();
-    assert!(store.add(RuleList::Blacklist, item.clone()).is_err());
+    assert!(store.add(RuleList::Deny, item.clone()).is_err());
     assert_eq!(store.evaluate(&item).unwrap(), Decision::Allow);
     lock.unlock().unwrap();
-    store.add(RuleList::Blacklist, item.clone()).unwrap();
+    store.add(RuleList::Deny, item.clone()).unwrap();
     assert_eq!(store.evaluate(&item).unwrap(), Decision::Deny);
 }
 
@@ -137,7 +137,7 @@ fn empty_and_invalid_rules_are_rejected() {
     }
     let mut item = command(dir.path(), "pwd");
     item.cwd = "relative".into();
-    assert!(store(dir.path()).add(RuleList::Whitelist, item).is_err());
+    assert!(store(dir.path()).add(RuleList::Allow, item).is_err());
 }
 
 #[test]
@@ -208,7 +208,7 @@ fn acp_rules_include_agent_executable_arguments_and_entire_raw_input() {
     let original = ApprovalRequest::acp(params.clone(), &agent(), dir.path())
         .command
         .unwrap();
-    store.add(RuleList::Whitelist, original.clone()).unwrap();
+    store.add(RuleList::Allow, original.clone()).unwrap();
     assert_eq!(store.evaluate(&original).unwrap(), Decision::Allow);
     let mut changed = params.clone();
     changed["toolCall"]["rawInput"]["env"]["MODE"] = json!("different");
@@ -240,9 +240,9 @@ fn denied_commands_never_reach_the_shell() {
     let store = store(dir.path());
     let allowed = command(dir.path(), "touch allowed");
     let denied = command(dir.path(), "touch denied");
-    store.add(RuleList::Whitelist, allowed).unwrap();
-    store.add(RuleList::Whitelist, denied.clone()).unwrap();
-    store.add(RuleList::Blacklist, denied).unwrap();
+    store.add(RuleList::Allow, allowed).unwrap();
+    store.add(RuleList::Allow, denied.clone()).unwrap();
+    store.add(RuleList::Deny, denied).unwrap();
     let mut model = Script(VecDeque::from([
         ModelOutput {
             text: "".into(),
@@ -343,7 +343,7 @@ fn wildcard_matches_variable_arguments_unicode_and_multiple_stars() {
     let dir = tempfile::tempdir().unwrap();
     let store = store(dir.path());
     store
-        .add(RuleList::Whitelist, wildcard(dir.path(), "cargo test *"))
+        .add(RuleList::Allow, wildcard(dir.path(), "cargo test *"))
         .unwrap();
     for text in [
         "cargo test ",
@@ -370,7 +370,7 @@ fn wildcard_matches_variable_arguments_unicode_and_multiple_stars() {
         );
     }
     store
-        .add(RuleList::Whitelist, wildcard(dir.path(), "git * -- *rs"))
+        .add(RuleList::Allow, wildcard(dir.path(), "git * -- *rs"))
         .unwrap();
     assert_eq!(
         store
@@ -394,20 +394,17 @@ fn wildcard_matches_variable_arguments_unicode_and_multiple_stars() {
 }
 
 #[test]
-fn wildcard_blacklist_overrides_exact_and_wildcard_whitelists() {
+fn wildcard_deny_overrides_exact_and_wildcard_allows() {
     let dir = tempfile::tempdir().unwrap();
     let store = store(dir.path());
     store
-        .add(RuleList::Whitelist, wildcard(dir.path(), "git *"))
+        .add(RuleList::Allow, wildcard(dir.path(), "git *"))
         .unwrap();
     store
-        .add(
-            RuleList::Whitelist,
-            command(dir.path(), "git push origin main"),
-        )
+        .add(RuleList::Allow, command(dir.path(), "git push origin main"))
         .unwrap();
     store
-        .add(RuleList::Blacklist, wildcard(dir.path(), "git push *"))
+        .add(RuleList::Deny, wildcard(dir.path(), "git push *"))
         .unwrap();
     assert_eq!(
         store
@@ -422,7 +419,7 @@ fn wildcard_blacklist_overrides_exact_and_wildcard_whitelists() {
         Decision::Deny
     );
     store
-        .add(RuleList::Blacklist, wildcard(dir.path(), "*touch marker*"))
+        .add(RuleList::Deny, wildcard(dir.path(), "*touch marker*"))
         .unwrap();
     assert_eq!(
         store
@@ -440,7 +437,7 @@ fn wildcard_does_not_swallow_new_shell_operators_or_expansions() {
     let dir = tempfile::tempdir().unwrap();
     let store = store(dir.path());
     store
-        .add(RuleList::Whitelist, wildcard(dir.path(), "echo *"))
+        .add(RuleList::Allow, wildcard(dir.path(), "echo *"))
         .unwrap();
     for text in [
         "echo ok; touch marker",
@@ -478,10 +475,7 @@ fn wildcard_does_not_swallow_new_shell_operators_or_expansions() {
         );
     }
     store
-        .add(
-            RuleList::Whitelist,
-            wildcard(dir.path(), "echo * && printf *"),
-        )
+        .add(RuleList::Allow, wildcard(dir.path(), "echo * && printf *"))
         .unwrap();
     assert_eq!(
         store
@@ -505,7 +499,7 @@ fn wildcard_escaping_keeps_literal_stars_and_backslashes() {
     let dir = tempfile::tempdir().unwrap();
     let store = store(dir.path());
     store
-        .add(RuleList::Whitelist, wildcard(dir.path(), r"echo \*"))
+        .add(RuleList::Allow, wildcard(dir.path(), r"echo \*"))
         .unwrap();
     assert_eq!(
         store.evaluate(&command(dir.path(), "echo *")).unwrap(),
@@ -518,7 +512,7 @@ fn wildcard_escaping_keeps_literal_stars_and_backslashes() {
         Decision::Ask
     );
     store
-        .add(RuleList::Whitelist, wildcard(dir.path(), r"echo \\*"))
+        .add(RuleList::Allow, wildcard(dir.path(), r"echo \\*"))
         .unwrap();
     assert_eq!(
         store
@@ -527,7 +521,7 @@ fn wildcard_escaping_keeps_literal_stars_and_backslashes() {
         Decision::Allow
     );
     store
-        .add(RuleList::Whitelist, wildcard(dir.path(), "echo [abc]?"))
+        .add(RuleList::Allow, wildcard(dir.path(), "echo [abc]?"))
         .unwrap();
     assert_eq!(
         store.evaluate(&command(dir.path(), "echo [abc]?")).unwrap(),
@@ -545,10 +539,10 @@ fn existing_star_rules_remain_exact_across_v1_upgrade_and_restart() {
     let store = store(dir.path());
     let exact = command(dir.path(), "echo *");
     let workspace = store.workspace().to_str().unwrap();
-    let legacy = json!({"version":1,"workspaces":{workspace:{"whitelist":[exact],"blacklist":[]}}});
+    let legacy = json!({"version":1,"workspaces":{workspace:{"allow":[exact],"deny":[]}}});
     fs::create_dir_all(store.path().parent().unwrap()).unwrap();
     fs::write(store.path(), serde_json::to_vec(&legacy).unwrap()).unwrap();
-    assert_eq!(store.load().unwrap().whitelist[0].matching, Matching::Exact);
+    assert_eq!(store.load().unwrap().allow[0].matching, Matching::Exact);
     assert_eq!(
         store
             .evaluate(&command(dir.path(), "echo expanded"))
@@ -556,10 +550,10 @@ fn existing_star_rules_remain_exact_across_v1_upgrade_and_restart() {
         Decision::Ask
     );
     store
-        .add(RuleList::Whitelist, wildcard(dir.path(), "cargo test *"))
+        .add(RuleList::Allow, wildcard(dir.path(), "cargo test *"))
         .unwrap();
     let file: serde_json::Value = serde_json::from_slice(&fs::read(store.path()).unwrap()).unwrap();
-    assert_eq!(file["version"], 2);
+    assert_eq!(file["version"], 3);
     let reopened = RuleStore::at_path(store.path(), dir.path()).unwrap();
     assert_eq!(
         reopened
@@ -584,13 +578,13 @@ fn editing_a_rule_is_atomic_and_detects_stale_edits() {
     let dir = tempfile::tempdir().unwrap();
     let store = store(dir.path());
     let exact = CommandRule::from(command(dir.path(), "cargo test --locked"));
-    store.add(RuleList::Whitelist, exact.clone()).unwrap();
+    store.add(RuleList::Allow, exact.clone()).unwrap();
     let pattern = wildcard(dir.path(), "cargo test *");
     store
-        .replace(RuleList::Whitelist, &exact, pattern.clone())
+        .replace(RuleList::Allow, &exact, pattern.clone())
         .unwrap();
     assert_eq!(
-        store.load().unwrap().whitelist.as_slice(),
+        store.load().unwrap().allow.as_slice(),
         std::slice::from_ref(&pattern)
     );
     assert_eq!(
@@ -601,14 +595,14 @@ fn editing_a_rule_is_atomic_and_detects_stale_edits() {
     );
     assert!(
         store
-            .replace(RuleList::Whitelist, &exact, wildcard(dir.path(), "*"))
+            .replace(RuleList::Allow, &exact, wildcard(dir.path(), "*"))
             .is_err()
     );
     assert_eq!(
-        store.load().unwrap().whitelist.as_slice(),
+        store.load().unwrap().allow.as_slice(),
         std::slice::from_ref(&pattern)
     );
-    store.remove(RuleList::Whitelist, &pattern).unwrap();
+    store.remove(RuleList::Allow, &pattern).unwrap();
     assert_eq!(
         store
             .evaluate(&command(dir.path(), "cargo test --release"))
@@ -627,7 +621,7 @@ fn acp_patterns_vary_commands_but_not_other_input_or_input_representation() {
         .unwrap();
     let mut pattern = CommandRule::from(original).with_matching(Matching::Wildcard);
     pattern.command = "git *".into();
-    store.add(RuleList::Whitelist, pattern).unwrap();
+    store.add(RuleList::Allow, pattern).unwrap();
     let mut changed = params.clone();
     changed["toolCall"]["rawInput"]["command"] = json!("git diff --stat");
     let request = ApprovalRequest::acp(changed.clone(), &agent(), dir.path());
@@ -659,7 +653,7 @@ fn acp_patterns_vary_commands_but_not_other_input_or_input_representation() {
     )
     .with_matching(Matching::Wildcard);
     pattern.command = "git *".into();
-    store.add(RuleList::Whitelist, pattern).unwrap();
+    store.add(RuleList::Allow, pattern).unwrap();
     argv["toolCall"]["rawInput"]["command"] = json!(["git", "diff", "--stat"]);
     assert_eq!(
         ApprovalRequest::acp(argv, &agent(), dir.path())
@@ -675,7 +669,7 @@ fn wildcard_handles_long_nonmatches_without_recursive_backtracking() {
     let store = store(dir.path());
     store
         .add(
-            RuleList::Blacklist,
+            RuleList::Deny,
             wildcard(dir.path(), &format!("*{}b*", "a".repeat(20_000))),
         )
         .unwrap();

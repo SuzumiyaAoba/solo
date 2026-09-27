@@ -89,6 +89,14 @@ Tab / Shift Tab は Kit の `Root` に任せます。独自のグローバル Ta
 コントラストテストは Solo のパレットを検査し、Kit の全状態やアプリ全体の
 アクセシビリティ適合を保証するものではありません。
 
+
+## Liquid Glass
+
+ウィンドウは `WindowBackgroundAppearance::Blurred` で背面にシステムのブラー素材を敷き、
+各層は `ds::glass(色, アルファ)` の半透明 RGBA で塗ります（canvas 0.85 / elevated 0.72 /
+surface 0.62 / sidebar 0.55 / hover 0.45）。`ds::set_theme` が Kit の色トークンにも同じ
+ガラス色を流すため、Select・Popover・Sheet・Toast は個別対応なしに透けます。
+文字色と primary/danger の実色は不透明のままです。
 ## 実装の使い方
 
 ```rust
@@ -178,7 +186,7 @@ worker、入力、タブ、スクロール、エージェント設定、ルー�
 
 コマンドは Terminal アイコンと「コマンド実行の確認」の見出し、等幅のコマンド欄、
 作業ディレクトリ、実行元をまとめて表示します。コマンド全文と要求の詳細をコピーでき、
-今回だけ実行、拒否、Whitelist / Blacklist への登録を選択できます。
+今回だけ実行、拒否、Allow / Deny への登録を選択できます。
 
 ヘッダーの「コマンド実行ルール」は Kit の Sheet を開きます。TabBar で許可・拒否リストを
 切り替え、Textarea から登録、一覧から編集・削除、一致条件の Dialog 表示ができます。
@@ -186,14 +194,20 @@ worker、入力、タブ、スクロール、エージェント設定、ルー�
 編集時は元の一致方法を保持し、保存まで判定を変更しません。
 既存の完全一致ルールは自動でワイルドカードへ変更しません。
 ルールはワークスペース別にユーザー設定へ保存し、承認を待っている間に別画面で
-Blacklist が更新された場合も、実行確定時に再検査します。
+Deny が更新された場合も、実行確定時に再検査します。
 
 同じ Sheet の「承認モード」タブで Manual / Bypass / Auto を Kit の Select から選べます。
 Auto の判定モデルは Input で指定し、保存時に `~/.config/solo/config.yml` を更新します。
 モードは全プロジェクト共通で、ヘッダーにも現在のモードを表示します。
+
 Bypass は承認とリスト判定を省略し、Auto はリストで決まらない要求だけをモデルへ渡します。
 判定中はモデル名を表示し、結果と理由は概要に残します。エラーや不確実な判定は手動確認へ戻ります。
 手動回答・中止・画面クローズで判定を取り消し、設定変更後の古い結果を実行に使いません。
+
+「ツール」タブでは基本ツール（`read` / `search` / `edit` / `exec`）ごとに Allow / Deny /
+Ask / 既定を選べます。既定は read・search が許可、edit・exec が確認です。
+判定は subscription worker と CLI の双方が `Rules::tool_decision` で評価し、
+明示 Deny は承認確認より先に適用します。
 
 GUI の smoke は一時ディレクトリのルールと疑似承認チャンネルを使い、実コマンドの実行や
 ユーザー設定の更新なしで承認・登録・拒否・保存失敗・画面クローズを検査します。
@@ -211,10 +225,14 @@ rtk proxy nix develop --command cargo test --locked --no-default-features --all-
 rtk proxy nix develop --command cargo build --locked --bins
 rtk proxy nix develop --command cargo run --locked --bin solo-design -- --smoke
 rtk proxy nix develop --command cargo run --locked --bin solo -- --smoke
+# 実描画の PNG を /tmp/solo-visual へ出力（メインスレッド実行・要 macOS）
+rtk proxy nix develop --command cargo run --features gui-visual -- --visual /tmp/solo-visual
 ```
 
 デザイン確認アプリの smoke は8ページ×両テーマ、縮小表示、Kit の native IME handler、
 編集禁止、改行と送信、選択欄のキー操作、通知、ダイアログの Tab 循環・Esc・focus 復帰を検査します。
 メインの smoke は両テーマ・全タブ、10万イベント、100 MiB ログ、入力中のセッション切替、
 会話の追従状態、中止・切断・受信中クローズとショートカットを検査します。
+`--visual DIR` はウィンドウを表示せず Metal でオフスクリーン描画し、composer の
+idle/入力済み/実行中/疑似実行の各状態を PNG で保存します。OS の画面収録権限は不要です。
 OS の IME 候補ウィンドウや実際の VoiceOver 操作は手動確認の対象です。

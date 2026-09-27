@@ -14,7 +14,7 @@ impl ProjectManager {
             .flex_shrink_0()
             .pl(px(96.))
             .pr_4()
-            .bg(rgb(p.sidebar))
+            .bg(ds::glass(p.sidebar, ds::GLASS_SIDEBAR))
             .border_b_1()
             .border_color(rgb(p.border))
             .flex()
@@ -142,14 +142,21 @@ impl ProjectManager {
                             .gap_1()
                             .px_1()
                             .child(
-                                Button::new(("project-group", id as usize), project.name.clone())
-                                    .variant(ButtonVariant::Ghost)
-                                    .control_size(ControlSize::Small)
-                                    .with_icon(if collapsed {
+                                div().flex_shrink_0().pl_1().child(
+                                    (if collapsed {
                                         Icon::ChevronRight
                                     } else {
                                         Icon::ChevronDown
                                     })
+                                    .view(p.muted)
+                                    .size(px(11.)),
+                                ),
+                            )
+                            .child(
+                                Button::new(("project-group", id as usize), project.name.clone())
+                                    .variant(ButtonVariant::Ghost)
+                                    .control_size(ControlSize::Small)
+                                    .with_icon(Icon::Folder)
                                     .flex_1()
                                     .min_w_0()
                                     .align_start()
@@ -197,7 +204,7 @@ impl ProjectManager {
         div()
             .id("project-channel-sidebar")
             .size_full()
-            .bg(rgb(p.sidebar))
+            .bg(ds::glass(p.sidebar, ds::GLASS_SIDEBAR))
             .flex()
             .flex_col()
             .overflow_hidden()

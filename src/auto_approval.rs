@@ -140,7 +140,7 @@ pub fn parse_assessment(text: &str) -> Result<Assessment, String> {
     Ok(result)
 }
 
-/// A late model response never overrides a newer mode, model choice or blacklist.
+/// A late model response never overrides a newer mode, model choice or deny rules.
 pub fn resolve_result(
     plan: &crate::approval::ApprovalPlan,
     started: &AutoSettings,

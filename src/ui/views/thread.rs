@@ -70,7 +70,7 @@ impl Workspace {
         let root = div()
             .size_full()
             .min_w_0()
-            .bg(rgb(p.surface))
+            .bg(ds::glass(p.surface, ds::GLASS_SURFACE))
             .flex()
             .flex_col()
             .child(header);
@@ -242,7 +242,7 @@ impl Workspace {
                             v.child(
                                 div()
                                     .p_3()
-                                    .bg(rgb(p.canvas))
+                                    .bg(ds::glass(p.canvas, 0.5))
                                     .rounded(px(ds::radius::CONTROL))
                                     .flex()
                                     .flex_col()

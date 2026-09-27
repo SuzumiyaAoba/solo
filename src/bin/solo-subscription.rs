@@ -74,8 +74,15 @@ fn run() -> io::Result<()> {
     let user_prompt = prompt.join(" ");
     let review_prompt = user_prompt.clone();
     let mut policy = |call: &ToolCall| {
-        if is_read_only_tool(&call.name) {
-            return true;
+        let tool_decision = rule_store
+            .load()
+            .ok()
+            .and_then(|rules| rules.tool_decision(&call.name));
+        match tool_decision {
+            Some(solo::command_rules::Decision::Allow) => return true,
+            Some(solo::command_rules::Decision::Deny) => return false,
+            _ if is_read_only_tool(&call.name) => return true,
+            _ => {}
         }
         let request = ApprovalRequest::tool(call, &cwd);
         let plan = match request.plan(&rule_store) {
@@ -131,7 +138,7 @@ fn run() -> io::Result<()> {
         eprint!(
             "{}",
             if request.command.is_some() {
-                "[y] 今回だけ実行 / [a] Whitelist に完全一致で登録 / [b] Blacklist に完全一致で登録して拒否 / [N] 拒否: "
+                "[y] 今回だけ実行 / [a] Allow に完全一致で登録 / [b] Deny に完全一致で登録して拒否 / [N] 拒否: "
             } else {
                 "今回だけ許可しますか? [y/N] "
             }
@@ -144,7 +151,7 @@ fn run() -> io::Result<()> {
         let recheck = || match request.plan(&rule_store) {
             Ok(ApprovalPlan::Allow(_) | ApprovalPlan::Manual | ApprovalPlan::Auto(_)) => true,
             Ok(ApprovalPlan::Deny(_)) => {
-                eprintln!("Blacklist に一致するため実行を拒否しました");
+                eprintln!("Deny に一致するため実行を拒否しました");
                 false
             }
             Err(error) => {
@@ -156,16 +163,16 @@ fn run() -> io::Result<()> {
             "y" => recheck(),
             "a" | "b" if request.command.is_some() => {
                 let list = if answer.trim().eq_ignore_ascii_case("a") {
-                    RuleList::Whitelist
+                    RuleList::Allow
                 } else {
-                    RuleList::Blacklist
+                    RuleList::Deny
                 };
                 let command = request.command.as_ref().expect("command approval");
                 if let Err(error) = rule_store.add(list, command.clone()) {
                     eprintln!("ルールを保存できないため実行しません: {error}");
                     return false;
                 }
-                list == RuleList::Whitelist && recheck()
+                list == RuleList::Allow && recheck()
             }
             _ => false,
         }

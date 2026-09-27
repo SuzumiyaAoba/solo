@@ -191,13 +191,13 @@ impl CommandRule {
                 Matching::Wildcard => matcher::wildcard_matches(
                     &self.command,
                     &command.command,
-                    list == RuleList::Whitelist,
+                    list == RuleList::Allow,
                 ),
             }
     }
 }
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Decision {
     Ask,
     Allow,
@@ -205,44 +205,63 @@ pub enum Decision {
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RuleList {
-    Whitelist,
-    Blacklist,
+    Allow,
+    Deny,
 }
 impl RuleList {
     pub fn label(self) -> &'static str {
         match self {
-            Self::Whitelist => "Whitelist（自動許可）",
-            Self::Blacklist => "Blacklist（自動拒否）",
+            Self::Allow => "Allow（自動許可）",
+            Self::Deny => "Deny（自動拒否）",
         }
     }
 }
 
+/// 既定では version 1/2 の whitelist/blacklist キーは読まず破棄する。
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct Rules {
     #[serde(default)]
-    pub whitelist: Vec<CommandRule>,
+    pub allow: Vec<CommandRule>,
     #[serde(default)]
-    pub blacklist: Vec<CommandRule>,
+    pub deny: Vec<CommandRule>,
+    /// 基本ツール名ごとの明示判定。未定義なら既定（read/search は許可、他は確認）。
+    #[serde(default)]
+    pub tool_decisions: BTreeMap<String, Decision>,
 }
 impl Rules {
     pub(crate) fn validate(&self) -> io::Result<()> {
-        for rule in self.whitelist.iter().chain(&self.blacklist) {
+        for rule in self.allow.iter().chain(&self.deny) {
             rule.validate()?;
+        }
+        for name in self.tool_decisions.keys() {
+            if name.trim().is_empty() {
+                return Err(invalid("ツール名が空の判定があります"));
+            }
         }
         Ok(())
     }
+    /// ツールごとの明示判定。None は呼び出し側の既定（read/search 許可など）に委ねる。
+    pub fn tool_decision(&self, tool: &str) -> Option<Decision> {
+        self.tool_decisions.get(tool).copied()
+    }
+    /// ツール名ごとの明示判定を設定。None で既定へ戻す。
+    pub fn set_tool(&mut self, tool: &str, decision: Option<Decision>) {
+        match decision {
+            Some(decision) => self.tool_decisions.insert(tool.into(), decision),
+            None => self.tool_decisions.remove(tool),
+        };
+    }
     pub fn evaluate(&self, command: &CommandInvocation) -> Decision {
         if self
-            .blacklist
+            .deny
             .iter()
-            .any(|rule| rule.matches(command, RuleList::Blacklist))
+            .any(|rule| rule.matches(command, RuleList::Deny))
         {
             Decision::Deny
         } else if self
-            .whitelist
+            .allow
             .iter()
-            .any(|rule| rule.matches(command, RuleList::Whitelist))
+            .any(|rule| rule.matches(command, RuleList::Allow))
         {
             Decision::Allow
         } else {
@@ -251,14 +270,14 @@ impl Rules {
     }
     pub fn entries(&self, list: RuleList) -> &[CommandRule] {
         match list {
-            RuleList::Whitelist => &self.whitelist,
-            RuleList::Blacklist => &self.blacklist,
+            RuleList::Allow => &self.allow,
+            RuleList::Deny => &self.deny,
         }
     }
     fn entries_mut(&mut self, list: RuleList) -> &mut Vec<CommandRule> {
         match list {
-            RuleList::Whitelist => &mut self.whitelist,
-            RuleList::Blacklist => &mut self.blacklist,
+            RuleList::Allow => &mut self.allow,
+            RuleList::Deny => &mut self.deny,
         }
     }
 }
@@ -272,7 +291,7 @@ struct Store {
 impl Default for Store {
     fn default() -> Self {
         Self {
-            version: 2,
+            version: 3,
             workspaces: BTreeMap::new(),
         }
     }
@@ -380,6 +399,12 @@ impl RuleStore {
             Ok(())
         })
     }
+    pub fn set_tool(&self, tool: &str, decision: Option<Decision>) -> io::Result<()> {
+        self.modify(|rules| {
+            rules.set_tool(tool, decision);
+            Ok(())
+        })
+    }
     fn read(&self) -> io::Result<Store> {
         let Some(bytes) = read_optional(
             &self.path,
@@ -391,14 +416,14 @@ impl RuleStore {
         };
         let store: Store = serde_json::from_slice(&bytes)
             .map_err(|error| invalid(format!("コマンドルールを読めません: {error}")))?;
-        if !matches!(store.version, 1 | 2) {
+        if !matches!(store.version, 1..=3) {
             return Err(invalid("未対応のコマンドルールの version です"));
         }
         for (workspace, rules) in &store.workspaces {
             if !workspace.is_absolute() {
                 return Err(invalid("workspace は絶対パスで指定してください"));
             }
-            for command in rules.whitelist.iter().chain(&rules.blacklist) {
+            for command in rules.allow.iter().chain(&rules.deny) {
                 command.validate()?;
                 if store.version == 1 && command.matching != Matching::Exact {
                     return Err(invalid(
@@ -424,7 +449,7 @@ impl RuleStore {
         // Reload under the lock so other windows / CLI changes are not lost.
         let mut store = self.read()?;
         edit(store.workspaces.entry(self.workspace.clone()).or_default())?;
-        store.version = 2;
+        store.version = 3;
         let bytes = serde_json::to_vec_pretty(&store)?;
         if bytes.len() as u64 > MAX_STORE_BYTES {
             return Err(invalid("コマンドルールの保存上限です"));

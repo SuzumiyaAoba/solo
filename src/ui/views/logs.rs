@@ -155,7 +155,7 @@ impl Workspace {
                 .flex_1()
                 .min_h_0(),
             )
-            .bg(rgb(p.canvas))
+            .bg(glass(p.canvas, ds::GLASS_STRONG))
             .into_any_element()
     }
 }

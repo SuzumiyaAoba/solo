@@ -181,43 +181,43 @@ async fn approval_checks(this: &WeakEntity<Workspace>, cx: &mut AsyncWindowConte
         .unwrap();
     assert!(answer.try_recv().expect("approval should be answered"));
     assert!(
-        store.load().unwrap().whitelist.is_empty(),
+        store.load().unwrap().allow.is_empty(),
         "allow once persisted a rule"
     );
 
     let waiting = inject_approval(this, request.clone(), cx);
-    store.add(RuleList::Blacklist, command.clone()).unwrap();
+    store.add(RuleList::Deny, command.clone()).unwrap();
     this.update_in(cx, |this, _, cx| this.answer_approval(true, cx))
         .unwrap();
     assert!(
         matches!(waiting.try_recv(), Err(async_channel::TryRecvError::Empty)),
-        "new blacklist was ignored while confirmation was open"
+        "new deny rule was ignored while confirmation was open"
     );
     this.update_in(cx, |this, _, cx| this.answer_approval(false, cx))
         .unwrap();
     assert!(!waiting.try_recv().unwrap());
-    store.remove(RuleList::Blacklist, &command).unwrap();
+    store.remove(RuleList::Deny, &command).unwrap();
 
     let answer = inject_approval(this, request.clone(), cx);
     this.update_in(cx, |this, _, cx| {
-        this.remember_approval(RuleList::Whitelist, cx)
+        this.remember_approval(RuleList::Allow, cx)
     })
     .unwrap();
     assert!(answer.try_recv().expect("approval should be answered"));
     let answer = inject_approval(this, request.clone(), cx);
     assert!(
         answer.try_recv().expect("approval should be answered"),
-        "whitelist did not auto-allow"
+        "allow rule did not auto-allow"
     );
     this.update_in(cx, |this, _, _| {
         assert!(this.sessions[this.selected].approval.is_none())
     })
     .unwrap();
-    store.add(RuleList::Blacklist, command.clone()).unwrap();
+    store.add(RuleList::Deny, command.clone()).unwrap();
     let answer = inject_approval(this, request.clone(), cx);
     assert!(
         !answer.try_recv().expect("approval should be answered"),
-        "blacklist did not override whitelist"
+        "deny rule did not override the allow rule"
     );
 
     let mut unlisted = request.clone();
@@ -233,7 +233,7 @@ async fn approval_checks(this: &WeakEntity<Workspace>, cx: &mut AsyncWindowConte
         .unwrap();
     assert!(!answer.try_recv().expect("approval should be answered"));
 
-    store.remove(RuleList::Blacklist, &command).unwrap();
+    store.remove(RuleList::Deny, &command).unwrap();
     let mut no_allow_once = request.clone();
     no_allow_once.can_allow = false;
     let answer = inject_approval(this, no_allow_once, cx);
@@ -251,7 +251,7 @@ async fn approval_checks(this: &WeakEntity<Workspace>, cx: &mut AsyncWindowConte
     std::fs::write(store.path(), "{").unwrap();
     let answer = inject_approval(this, request.clone(), cx);
     this.update_in(cx, |this, _, cx| {
-        this.remember_approval(RuleList::Whitelist, cx);
+        this.remember_approval(RuleList::Allow, cx);
         assert!(
             this.sessions[this.selected]
                 .approval
@@ -282,14 +282,14 @@ async fn approval_checks(this: &WeakEntity<Workspace>, cx: &mut AsyncWindowConte
     cx.background_executor()
         .timer(Duration::from_millis(250))
         .await;
-    println!("Command rules UI ready: persisted whitelist");
+    println!("Command rules UI ready: persisted allow rules");
     approval_preview_pause(cx).await;
     this.update_in(cx, |_, window, cx| {
         assert!(window.has_active_sheet(cx));
         window.close_sheet(cx);
     })
     .unwrap();
-    store.remove(RuleList::Whitelist, &command).unwrap();
+    store.remove(RuleList::Allow, &command).unwrap();
     let answer = inject_approval(this, request, cx);
     this.update_in(cx, |this, window, cx| {
         this.close_session(window, cx);
@@ -301,7 +301,7 @@ async fn approval_checks(this: &WeakEntity<Workspace>, cx: &mut AsyncWindowConte
         "closing a session left approval waiting"
     );
     println!(
-        "Command approval smoke OK: allow once, saved whitelist, blacklist precedence, unknown commands, unsupported permission, failed save, rules sheet, close while waiting"
+        "Command approval smoke OK: allow once, saved allow rule, deny precedence, unknown commands, unsupported permission, failed save, rules sheet, close while waiting"
     );
 }
 

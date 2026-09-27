@@ -2,6 +2,7 @@
 use crate::{
     approval::{ApprovalRequest, wait_for_reply},
     codex_subscription::{Authentication, DEFAULT_MODEL, DeviceLogin},
+    command_rules::{Decision, RuleStore},
     event::{Envelope, Event, Sequencer, Usage, preview},
     harness::{
         self, Cancellation, Limits, Message, StopReason, ToolCall, Update,
@@ -189,8 +190,15 @@ fn run(
     let approval_workspace = workspace.clone();
     let approval_cancellation = cancellation.clone();
     let mut policy = move |call: &ToolCall| {
-        if is_read_only_tool(&call.name) {
-            return true;
+        let tool_decision = RuleStore::for_workspace(&approval_workspace)
+            .and_then(|store| store.load())
+            .ok()
+            .and_then(|rules| rules.tool_decision(&call.name));
+        match tool_decision {
+            Some(Decision::Allow) => return true,
+            Some(Decision::Deny) => return false,
+            _ if is_read_only_tool(&call.name) => return true,
+            _ => {}
         }
         let (reply, answer) = async_channel::bounded(1);
         if approval_sender

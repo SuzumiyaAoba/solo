@@ -10,6 +10,8 @@ mod smoke;
 mod stream;
 mod threads_smoke;
 mod views;
+#[cfg(feature = "gui-visual")]
+mod visual;
 mod workflow;
 mod workflow_smoke;
 
@@ -21,7 +23,7 @@ use gpui_kit::component::message_scroller::MessageScrollerState;
 use gpui_kit::{prelude::*, *};
 use solo::design::{
     self as ds, Button, ButtonVariant, ColorScheme, ControlSize, DesignAssets, Icon, Select,
-    Submitted, TextInput as Composer, ToastHost, Tone, space, typography,
+    Submitted, TextInput as Composer, ToastHost, Tone, glass, space, typography,
 };
 use solo::{
     acp::{self, AgentProfile},
@@ -67,7 +69,27 @@ pub fn run() {
     let args: Vec<_> = std::env::args().skip(1).collect();
     if args.iter().any(|arg| arg == "--help") {
         println!(
-            "Solo\n  --light     ライトテーマで起動\n  --compact   小さいウィンドウで起動\n  --smoke     実画面の検証後に終了"
+            "Solo\n  --light     ライトテーマで起動\n  --compact   小さいウィンドウで起動\n  --smoke     実画面の検証後に終了\n  --visual D  PNG で実描画を出力して終了（要 feature gui-visual）"
+        );
+        return;
+    }
+    let visual = args
+        .iter()
+        .position(|arg| arg == "--visual")
+        .and_then(|i| args.get(i + 1).map(PathBuf::from))
+        .or_else(|| {
+            args.iter()
+                .find_map(|arg| arg.strip_prefix("--visual=").map(PathBuf::from))
+        });
+    #[cfg(feature = "gui-visual")]
+    if let Some(dir) = visual {
+        visual::run(&dir);
+        return;
+    }
+    #[cfg(not(feature = "gui-visual"))]
+    if visual.is_some() {
+        eprintln!(
+            "--visual には feature gui-visual が必要です: cargo run --features gui-visual -- --visual DIR"
         );
         return;
     }
@@ -124,6 +146,8 @@ pub fn run() {
                         appears_transparent: true,
                         traffic_light_position: Some(point(px(16.), px(16.))),
                     }),
+                    // Liquid Glass: 背面にシステムのブラー素材を敷き、半透明の層を透かせる。
+                    window_background: WindowBackgroundAppearance::Blurred,
                     app_id: Some("dev.solo.app".into()),
                     ..Default::default()
                 },
@@ -294,6 +318,7 @@ impl Workspace {
             Composer::multiline(window, cx)
                 .placeholder("このチャンネルに依頼を送る…")
                 .control_size(ControlSize::Large)
+                .appearance(false)
                 .clear_on_submit(true)
         });
         let callback_id = id.clone();

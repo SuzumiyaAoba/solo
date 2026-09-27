@@ -117,7 +117,7 @@ pub(super) async fn check(this: &WeakEntity<Workspace>, cx: &mut AsyncWindowCont
         .unwrap();
     let cfg = store.config_store().unwrap().clone();
     let command = request.command.clone().unwrap();
-    store.add(RuleList::Blacklist, command.clone()).unwrap();
+    store.add(RuleList::Deny, command.clone()).unwrap();
     cfg.set_approval(config(ApprovalMode::Bypass, "")).unwrap();
     assert!(wait_answer(&inject_approval(this, request.clone(), cx), cx).await);
     assert!(
@@ -129,9 +129,9 @@ pub(super) async fn check(this: &WeakEntity<Workspace>, cx: &mut AsyncWindowCont
     assert!(!wait_answer(&inject_approval(this, request.clone(), cx), cx).await);
     assert!(
         fake.models.lock().unwrap().is_empty(),
-        "blacklist called the model"
+        "deny rule called the model"
     );
-    store.remove(RuleList::Blacklist, &command).unwrap();
+    store.remove(RuleList::Deny, &command).unwrap();
     for (name, accepted) in [("allow-model", true), ("deny-model", false)] {
         cfg.set_approval(config(ApprovalMode::Auto, name)).unwrap();
         assert_eq!(
@@ -187,7 +187,7 @@ pub(super) async fn check(this: &WeakEntity<Workspace>, cx: &mut AsyncWindowCont
         .unwrap();
     assert!(!wait_answer(&answer, cx).await);
 
-    // A blacklist written without a UI notification still wins when the model finishes.
+    // A deny entry written without a UI notification still wins when the model finishes.
     fake.release.store(false, Ordering::Release);
     cfg.set_approval(config(ApprovalMode::Auto, "slow-model"))
         .unwrap();
@@ -195,10 +195,10 @@ pub(super) async fn check(this: &WeakEntity<Workspace>, cx: &mut AsyncWindowCont
     cx.background_executor()
         .timer(Duration::from_millis(80))
         .await;
-    store.add(RuleList::Blacklist, command.clone()).unwrap();
+    store.add(RuleList::Deny, command.clone()).unwrap();
     fake.release.store(true, Ordering::Release);
     assert!(!wait_answer(&answer, cx).await);
-    store.remove(RuleList::Blacklist, &command).unwrap();
+    store.remove(RuleList::Deny, &command).unwrap();
 
     // Closing the session cancels review and closes the backend approval channel.
     fake.release.store(false, Ordering::Release);
@@ -221,7 +221,7 @@ pub(super) async fn check(this: &WeakEntity<Workspace>, cx: &mut AsyncWindowCont
         .unwrap();
     this.update_in(cx, |this, window, cx| {
         this.rule_editor.update(cx, |editor, cx| {
-            editor.show_settings = true;
+            editor.page = super::command_rules::Page::Settings;
             cx.notify();
         });
         this.open_command_rules(window, cx);
@@ -236,7 +236,7 @@ pub(super) async fn check(this: &WeakEntity<Workspace>, cx: &mut AsyncWindowCont
         use gpui_kit::component::WindowExt;
         window.close_sheet(cx);
         this.rule_editor.update(cx, |editor, cx| {
-            editor.show_settings = false;
+            editor.page = super::command_rules::Page::Commands;
             cx.notify();
         });
     })
@@ -248,6 +248,6 @@ pub(super) async fn check(this: &WeakEntity<Workspace>, cx: &mut AsyncWindowCont
     })
     .unwrap();
     println!(
-        "Approval modes smoke OK: bypass, blacklist priority, configured model, allow/deny/ask/error, changed settings, stale results, close/cancel; no real model requests"
+        "Approval modes smoke OK: bypass, deny priority, configured model, allow/deny/ask/error, changed settings, stale results, close/cancel; no real model requests"
     );
 }
