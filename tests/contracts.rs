@@ -1,50 +1,11 @@
+mod common;
+
+use common::{complete, delta, event, session};
 use serde_json::json;
 use solo::{
-    event::{Decoded, Envelope, Event, SCHEMA_VERSION, Usage},
-    projection::{
-        Apply, CHAT_BLOCK_BYTES, Diff, DiffKind, MAX_CHAT_BLOCKS, MAX_LOG_ROWS, Session, Status,
-    },
+    event::{Decoded, Envelope, Event, Usage},
+    projection::{Apply, CHAT_BLOCK_BYTES, Diff, DiffKind, MAX_CHAT_BLOCKS, MAX_LOG_ROWS, Status},
 };
-
-fn event(sequence: u64, payload: Event) -> Envelope {
-    Envelope {
-        schema_version: SCHEMA_VERSION,
-        event_id: format!("event-{sequence}"),
-        session_id: "s1".into(),
-        sequence,
-        timestamp_ms: 0,
-        turn_id: Some("turn-1".into()),
-        payload: serde_json::to_value(payload).unwrap(),
-    }
-}
-fn session() -> Session {
-    let mut session = Session::new("s1".into(), "test".into());
-    session.apply(event(
-        1,
-        Event::TurnStarted {
-            prompt: "表示を確認".into(),
-        },
-    ));
-    session
-}
-fn delta(sequence: u64, text: &str) -> Envelope {
-    event(
-        sequence,
-        Event::MessageDelta {
-            message_id: "m1".into(),
-            text: text.into(),
-        },
-    )
-}
-fn complete(sequence: u64) -> Envelope {
-    event(
-        sequence,
-        Event::TurnCompleted {
-            reason: "done".into(),
-            usage: Usage::default(),
-        },
-    )
-}
 
 #[test]
 fn envelope_roundtrip_preserves_related_ids() {

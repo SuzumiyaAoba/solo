@@ -1,6 +1,6 @@
 //! 実際のモデル、shell、workspace の書込みは一切呼び出さない。
 //! worker がログ I/O を所有し、bounded channel で UI と接続する。
-use crate::event::{Envelope, Event, Usage, preview};
+use crate::event::{Envelope, Event, Sequencer, Usage, preview};
 use async_channel::{Receiver, Sender, TrySendError};
 use std::{
     io::{self, BufWriter, Write},
@@ -128,7 +128,11 @@ pub fn start(config: Config) -> io::Result<(Controller, Receiver<Delivery>)> {
         .name(format!("solo-mock-{}", config.session_id))
         .spawn(move || {
             let mut producer = Producer {
-                sequence: config.start_sequence,
+                sequencer: Sequencer::new(
+                    config.session_id.clone(),
+                    config.start_sequence,
+                    format!("turn-{}", config.start_sequence + 1),
+                ),
                 config,
                 sender,
                 signal: worker_signal,
@@ -150,7 +154,7 @@ pub fn start(config: Config) -> io::Result<(Controller, Receiver<Delivery>)> {
 }
 
 struct Producer {
-    sequence: u64,
+    sequencer: Sequencer,
     config: Config,
     sender: Sender<Delivery>,
     signal: Arc<AtomicU8>,
@@ -174,22 +178,13 @@ impl Producer {
         }
     }
 
-    fn envelope(&self, event: Event) -> Envelope {
-        Envelope::new(
-            &self.config.session_id,
-            self.sequence + 1,
-            format!("turn-{}", self.config.start_sequence + 1),
-            event,
-        )
-    }
-
     fn emit(&mut self, event: Event, interruptible: bool) -> bool {
-        self.emit_envelope(self.envelope(event), interruptible)
+        self.emit_envelope(self.sequencer.peek(event), interruptible)
     }
 
     fn emit_envelope(&mut self, event: Envelope, interruptible: bool) -> bool {
         if self.send(Delivery::Event(event), interruptible) {
-            self.sequence += 1;
+            self.sequencer.advance();
             true
         } else {
             false
@@ -227,7 +222,7 @@ impl Producer {
             Event::ModelRequestStarted {
                 provider: "ローカル疑似プロバイダー".into(),
                 model: "phase-0".into(),
-                request_id: format!("request-{}", self.sequence),
+                request_id: format!("request-{}", self.sequencer.sequence()),
             },
             true,
         ) {
@@ -310,7 +305,7 @@ impl Producer {
                     text,
                 }
             };
-            let envelope = self.envelope(event);
+            let envelope = self.sequencer.peek(event);
             if !self.emit_envelope(envelope.clone(), true) {
                 writer.flush()?;
                 self.interrupted();
@@ -334,7 +329,7 @@ impl Producer {
                     ),
                     (1, serde_json::json!({"type":"message_delta","text":42})),
                 ] {
-                    let mut unknown = self.envelope(Event::TurnFailed {
+                    let mut unknown = self.sequencer.peek(Event::TurnFailed {
                         reason: String::new(),
                     });
                     unknown.schema_version = version;

@@ -1,3 +1,4 @@
+use super::smoke::until;
 use super::*;
 use gpui_kit::component::WindowExt;
 use solo::subscription_worker::Delivery as SubscriptionDelivery;
@@ -77,24 +78,20 @@ pub(super) async fn run(this: &WeakEntity<Workspace>, cx: &mut AsyncWindowContex
             (blocker, queued)
         })
         .unwrap();
-    let started = Instant::now();
-    loop {
-        cx.background_executor()
-            .timer(Duration::from_millis(100))
-            .await;
-        let done = this
-            .update_in(cx, |this, _, _| {
+    until(
+        cx,
+        Duration::from_secs(10),
+        Duration::from_millis(100),
+        "queued mock timed out",
+        |cx| {
+            this.update_in(cx, |this, _, _| {
                 !this.sessions[queued].model.status.is_active()
             })
-            .unwrap();
-        if done {
-            break;
-        }
-        assert!(
-            started.elapsed() < Duration::from_secs(10),
-            "queued mock timed out"
-        );
-    }
+            .unwrap()
+            .then_some(())
+        },
+    )
+    .await;
     this.update_in(cx, |this, window, cx| {
         assert!(this.sessions[queued].needs_attention());
         assert_eq!(

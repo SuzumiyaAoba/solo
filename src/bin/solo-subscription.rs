@@ -5,7 +5,7 @@ use solo::{
     command_rules::{RuleList, RuleStore},
     harness::{
         self, Cancellation, Limits, Message, StopReason, ToolCall, Update,
-        workspace::WorkspaceTools,
+        workspace::{WorkspaceTools, is_read_only_tool},
     },
 };
 use std::{
@@ -74,7 +74,7 @@ fn run() -> io::Result<()> {
     let user_prompt = prompt.join(" ");
     let review_prompt = user_prompt.clone();
     let mut policy = |call: &ToolCall| {
-        if matches!(call.name.as_str(), "read" | "search") {
+        if is_read_only_tool(&call.name) {
             return true;
         }
         let request = ApprovalRequest::tool(call, &cwd);

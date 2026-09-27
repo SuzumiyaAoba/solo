@@ -7,17 +7,17 @@ use gpui_kit::component::{
 use solo::command_rules::{CommandInvocation, CommandRule, Matching, Rules};
 
 pub(super) struct CommandRuleEditor {
-    store: Result<RuleStore, String>,
-    rules: Rules,
-    error: Option<String>,
-    list: RuleList,
-    draft: Entity<Composer>,
-    matching: Matching,
+    pub(super) store: Result<RuleStore, String>,
+    pub(super) rules: Rules,
+    pub(super) error: Option<String>,
+    pub(super) list: RuleList,
+    pub(super) draft: Entity<Composer>,
+    pub(super) matching: Matching,
     editing: Option<CommandRule>,
     pub(super) show_settings: bool,
-    approval: ApprovalSettings,
+    pub(super) approval: ApprovalSettings,
     mode_picker: Entity<Select>,
-    auto_model: Entity<Composer>,
+    pub(super) auto_model: Entity<Composer>,
     _mode_subscription: Subscription,
 }
 impl CommandRuleEditor {
@@ -91,7 +91,7 @@ impl CommandRuleEditor {
         }
         cx.notify();
     }
-    fn add(&mut self, cx: &mut Context<Self>) {
+    pub(super) fn add(&mut self, cx: &mut Context<Self>) {
         let result = self.store.as_ref().map_err(Clone::clone).and_then(|store| {
             let text = self.draft.read(cx).value(cx).to_string();
             let mut rule = if let Some(old) = &self.editing {
@@ -124,7 +124,7 @@ impl CommandRuleEditor {
             }
         }
     }
-    fn edit(&mut self, rule: CommandRule, cx: &mut Context<Self>) {
+    pub(super) fn edit(&mut self, rule: CommandRule, cx: &mut Context<Self>) {
         self.draft
             .update(cx, |input, cx| input.set_value(rule.command.clone(), cx));
         self.matching = rule.matching;
@@ -138,7 +138,7 @@ impl CommandRuleEditor {
         self.draft.update(cx, |input, cx| input.set_value("", cx));
         cx.notify();
     }
-    fn remove(&mut self, command: &CommandRule, cx: &mut Context<Self>) {
+    pub(super) fn remove(&mut self, command: &CommandRule, cx: &mut Context<Self>) {
         let result = self.store.as_ref().map_err(Clone::clone).and_then(|store| {
             store
                 .remove(self.list, command)
@@ -155,7 +155,7 @@ impl CommandRuleEditor {
             }
         }
     }
-    fn save_settings(&mut self, cx: &mut Context<Self>) {
+    pub(super) fn save_settings(&mut self, cx: &mut Context<Self>) {
         let mut settings = self.approval.clone();
         settings.auto.model = self.auto_model.read(cx).value(cx).trim().to_owned();
         let result = self.store.as_ref().map_err(Clone::clone).and_then(|store| {
@@ -621,84 +621,4 @@ impl Render for CommandRuleEditor {
             )
             .into_any_element()
     }
-}
-
-/// Exercise the actual editor callbacks using the smoke test's temporary store.
-pub(super) fn smoke(editor: &Entity<CommandRuleEditor>, cx: &mut App) {
-    editor.update(cx, |editor, cx| {
-        let store = editor.store.as_ref().unwrap().clone();
-        editor.list = RuleList::Whitelist;
-        editor.matching = Matching::Wildcard;
-        editor
-            .draft
-            .update(cx, |input, cx| input.set_value("cargo test *", cx));
-        editor.add(cx);
-        assert!(editor.error.is_none());
-        let probe = CommandInvocation::shell("cargo test --release", store.workspace()).unwrap();
-        assert_eq!(store.evaluate(&probe).unwrap(), Decision::Allow);
-        let added = editor
-            .rules
-            .whitelist
-            .iter()
-            .find(|rule| rule.command == "cargo test *")
-            .unwrap()
-            .clone();
-        editor.edit(added, cx);
-        editor
-            .draft
-            .update(cx, |input, cx| input.set_value("cargo test --locked*", cx));
-        editor.add(cx);
-        assert!(editor.error.is_none());
-        assert_eq!(store.evaluate(&probe).unwrap(), Decision::Ask);
-        let edited = editor
-            .rules
-            .whitelist
-            .iter()
-            .find(|rule| rule.command == "cargo test --locked*")
-            .unwrap()
-            .clone();
-        editor.remove(&edited, cx);
-        assert!(editor.error.is_none());
-        editor
-            .draft
-            .update(cx, |input, cx| input.set_value("git *", cx));
-        editor.add(cx);
-        assert!(editor.error.is_none());
-    });
-}
-
-pub(super) fn settings_smoke(editor: &Entity<CommandRuleEditor>, cx: &mut App) {
-    editor.update(cx, |editor, cx| {
-        let config = editor
-            .store
-            .as_ref()
-            .unwrap()
-            .config_store()
-            .unwrap()
-            .clone();
-        editor.approval.mode = ApprovalMode::Auto;
-        editor
-            .auto_model
-            .update(cx, |input, cx| input.set_value("selected-in-ui", cx));
-        editor.save_settings(cx);
-        assert!(editor.error.is_none());
-        assert_eq!(config.load().unwrap().approval.auto.model, "selected-in-ui");
-        assert_eq!(config.load().unwrap().approval.mode, ApprovalMode::Auto);
-        editor
-            .auto_model
-            .update(cx, |input, cx| input.set_value("", cx));
-        editor.save_settings(cx);
-        assert!(editor.error.is_some());
-        assert_eq!(
-            config.load().unwrap().approval.auto.model,
-            "selected-in-ui",
-            "invalid model overwrote the config"
-        );
-        editor.approval.mode = ApprovalMode::Manual;
-        editor
-            .auto_model
-            .update(cx, |input, cx| input.set_value("selected-in-ui", cx));
-        editor.save_settings(cx);
-        assert!(editor.error.is_none());
-    });
 }

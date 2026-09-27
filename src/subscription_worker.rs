@@ -2,10 +2,10 @@
 use crate::{
     approval::{ApprovalRequest, wait_for_reply},
     codex_subscription::{Authentication, DEFAULT_MODEL, DeviceLogin},
-    event::{Envelope, Event, Usage, preview},
+    event::{Envelope, Event, Sequencer, Usage, preview},
     harness::{
         self, Cancellation, Limits, Message, StopReason, ToolCall, Update,
-        workspace::WorkspaceTools,
+        workspace::{WorkspaceTools, is_read_only_tool},
     },
 };
 use async_channel::{Receiver, Sender};
@@ -189,7 +189,7 @@ fn run(
     let approval_workspace = workspace.clone();
     let approval_cancellation = cancellation.clone();
     let mut policy = move |call: &ToolCall| {
-        if matches!(call.name.as_str(), "read" | "search") {
+        if is_read_only_tool(&call.name) {
             return true;
         }
         let (reply, answer) = async_channel::bounded(1);
@@ -325,26 +325,26 @@ fn unified_diff(relative: &str, before: &str, after: &str) -> Option<String> {
 }
 
 struct Emitter {
-    session_id: String,
-    sequence: u64,
-    turn_id: String,
+    sequencer: Sequencer,
     sender: Sender<Delivery>,
 }
 
 impl Emitter {
     fn new(session_id: String, start_sequence: u64, sender: Sender<Delivery>) -> Self {
         Self {
-            session_id,
-            sequence: start_sequence,
-            turn_id: format!("solo-turn-{}", start_sequence + 1),
+            sequencer: Sequencer::new(
+                session_id,
+                start_sequence,
+                format!("solo-turn-{}", start_sequence + 1),
+            ),
             sender,
         }
     }
 
     fn emit(&mut self, event: Event) {
-        self.sequence += 1;
-        let envelope = Envelope::new(&self.session_id, self.sequence, self.turn_id.clone(), event);
-        let _ = self.sender.send_blocking(Delivery::Event(envelope));
+        let _ = self
+            .sender
+            .send_blocking(Delivery::Event(self.sequencer.next(event)));
     }
 }
 

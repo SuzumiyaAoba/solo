@@ -1,5 +1,7 @@
+mod common;
+
 use solo::{
-    event::{Envelope, Event, SCHEMA_VERSION, Usage},
+    event::{Envelope, Event, Usage},
     orchestration::{QueuedRun, RunQueue, task_title},
     projection::{Apply, Diff, MAX_TOOL_ACTIVITIES, Session, Status},
 };
@@ -67,15 +69,7 @@ fn titles_use_the_first_nonempty_line_and_preserve_graphemes() {
 }
 
 fn event(n: u64, payload: Event) -> Envelope {
-    Envelope {
-        schema_version: SCHEMA_VERSION,
-        event_id: format!("e{n}"),
-        session_id: "s".into(),
-        sequence: n,
-        timestamp_ms: n,
-        turn_id: Some("turn".into()),
-        payload: serde_json::to_value(payload).unwrap(),
-    }
+    common::envelope("s", "turn", n, payload)
 }
 
 fn started() -> Session {

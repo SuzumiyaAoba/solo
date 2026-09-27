@@ -12,10 +12,8 @@ pub(super) fn start(window: &Window, cx: &mut Context<Workspace>) {
                 ds::set_theme(if index % 2 == 0 { ColorScheme::Dark } else { ColorScheme::Light }, cx);
                 if scenario != Scenario::Demo { this.scenario(scenario, cx); }
             }).expect("smoke window remains open");
-            let started = Instant::now();
             let mut tick = 0;
-            loop {
-                cx.background_executor().timer(Duration::from_millis(100)).await;
+            until(cx, Duration::from_secs(45), Duration::from_millis(100), "smoke stream timed out", |cx| {
                 let done = this.update_in(cx, |this, window, cx| {
                     let s = &mut this.sessions[this.selected];
                     s.tab = [Tab::Overview, Tab::Chat, Tab::Logs, Tab::Diff][tick % 4];
@@ -40,10 +38,13 @@ pub(super) fn start(window: &Window, cx: &mut Context<Workspace>) {
                     cx.notify();
                     done
                 }).expect("smoke window remains open");
-                if done { break; }
-                assert!(started.elapsed() < Duration::from_secs(45), "smoke stream timed out");
-                tick += 1;
-            }
+                if done {
+                    Some(())
+                } else {
+                    tick += 1;
+                    None
+                }
+            }).await;
         }
 
         let original_id = this.update_in(cx, |this, window, cx| {
@@ -87,20 +88,16 @@ pub(super) fn start(window: &Window, cx: &mut Context<Workspace>) {
                 }
                 assert!(this.scenario_picker.read(cx).disabled);
             }).unwrap();
-            let started = Instant::now();
-            loop {
-                cx.background_executor().timer(Duration::from_millis(100)).await;
-                let done = this.update_in(cx, |this, _, cx| {
+            until(cx, Duration::from_secs(5), Duration::from_millis(100), "stop confirmation timed out", |cx| {
+                this.update_in(cx, |this, _, cx| {
                     let s = &this.sessions[this.selected];
-                    if s.model.status.is_active() { return false; }
+                    if s.model.status.is_active() { return None; }
                     assert_eq!(s.model.status, expected);
                     assert_eq!(s.model.rejected, 0);
                     assert!(!this.scenario_picker.read(cx).disabled);
-                    true
-                }).unwrap();
-                if done { break; }
-                assert!(started.elapsed() < Duration::from_secs(5), "stop confirmation timed out");
-            }
+                    Some(())
+                }).unwrap()
+            }).await;
             this.update_in(cx, |this, window, cx| this.close_session(window, cx)).unwrap();
         }
 
@@ -158,27 +155,7 @@ async fn approval_checks(this: &WeakEntity<Workspace>, cx: &mut AsyncWindowConte
         })
         .unwrap();
     let command = request.command.clone().unwrap();
-    let inject = |request: ApprovalRequest, cx: &mut AsyncWindowContext| {
-        this.update_in(cx, |this, _, cx| {
-            let (reply, answer) = async_channel::bounded(1);
-            let session = &this.sessions[this.selected];
-            let id = session.model.id.clone();
-            let generation = session.stream_generation;
-            this.consume(
-                &id,
-                generation,
-                vec![UiDelivery::Subscription(SubscriptionDelivery::Approval {
-                    request: Box::new(request),
-                    reply,
-                })],
-                false,
-                cx,
-            );
-            answer
-        })
-        .unwrap()
-    };
-    let answer = inject(request.clone(), cx);
+    let answer = inject_approval(this, request.clone(), cx);
     for (scheme, width, height) in [
         (ColorScheme::Light, 1240., 840.),
         (ColorScheme::Dark, 820., 620.),
@@ -208,7 +185,7 @@ async fn approval_checks(this: &WeakEntity<Workspace>, cx: &mut AsyncWindowConte
         "allow once persisted a rule"
     );
 
-    let waiting = inject(request.clone(), cx);
+    let waiting = inject_approval(this, request.clone(), cx);
     store.add(RuleList::Blacklist, command.clone()).unwrap();
     this.update_in(cx, |this, _, cx| this.answer_approval(true, cx))
         .unwrap();
@@ -221,13 +198,13 @@ async fn approval_checks(this: &WeakEntity<Workspace>, cx: &mut AsyncWindowConte
     assert!(!waiting.try_recv().unwrap());
     store.remove(RuleList::Blacklist, &command).unwrap();
 
-    let answer = inject(request.clone(), cx);
+    let answer = inject_approval(this, request.clone(), cx);
     this.update_in(cx, |this, _, cx| {
         this.remember_approval(RuleList::Whitelist, cx)
     })
     .unwrap();
     assert!(answer.try_recv().expect("approval should be answered"));
-    let answer = inject(request.clone(), cx);
+    let answer = inject_approval(this, request.clone(), cx);
     assert!(
         answer.try_recv().expect("approval should be answered"),
         "whitelist did not auto-allow"
@@ -237,7 +214,7 @@ async fn approval_checks(this: &WeakEntity<Workspace>, cx: &mut AsyncWindowConte
     })
     .unwrap();
     store.add(RuleList::Blacklist, command.clone()).unwrap();
-    let answer = inject(request.clone(), cx);
+    let answer = inject_approval(this, request.clone(), cx);
     assert!(
         !answer.try_recv().expect("approval should be answered"),
         "blacklist did not override whitelist"
@@ -251,7 +228,7 @@ async fn approval_checks(this: &WeakEntity<Workspace>, cx: &mut AsyncWindowConte
         .command
         .push_str(" --extra");
     unlisted.display_command = Some(unlisted.command.as_ref().unwrap().command.clone());
-    let answer = inject(unlisted, cx);
+    let answer = inject_approval(this, unlisted, cx);
     this.update_in(cx, |this, _, cx| this.answer_approval(false, cx))
         .unwrap();
     assert!(!answer.try_recv().expect("approval should be answered"));
@@ -259,7 +236,7 @@ async fn approval_checks(this: &WeakEntity<Workspace>, cx: &mut AsyncWindowConte
     store.remove(RuleList::Blacklist, &command).unwrap();
     let mut no_allow_once = request.clone();
     no_allow_once.can_allow = false;
-    let answer = inject(no_allow_once, cx);
+    let answer = inject_approval(this, no_allow_once, cx);
     this.update_in(cx, |this, _, cx| this.answer_approval(true, cx))
         .unwrap();
     assert!(
@@ -272,7 +249,7 @@ async fn approval_checks(this: &WeakEntity<Workspace>, cx: &mut AsyncWindowConte
 
     let valid = std::fs::read(store.path()).unwrap();
     std::fs::write(store.path(), "{").unwrap();
-    let answer = inject(request.clone(), cx);
+    let answer = inject_approval(this, request.clone(), cx);
     this.update_in(cx, |this, _, cx| {
         this.remember_approval(RuleList::Whitelist, cx);
         assert!(
@@ -297,7 +274,7 @@ async fn approval_checks(this: &WeakEntity<Workspace>, cx: &mut AsyncWindowConte
     std::fs::write(store.path(), valid).unwrap();
 
     this.update_in(cx, |this, _, cx| {
-        command_rules::smoke(&this.rule_editor, cx)
+        command_rules_smoke::smoke(&this.rule_editor, cx)
     })
     .unwrap();
     this.update_in(cx, |this, window, cx| this.open_command_rules(window, cx))
@@ -313,7 +290,7 @@ async fn approval_checks(this: &WeakEntity<Workspace>, cx: &mut AsyncWindowConte
     })
     .unwrap();
     store.remove(RuleList::Whitelist, &command).unwrap();
-    let answer = inject(request, cx);
+    let answer = inject_approval(this, request, cx);
     this.update_in(cx, |this, window, cx| {
         this.close_session(window, cx);
         ds::set_theme(ColorScheme::Light, cx);
@@ -336,5 +313,49 @@ pub(super) async fn approval_preview_pause(cx: &mut AsyncWindowContext) {
         cx.background_executor()
             .timer(Duration::from_millis(ms.min(30_000)))
             .await;
+    }
+}
+
+/// 承認要求を selected session に注入し、応答受信用の channel を返す。
+pub(super) fn inject_approval(
+    this: &WeakEntity<Workspace>,
+    request: ApprovalRequest,
+    cx: &mut AsyncWindowContext,
+) -> async_channel::Receiver<bool> {
+    this.update_in(cx, |this, _, cx| {
+        let (reply, answer) = async_channel::bounded(1);
+        let session = &this.sessions[this.selected];
+        let id = session.model.id.clone();
+        let generation = session.stream_generation;
+        this.consume(
+            &id,
+            generation,
+            vec![UiDelivery::Subscription(SubscriptionDelivery::Approval {
+                request: Box::new(request),
+                reply,
+            })],
+            false,
+            cx,
+        );
+        answer
+    })
+    .unwrap()
+}
+
+/// `step` が `Some` を返すまで `interval` おきに再試行し、`timeout` を超えたら `what` で失敗する。
+pub(super) async fn until<R>(
+    cx: &mut AsyncWindowContext,
+    timeout: Duration,
+    interval: Duration,
+    what: &'static str,
+    mut step: impl FnMut(&mut AsyncWindowContext) -> Option<R>,
+) -> R {
+    let started = Instant::now();
+    loop {
+        cx.background_executor().timer(interval).await;
+        if let Some(done) = step(cx) {
+            return done;
+        }
+        assert!(started.elapsed() < timeout, "{what}");
     }
 }

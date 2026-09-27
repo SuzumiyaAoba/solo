@@ -1,6 +1,7 @@
 mod approval_modes_smoke;
 mod approvals;
 mod command_rules;
+mod command_rules_smoke;
 mod execution;
 mod overview;
 mod projects;

@@ -1,6 +1,6 @@
+use super::smoke::{approval_preview_pause, inject_approval, until};
 use super::*;
 use solo::auto_approval::{ReviewInput, Verdict};
-use solo::subscription_worker::Delivery as SubscriptionDelivery;
 use std::{
     sync::{
         Mutex,
@@ -59,71 +59,40 @@ fn config(mode: ApprovalMode, model: &str) -> ApprovalSettings {
         },
     }
 }
-fn inject(
-    this: &WeakEntity<Workspace>,
-    request: ApprovalRequest,
-    cx: &mut AsyncWindowContext,
-) -> async_channel::Receiver<bool> {
-    this.update_in(cx, |this, _, cx| {
-        let (reply, receiver) = async_channel::bounded(1);
-        let session = &this.sessions[this.selected];
-        let id = session.model.id.clone();
-        let generation = session.stream_generation;
-        this.consume(
-            &id,
-            generation,
-            vec![UiDelivery::Subscription(SubscriptionDelivery::Approval {
-                request: Box::new(request),
-                reply,
-            })],
-            false,
-            cx,
-        );
-        receiver
-    })
-    .unwrap()
-}
 async fn wait_answer(answer: &async_channel::Receiver<bool>, cx: &mut AsyncWindowContext) -> bool {
-    let start = Instant::now();
-    loop {
-        match answer.try_recv() {
-            Ok(answer) => return answer,
+    until(
+        cx,
+        Duration::from_secs(5),
+        Duration::from_millis(20),
+        "approval did not complete",
+        |_| match answer.try_recv() {
+            Ok(answer) => Some(answer),
             Err(async_channel::TryRecvError::Closed) => {
                 panic!("approval reply closed unexpectedly")
             }
-            Err(_) => {}
-        }
-        assert!(
-            start.elapsed() < Duration::from_secs(5),
-            "approval did not complete"
-        );
-        cx.background_executor()
-            .timer(Duration::from_millis(20))
-            .await;
-    }
+            Err(_) => None,
+        },
+    )
+    .await
 }
 async fn wait_manual(this: &WeakEntity<Workspace>, cx: &mut AsyncWindowContext) {
-    let start = Instant::now();
-    loop {
-        if this
-            .update_in(cx, |this, _, _| {
+    until(
+        cx,
+        Duration::from_secs(5),
+        Duration::from_millis(20),
+        "manual fallback did not appear",
+        |cx| {
+            this.update_in(cx, |this, _, _| {
                 this.sessions[this.selected]
                     .approval
                     .as_ref()
                     .is_some_and(|request| !request.is_reviewing())
             })
             .unwrap()
-        {
-            return;
-        }
-        assert!(
-            start.elapsed() < Duration::from_secs(5),
-            "manual fallback did not appear"
-        );
-        cx.background_executor()
-            .timer(Duration::from_millis(20))
-            .await;
-    }
+            .then_some(())
+        },
+    )
+    .await;
 }
 
 pub(super) async fn check(this: &WeakEntity<Workspace>, cx: &mut AsyncWindowContext) {
@@ -150,14 +119,14 @@ pub(super) async fn check(this: &WeakEntity<Workspace>, cx: &mut AsyncWindowCont
     let command = request.command.clone().unwrap();
     store.add(RuleList::Blacklist, command.clone()).unwrap();
     cfg.set_approval(config(ApprovalMode::Bypass, "")).unwrap();
-    assert!(wait_answer(&inject(this, request.clone(), cx), cx).await);
+    assert!(wait_answer(&inject_approval(this, request.clone(), cx), cx).await);
     assert!(
         fake.models.lock().unwrap().is_empty(),
         "bypass called the model"
     );
     cfg.set_approval(config(ApprovalMode::Auto, "allow-model"))
         .unwrap();
-    assert!(!wait_answer(&inject(this, request.clone(), cx), cx).await);
+    assert!(!wait_answer(&inject_approval(this, request.clone(), cx), cx).await);
     assert!(
         fake.models.lock().unwrap().is_empty(),
         "blacklist called the model"
@@ -166,14 +135,14 @@ pub(super) async fn check(this: &WeakEntity<Workspace>, cx: &mut AsyncWindowCont
     for (name, accepted) in [("allow-model", true), ("deny-model", false)] {
         cfg.set_approval(config(ApprovalMode::Auto, name)).unwrap();
         assert_eq!(
-            wait_answer(&inject(this, request.clone(), cx), cx).await,
+            wait_answer(&inject_approval(this, request.clone(), cx), cx).await,
             accepted
         );
         assert_eq!(fake.models.lock().unwrap().last().unwrap(), name);
     }
     for name in ["ask-model", "error-model"] {
         cfg.set_approval(config(ApprovalMode::Auto, name)).unwrap();
-        let answer = inject(this, request.clone(), cx);
+        let answer = inject_approval(this, request.clone(), cx);
         wait_manual(this, cx).await;
         assert!(matches!(
             answer.try_recv(),
@@ -197,7 +166,7 @@ pub(super) async fn check(this: &WeakEntity<Workspace>, cx: &mut AsyncWindowCont
     // Changing settings while a slow review is in progress cancels it and invalidates its result.
     cfg.set_approval(config(ApprovalMode::Auto, "slow-model"))
         .unwrap();
-    let answer = inject(this, request.clone(), cx);
+    let answer = inject_approval(this, request.clone(), cx);
     cx.background_executor()
         .timer(Duration::from_millis(80))
         .await;
@@ -222,7 +191,7 @@ pub(super) async fn check(this: &WeakEntity<Workspace>, cx: &mut AsyncWindowCont
     fake.release.store(false, Ordering::Release);
     cfg.set_approval(config(ApprovalMode::Auto, "slow-model"))
         .unwrap();
-    let answer = inject(this, request.clone(), cx);
+    let answer = inject_approval(this, request.clone(), cx);
     cx.background_executor()
         .timer(Duration::from_millis(80))
         .await;
@@ -233,7 +202,7 @@ pub(super) async fn check(this: &WeakEntity<Workspace>, cx: &mut AsyncWindowCont
 
     // Closing the session cancels review and closes the backend approval channel.
     fake.release.store(false, Ordering::Release);
-    let answer = inject(this, request, cx);
+    let answer = inject_approval(this, request, cx);
     cx.background_executor()
         .timer(Duration::from_millis(80))
         .await;
@@ -245,7 +214,7 @@ pub(super) async fn check(this: &WeakEntity<Workspace>, cx: &mut AsyncWindowCont
     ));
     fake.release.store(true, Ordering::Release);
     this.update_in(cx, |this, _, cx| {
-        command_rules::settings_smoke(&this.rule_editor, cx)
+        command_rules_smoke::settings_smoke(&this.rule_editor, cx)
     })
     .unwrap();
     cfg.set_approval(config(ApprovalMode::Auto, "allow-model"))
@@ -262,7 +231,7 @@ pub(super) async fn check(this: &WeakEntity<Workspace>, cx: &mut AsyncWindowCont
         .timer(Duration::from_millis(200))
         .await;
     println!("Approval modes UI ready: selected model settings");
-    super::smoke::approval_preview_pause(cx).await;
+    approval_preview_pause(cx).await;
     this.update_in(cx, |this, window, cx| {
         use gpui_kit::component::WindowExt;
         window.close_sheet(cx);

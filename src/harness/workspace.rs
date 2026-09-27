@@ -10,6 +10,10 @@ use std::{
     path::{Path, PathBuf},
     time::Duration,
 };
+/// 副作用のない組込み tool。承認 policy は read/search を確認なしで許可してよい。
+pub fn is_read_only_tool(name: &str) -> bool {
+    matches!(name, "read" | "search")
+}
 
 pub struct WorkspaceTools {
     root: PathBuf,

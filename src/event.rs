@@ -37,6 +37,56 @@ impl Envelope {
         Decoded::from_payload(self.schema_version, self.payload.clone())
     }
 }
+/// producer 側の sequence / turn_id 採番。時刻ではなく sequence で順序を確定する。
+/// `next` は送信前に採番し、`peek` + `advance` は送信成功時だけ採番を確定する。
+pub struct Sequencer {
+    session_id: String,
+    sequence: u64,
+    turn_id: String,
+}
+
+impl Sequencer {
+    /// `turn_id` は SessionCreated など turn 開始前のイベントに付く先行値。
+    pub fn new(session_id: impl Into<String>, start_sequence: u64, turn_id: String) -> Self {
+        Self {
+            session_id: session_id.into(),
+            sequence: start_sequence,
+            turn_id,
+        }
+    }
+
+    /// 現在の sequence（最後に確定したイベント番号。開始前は start_sequence）。
+    pub fn sequence(&self) -> u64 {
+        self.sequence
+    }
+
+    /// 次のイベントから使う turn_id。TurnStarted の emit 前に呼ぶ。
+    pub fn begin_turn(&mut self, turn_id: String) {
+        self.turn_id = turn_id;
+    }
+
+    /// 採番せずに次の envelope だけ作る。送信に成功したら `advance` で確定する。
+    pub fn peek(&self, event: Event) -> Envelope {
+        Envelope::new(
+            &self.session_id,
+            self.sequence + 1,
+            self.turn_id.clone(),
+            event,
+        )
+    }
+
+    /// 採番して envelope を返す。チャネル送信をそのまま続ける producer 向け。
+    pub fn next(&mut self, event: Event) -> Envelope {
+        let envelope = self.peek(event);
+        self.advance();
+        envelope
+    }
+
+    /// `peek` で作った envelope の送信が成功したときに採番を確定する。
+    pub fn advance(&mut self) {
+        self.sequence += 1;
+    }
+}
 
 #[derive(Debug)]
 pub enum Decoded {

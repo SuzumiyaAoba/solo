@@ -6,7 +6,7 @@ mod writer;
 use crate::{
     acp::{self, AgentProfile, Client},
     approval::{ApprovalRequest, wait_for_reply},
-    event::{Envelope, Event, Usage, preview},
+    event::{Envelope, Event, Sequencer, Usage, preview},
     harness::Cancellation,
 };
 use async_channel::{Receiver, Sender};
@@ -112,7 +112,7 @@ fn run(
         emitter.emit(Event::ModelRequestStarted {
             provider: format!("ACP / {}", config.profile.name),
             model: "agent の設定".into(),
-            request_id: format!("acp-{}", emitter.sequence),
+            request_id: format!("acp-{}", emitter.sequence()),
         });
         let mut bridge = Bridge::default();
         let result = client.prompt_with_start(
@@ -195,30 +195,30 @@ fn run(
 }
 
 struct Emitter {
-    session_id: String,
-    sequence: u64,
-    turn_id: String,
+    sequencer: Sequencer,
     sender: Sender<Delivery>,
 }
 impl Emitter {
     fn new(session_id: String, sequence: u64, sender: Sender<Delivery>) -> Self {
         Self {
-            session_id,
-            sequence,
-            turn_id: String::new(),
+            sequencer: Sequencer::new(session_id, sequence, String::new()),
             sender,
         }
     }
+    fn sequence(&self) -> u64 {
+        self.sequencer.sequence()
+    }
     fn begin_turn(&mut self, prompt: &str) {
-        self.turn_id = format!("acp-turn-{}", self.sequence + 1);
+        self.sequencer
+            .begin_turn(format!("acp-turn-{}", self.sequencer.sequence() + 1));
         self.emit(Event::TurnStarted {
             prompt: prompt.into(),
         });
     }
     fn emit(&mut self, event: Event) {
-        self.sequence += 1;
-        let envelope = Envelope::new(&self.session_id, self.sequence, self.turn_id.clone(), event);
-        let _ = self.sender.send_blocking(Delivery::Event(envelope));
+        let _ = self
+            .sender
+            .send_blocking(Delivery::Event(self.sequencer.next(event)));
     }
 }
 

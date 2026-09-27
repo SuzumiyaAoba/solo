@@ -1,5 +1,7 @@
+mod common;
+
 use solo::{
-    event::{Envelope, Event, SCHEMA_VERSION, Usage},
+    event::{Event, Usage},
     projection::{
         ActivityKind, ActivityState, Apply, MAX_EXECUTION_THREADS, MAX_THREAD_ACTIVITIES, Session,
         Status,
@@ -8,15 +10,7 @@ use solo::{
 
 fn apply(session: &mut Session, turn: &str, event: Event) -> Apply {
     let sequence = session.last_sequence + 1;
-    session.apply(Envelope {
-        schema_version: SCHEMA_VERSION,
-        event_id: format!("event-{sequence}"),
-        session_id: session.id.clone(),
-        sequence,
-        timestamp_ms: 0,
-        turn_id: Some(turn.into()),
-        payload: serde_json::to_value(event).unwrap(),
-    })
+    session.apply(common::envelope(&session.id, turn, sequence, event))
 }
 fn start(session: &mut Session, turn: &str) {
     assert_eq!(

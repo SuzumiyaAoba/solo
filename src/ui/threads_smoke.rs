@@ -1,4 +1,5 @@
 //! 実モデルを呼ばず、実画面で依頼・チャンネル・スレッドの対応を確認する。
+use super::smoke::until;
 use super::*;
 use gpui_kit::component::WindowExt;
 use std::time::Duration;
@@ -126,28 +127,23 @@ pub(super) async fn run(this: &WeakEntity<Workspace>, cx: &mut AsyncWindowContex
 }
 
 async fn wait_for_turn(this: &WeakEntity<Workspace>, cx: &mut AsyncWindowContext) {
-    let started = Instant::now();
-    loop {
-        cx.background_executor()
-            .timer(Duration::from_millis(60))
-            .await;
-        let done = this
-            .update_in(cx, |this, _, _| {
+    until(
+        cx,
+        Duration::from_secs(10),
+        Duration::from_millis(60),
+        "thread demo timed out",
+        |cx| {
+            this.update_in(cx, |this, _, _| {
                 let s = &this.sessions[this.selected];
                 if s.model.status.is_active() {
-                    return false;
+                    return None;
                 }
                 assert_eq!(s.model.status, Status::Completed);
                 assert_eq!(s.model.rejected, 0);
-                true
+                Some(())
             })
-            .unwrap();
-        if done {
-            break;
-        }
-        assert!(
-            started.elapsed() < Duration::from_secs(10),
-            "thread demo timed out"
-        );
-    }
+            .unwrap()
+        },
+    )
+    .await;
 }
