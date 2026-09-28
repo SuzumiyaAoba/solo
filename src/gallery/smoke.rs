@@ -121,8 +121,6 @@ pub(super) fn start(window: &Window, cx: &mut Context<Gallery>) {
 }
 
 fn key_down(cx: &mut AsyncWindowContext, key: &str) {
-    cx.update(|window, cx| {
-        window.dispatch_keystroke(Keystroke::parse(key).unwrap(), cx);
-    })
-    .unwrap();
+    cx.update(|window, cx| window.dispatch_keystroke(Keystroke::parse(key).unwrap(), cx))
+        .unwrap();
 }

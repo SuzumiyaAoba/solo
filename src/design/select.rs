@@ -96,17 +96,39 @@ impl Select {
         self
     }
     /// 新しいセッションでは検索語と開いたメニューを持ち越さない。
+    ///
+    /// 再構築を描画まで遅らせると、描画が走るまでの間に差し替えられる側の
+    /// フォーカスハンドルが窓に残り、先にフォーカスやキー入力が差し込まれた
+    /// 場合にディスパッチ中の描画でハンドルが死んでキーが届かなくなる。
+    /// エフェクトの区切りでウィンドウが取れる限り、ここで先に再構築する。
     pub fn close(&mut self, cx: &mut Context<Self>) {
+        if self.reset {
+            cx.notify();
+            return;
+        }
         self.reset = true;
         cx.notify();
+        cx.spawn(async move |this, cx| {
+            cx.update(|app| {
+                app.with_window(this.entity_id(), |window, app| {
+                    let _ = this.update(app, |this, cx| this.rebuild_if_reset(window, cx));
+                });
+            });
+        })
+        .detach();
+    }
+    fn rebuild_if_reset(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        if !self.reset {
+            return false;
+        }
+        (self.state, self.subscription) = Self::build(&self.options, self.selected, window, cx);
+        self.reset = false;
+        true
     }
 }
 impl Render for Select {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        if self.reset {
-            (self.state, self.subscription) = Self::build(&self.options, self.selected, window, cx);
-            self.reset = false;
-        }
+        self.rebuild_if_reset(window, cx);
         if self.state.read(cx).selected_value().copied()
             != self.options.get(self.selected).map(|_| self.selected)
         {
