@@ -43,6 +43,11 @@ pub(crate) fn read_text(path: &Path, max_bytes: u64, too_large: &str) -> io::Res
     String::from_utf8(bytes).map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
 }
 
+/// バイナリのまま上限付きで読む。UTF-8 判定は呼出し側に任せる。
+pub(crate) fn read_bytes(path: &Path, max_bytes: u64, too_large: &str) -> io::Result<Vec<u8>> {
+    read_bounded(File::open(path)?, max_bytes, too_large)
+}
+
 fn read_bounded(reader: impl Read, max_bytes: u64, too_large: &str) -> io::Result<Vec<u8>> {
     let mut bytes = Vec::new();
     reader

@@ -1,6 +1,6 @@
 //! Solo の agent loop から ChatGPT Codex モデルを呼ぶアダプター。
 //! OAuth と Responses 通信には公開ライブラリ genai-agentprism を使う。
-use crate::harness::{Message, Model, ModelOutput, ToolCall, ToolSpec};
+use crate::harness::{Message, Model, ModelOutput, TokenUsage, ToolCall, ToolSpec};
 use futures::StreamExt;
 use genai::{
     AssistantMessageEvent, StopReason as ProviderStopReason, StreamFn, StreamRequest,
@@ -122,6 +122,12 @@ pub struct CodexModel {
 }
 
 impl CodexModel {
+    /// 既定の短いプロンプトを、workspace 用のシステムプロンプトで置き換える。
+    pub fn with_system_prompt(mut self, prompt: String) -> Self {
+        self.system_prompt = prompt;
+        self
+    }
+
     pub fn with_review_settings(mut self, system_prompt: &str, timeout: Duration) -> Self {
         self.system_prompt = system_prompt.into();
         self.review_timeout = Some(timeout);
@@ -162,6 +168,14 @@ impl CodexModel {
                         if message.stop_reason == ProviderStopReason::Length {
                             return Err("モデルの出力上限に達しました".into());
                         }
+                        let usage = message.usage;
+                        let usage = (usage.input_tokens > 0
+                            || usage.output_tokens > 0
+                            || usage.total_tokens > 0)
+                            .then_some(TokenUsage {
+                                input_tokens: usage.input_tokens,
+                                output_tokens: usage.output_tokens,
+                            });
                         return Ok(ModelOutput {
                             text: message.text(),
                             tool_calls: message
@@ -172,6 +186,7 @@ impl CodexModel {
                                     arguments: call.arguments.clone(),
                                 })
                                 .collect(),
+                            usage,
                         });
                     }
                     AssistantMessageEvent::Error { error, .. } => {

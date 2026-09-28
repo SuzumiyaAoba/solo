@@ -7,7 +7,9 @@ use crate::{
     config::{ApprovalMode, AutoSettings},
     harness::{
         ToolCall,
-        workspace::{TOOL_EDIT, TOOL_EXEC, is_read_only_tool},
+        workspace::{
+            TOOL_EDIT, TOOL_EXEC, TOOL_LIST, TOOL_READ, TOOL_SEARCH, TOOL_WRITE, is_read_only_tool,
+        },
     },
 };
 use serde_json::{Value, json};
@@ -179,8 +181,12 @@ impl ApprovalRequest {
             .and_then(|command| CommandInvocation::shell(command.clone(), workspace).ok());
         Self {
             title: match call.name.as_str() {
-                TOOL_EXEC => "コマンド実行の確認".into(),
+                TOOL_READ => "ファイル読み取りの確認".into(),
+                TOOL_LIST => "ディレクトリ一覧の確認".into(),
+                TOOL_SEARCH => "検索の確認".into(),
                 TOOL_EDIT => "ファイル編集の確認".into(),
+                TOOL_WRITE => "ファイル書き込みの確認".into(),
+                TOOL_EXEC => "コマンド実行の確認".into(),
                 _ => format!("{} の実行確認", call.name),
             },
             details: json!({"tool":call.name,"arguments":call.arguments,"cwd":workspace}),

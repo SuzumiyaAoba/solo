@@ -222,6 +222,7 @@ impl Model for FakeModel {
 fn fake(text: &str) -> FakeModel {
     FakeModel {
         output: Some(ModelOutput {
+            usage: None,
             text: text.into(),
             tool_calls: vec![],
         }),
@@ -465,4 +466,24 @@ fn plan_replies_report_rule_or_bypass_sources() {
     assert_eq!(ApprovalSource::Auto.label(), "auto");
     assert_eq!(ApprovalSource::Rule.label(), "rule");
     assert_eq!(ApprovalSource::Bypass.label(), "bypass");
+}
+
+#[test]
+fn list_defaults_to_allowed_and_write_goes_to_approval() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = RuleStore::at_path(dir.path().join("config.yml"), dir.path()).unwrap();
+    let call = |name: &str| ToolCall {
+        id: "call".into(),
+        name: name.into(),
+        arguments: json!({"path":"src","query":"q","content":"c"}),
+    };
+    let rules = store.load().unwrap();
+    assert_eq!(
+        precheck_with(&call("list"), dir.path(), Some(&rules)),
+        Some((true, "read-only"))
+    );
+    assert_eq!(
+        precheck_with(&call("write"), dir.path(), Some(&rules)),
+        None
+    );
 }

@@ -5,7 +5,7 @@ use solo::{
     command_rules::{RuleList, RuleStore},
     harness::{
         self, Cancellation, Limits, Message, StopReason, ToolCall, Update,
-        workspace::WorkspaceTools,
+        workspace::{WorkspaceTools, system_prompt},
     },
 };
 use std::{
@@ -69,7 +69,9 @@ fn run() -> io::Result<()> {
     if prompt.is_empty() {
         return Ok(());
     }
-    let mut model = auth.model(model_name.clone(), cancel.clone())?;
+    let mut model = auth
+        .model(model_name.clone(), cancel.clone())?
+        .with_system_prompt(system_prompt(&cwd));
     let mut tools = WorkspaceTools::new(&cwd)?.with_cancellation(cancellation.clone());
     let user_prompt = prompt.join(" ");
     let review_prompt = user_prompt.clone();
@@ -172,12 +174,13 @@ fn run() -> io::Result<()> {
             _ => false,
         }
     };
+    let limits = Limits::default();
     let run = harness::run(
         &mut model,
         &mut tools,
         &mut policy,
         vec![Message::User { text: user_prompt }],
-        &Limits::default(),
+        &limits,
         &cancellation,
         |update| match update {
             Update::Assistant(text) | Update::AssistantDelta(text) => {
@@ -194,7 +197,7 @@ fn run() -> io::Result<()> {
     println!();
     match run.stop {
         StopReason::Completed => Ok(()),
-        other => Err(usage(format!("実行終了: {other:?}"))),
+        other => Err(usage(format!("実行終了: {}", other.message(&limits)))),
     }
 }
 

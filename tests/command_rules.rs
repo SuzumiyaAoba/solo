@@ -245,6 +245,7 @@ fn denied_commands_never_reach_the_shell() {
     store.add(RuleList::Deny, denied).unwrap();
     let mut model = Script(VecDeque::from([
         ModelOutput {
+            usage: None,
             text: "".into(),
             tool_calls: ["touch allowed", "touch denied", "touch unknown"]
                 .into_iter()
@@ -257,6 +258,7 @@ fn denied_commands_never_reach_the_shell() {
                 .collect(),
         },
         ModelOutput {
+            usage: None,
             text: "done".into(),
             tool_calls: vec![],
         },

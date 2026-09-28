@@ -20,6 +20,7 @@ fn cancellation_from_the_request_observer_prevents_the_model_call() {
         fn complete(&mut self, _: &[Message], _: &[ToolSpec]) -> Result<ModelOutput, String> {
             self.0 += 1;
             Ok(ModelOutput {
+                usage: None,
                 text: "unexpected".into(),
                 tool_calls: vec![],
             })
@@ -120,6 +121,7 @@ fn streamed_text_is_emitted_once_and_kept_in_history() {
             on_delta("こん");
             on_delta("にちは");
             Ok(ModelOutput {
+                usage: None,
                 text: "こんにちは".into(),
                 tool_calls: vec![],
             })
@@ -165,10 +167,12 @@ fn tool_result_reaches_next_model_request() {
     let mut tools = WorkspaceTools::new(dir.path()).unwrap();
     let mut model = ScriptedModel(VecDeque::from([
         ModelOutput {
+            usage: None,
             text: String::new(),
             tool_calls: vec![call("1", "read", json!({"path":"note.txt"}))],
         },
         ModelOutput {
+            usage: None,
             text: "done".into(),
             tool_calls: vec![],
         },
@@ -204,6 +208,7 @@ fn denied_and_unknown_tools_are_not_executed() {
     let mut tools = WorkspaceTools::new(dir.path()).unwrap();
     let mut model = ScriptedModel(VecDeque::from([
         ModelOutput {
+            usage: None,
             text: String::new(),
             tool_calls: vec![
                 call(
@@ -215,6 +220,7 @@ fn denied_and_unknown_tools_are_not_executed() {
             ],
         },
         ModelOutput {
+            usage: None,
             text: "done".into(),
             tool_calls: vec![],
         },
@@ -287,6 +293,7 @@ fn limits_and_cancellation_stop_before_side_effects() {
     let dir = tempfile::tempdir().unwrap();
     let mut tools = WorkspaceTools::new(dir.path()).unwrap();
     let mut model = ScriptedModel(VecDeque::from([ModelOutput {
+        usage: None,
         text: String::new(),
         tool_calls: vec![call("1", "exec", json!({"command":"touch marker"}))],
     }]));
@@ -325,6 +332,7 @@ fn cancellation_during_tool_batch_skips_remaining_commands() {
     let dir = tempfile::tempdir().unwrap();
     let mut tools = WorkspaceTools::new(dir.path()).unwrap();
     let mut model = ScriptedModel(VecDeque::from([ModelOutput {
+        usage: None,
         text: String::new(),
         tool_calls: vec![
             call("1", "exec", json!({"command":"touch first"})),
@@ -364,6 +372,7 @@ fn duplicate_call_ids_are_rejected_before_execution() {
     let dir = tempfile::tempdir().unwrap();
     let mut tools = WorkspaceTools::new(dir.path()).unwrap();
     let mut model = ScriptedModel(VecDeque::from([ModelOutput {
+        usage: None,
         text: String::new(),
         tool_calls: vec![
             call("same", "exec", json!({"command":"touch first"})),
@@ -389,6 +398,7 @@ fn cancellation_while_waiting_for_approval_prevents_execution() {
     let dir = tempfile::tempdir().unwrap();
     let mut tools = WorkspaceTools::new(dir.path()).unwrap();
     let mut model = ScriptedModel(VecDeque::from([ModelOutput {
+        usage: None,
         text: String::new(),
         tool_calls: vec![call(
             "cancelled",
@@ -412,4 +422,85 @@ fn cancellation_while_waiting_for_approval_prevents_execution() {
     );
     assert_eq!(result.stop, StopReason::Cancelled);
     assert!(!dir.path().join("should-not-run").exists());
+}
+
+#[test]
+fn run_totals_usage_only_from_reporting_responses() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut tools = WorkspaceTools::new(dir.path()).unwrap();
+    let usage = |input: u64, output: u64| solo::harness::TokenUsage {
+        input_tokens: input,
+        output_tokens: output,
+    };
+    // usage あり・なし・ありを混ぜ、Some を返した応答だけが合計される。
+    let mut model = ScriptedModel(VecDeque::from([
+        ModelOutput {
+            usage: Some(usage(10, 5)),
+            text: String::new(),
+            tool_calls: vec![call("1", "list", json!({}))],
+        },
+        ModelOutput {
+            usage: None,
+            text: String::new(),
+            tool_calls: vec![call("2", "list", json!({}))],
+        },
+        ModelOutput {
+            usage: Some(usage(3, 7)),
+            text: "done".into(),
+            tool_calls: vec![],
+        },
+    ]));
+    let result = run(
+        &mut model,
+        &mut tools,
+        &mut |_: &ToolCall| true,
+        vec![Message::User { text: "run".into() }],
+        &Limits::default(),
+        &Cancellation::default(),
+        |_| {},
+    );
+    assert_eq!(
+        result.usage,
+        Some(usage(13, 12)),
+        "usage を返した応答だけを合計する"
+    );
+}
+
+#[test]
+fn run_usage_is_none_when_no_response_reports_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut tools = WorkspaceTools::new(dir.path()).unwrap();
+    let mut model = ScriptedModel(VecDeque::from([ModelOutput {
+        usage: None,
+        text: "done".into(),
+        tool_calls: vec![],
+    }]));
+    let result = run(
+        &mut model,
+        &mut tools,
+        &mut |_: &ToolCall| true,
+        vec![Message::User { text: "run".into() }],
+        &Limits::default(),
+        &Cancellation::default(),
+        |_| {},
+    );
+    assert_eq!(result.usage, None);
+}
+
+#[test]
+fn stop_reason_messages_include_the_configured_limits() {
+    let limits = Limits {
+        max_model_requests: 64,
+        max_tool_calls: 256,
+        ..Limits::default()
+    };
+    assert_eq!(StopReason::Completed.message(&limits), "実行完了");
+    assert_eq!(StopReason::Cancelled.message(&limits), "実行を中止しました");
+    assert!(StopReason::ModelLimit.message(&limits).contains("64"));
+    assert!(StopReason::ToolLimit.message(&limits).contains("256"));
+    assert!(
+        StopReason::ModelError("down".into())
+            .message(&limits)
+            .contains("down")
+    );
 }

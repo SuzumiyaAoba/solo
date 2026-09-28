@@ -6,7 +6,7 @@ use crate::{
     event::{Emitter, Envelope, Event, Sequencer, SessionId, Usage},
     harness::{
         self, Cancellation, Limits, Message, StopReason, ToolCall, Update,
-        workspace::{WorkspaceTools, canonical_workspace},
+        workspace::{WorkspaceTools, canonical_workspace, system_prompt},
     },
     text::preview,
 };
@@ -187,7 +187,9 @@ fn run(
     } else {
         config.model
     };
-    let mut model = auth.model(model_name.clone(), network_cancel)?;
+    let mut model = auth
+        .model(model_name.clone(), network_cancel)?
+        .with_system_prompt(system_prompt(&workspace));
     // DiffTracking が実行直前にベースラインを取り、完了後に pending へ差分を載せる。
     let mut tools = DiffTracking::new(
         WorkspaceTools::new(&workspace)?.with_cancellation(cancellation.clone()),
@@ -242,12 +244,13 @@ fn run(
     };
     let mut model_requests = 0;
     let mut log_offset = 0;
+    let limits = Limits::default();
     let run = harness::run(
         &mut model,
         &mut tools,
         &mut policy,
         messages,
-        &Limits::default(),
+        &limits,
         cancellation,
         |update| match update {
             Update::ModelRequested => {
@@ -297,22 +300,38 @@ fn run(
             Update::Stopped(_) => {}
         },
     );
+    finish_turn(run, &limits, sender, emitter.into_inner());
+    Ok(())
+}
+
+/// すべての停止理由で会話履歴を先に返し、停止理由に応じた終了イベントを送る。
+/// 失敗・上限・中止の turn も履歴に残し、「続けて」の再開に使えるようにする。
+fn finish_turn(
+    run: harness::Run,
+    limits: &Limits,
+    sender: &Sender<Delivery>,
+    emitter: &mut Emitter<Delivery>,
+) {
+    let _ = sender.send_blocking(Delivery::History(run.messages));
     match run.stop {
-        StopReason::Completed => {
-            let _ = sender.send_blocking(Delivery::History(run.messages));
-            emitter.borrow_mut().emit(Event::TurnCompleted {
-                reason: "実行完了".into(),
-                usage: Usage::default(),
-            });
-        }
-        StopReason::Cancelled => emitter.borrow_mut().emit(Event::TurnCancelled {
+        StopReason::Completed => emitter.emit(Event::TurnCompleted {
+            reason: "実行完了".into(),
+            usage: run
+                .usage
+                .map(|usage| Usage {
+                    input_tokens: Some(usage.input_tokens),
+                    output_tokens: Some(usage.output_tokens),
+                    cost_usd: None,
+                })
+                .unwrap_or_default(),
+        }),
+        StopReason::Cancelled => emitter.emit(Event::TurnCancelled {
             reason: "実行を中止しました".into(),
         }),
-        other => emitter.borrow_mut().emit(Event::TurnFailed {
-            reason: format!("{other:?}"),
+        other => emitter.emit(Event::TurnFailed {
+            reason: other.message(limits),
         }),
     }
-    Ok(())
 }
 
 #[cfg(test)]
@@ -339,6 +358,57 @@ mod tests {
         let (reply, answer) = async_channel::bounded(1);
         reply.send_blocking(ApprovalReply::user(true)).unwrap();
         assert_eq!(wait_for_reply(answer, &cancelled), None);
+    }
+
+    #[test]
+    fn finish_turn_sends_history_before_the_terminal_event() {
+        let (sender, receiver) = async_channel::unbounded();
+        let mut emitter = Emitter::new(
+            Sequencer::new(SessionId::parse("s1").unwrap(), 0, "turn-1".to_owned()),
+            sender.clone(),
+        );
+        let limits = Limits::default();
+        let run = harness::Run {
+            messages: vec![Message::User { text: "u".into() }],
+            model_requests: limits.max_model_requests,
+            tool_calls: 0,
+            stop: StopReason::ModelLimit,
+            usage: None,
+        };
+        finish_turn(run, &limits, &sender, &mut emitter);
+        assert!(matches!(receiver.try_recv().unwrap(), Delivery::History(_)));
+        let Delivery::Event(envelope) = receiver.try_recv().unwrap() else {
+            panic!("the terminal delivery must be an event")
+        };
+        assert_eq!(envelope.payload["type"], "turn_failed");
+        assert!(envelope.payload["reason"].as_str().unwrap().contains("64"));
+    }
+
+    #[test]
+    fn finish_turn_reports_usage_on_completion() {
+        let (sender, receiver) = async_channel::unbounded();
+        let mut emitter = Emitter::new(
+            Sequencer::new(SessionId::parse("s1").unwrap(), 0, "turn-1".to_owned()),
+            sender.clone(),
+        );
+        let run = harness::Run {
+            messages: vec![],
+            model_requests: 1,
+            tool_calls: 0,
+            stop: StopReason::Completed,
+            usage: Some(harness::TokenUsage {
+                input_tokens: 12,
+                output_tokens: 34,
+            }),
+        };
+        finish_turn(run, &Limits::default(), &sender, &mut emitter);
+        assert!(matches!(receiver.try_recv().unwrap(), Delivery::History(_)));
+        let Delivery::Event(envelope) = receiver.try_recv().unwrap() else {
+            panic!("the terminal delivery must be an event")
+        };
+        assert_eq!(envelope.payload["type"], "turn_completed");
+        assert_eq!(envelope.payload["usage"]["input_tokens"], 12);
+        assert_eq!(envelope.payload["usage"]["output_tokens"], 34);
     }
 
     #[test]

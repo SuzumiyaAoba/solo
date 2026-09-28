@@ -72,8 +72,8 @@ cargo run --locked --no-default-features --bin solo-subscription -- --cwd . "こ
 cargo run --locked --no-default-features --bin solo-subscription -- --model gpt-5.6-sol "このリポジトリを要約して"
 ```
 
-`read` と `search` は自動実行します。`edit` と `exec` は承認モードに従います。
-既定の Manual では `edit` は都度確認し、`exec` は allow / deny で決まらない場合に確認します。
+`read`・`list`・`search` は自動実行します。`edit`・`write`・`exec` は承認モードに従います。
+既定の Manual では `edit`・`write` は都度確認し、`exec` は allow / deny で決まらない場合に確認します。
 CLI では `y` で今回だけ許可、`a` で Allow に登録して実行、`b` で Deny に登録して拒否できます。
 `exec` は workspace で起動しますが、OS の sandbox は適用しません。
 既定モデルは `gpt-5.6-sol` で、`--model` または `SOLO_MODEL` で変更できます。
@@ -184,10 +184,11 @@ ACP では agent が `allow_once` を提示する要求だけを許可でき、�
 
 ### 基本ツール
 
-同じ Sheet の **ツール** タブで、組込みの `read` / `search` / `edit` / `exec` それぞれに
-既定 / Allow / Deny / Ask を設定できます。既定は read・search が許可、edit・exec が確認です。
+同じ Sheet の **ツール** タブで、組込みの `read` / `list` / `search` / `edit` / `write` / `exec`
+それぞれに既定 / Allow / Deny / Ask を設定できます。既定は read・list・search が許可、
+edit・write・exec が確認です。
 Allow は確認を省略します（コマンドの Deny ルールに一致する exec は Deny を優先します）。
-Deny は常に拒否、Ask は read・search も含めて承認確認に回します。
+Deny は常に拒否、Ask は read・list・search も含めて承認確認に回します。
 保存先はコマンドルールと同じ `workspaces` エントリの `tool_decisions` です。
   管理画面でエラーを確認し、設定を修正して再読み込みできます。
 
@@ -211,13 +212,20 @@ YAML の設定形式は `version: 1` です。YAML がまだ存在しない場�
 モデルエラー・呼出し上限を明示して終了します。`Model`、`ToolExecutor`、`Policy`、
 `Update` が接続点です。実行権限は呼出し側の `Policy` が毎回判定します。
 組み込みエージェントは `Cancellation` の中止要求を通信と承認待ちに伝えます。
-`WorkspaceTools` は `read`、`search`、`edit`、`exec` を提供します。
-`edit` は既存ファイルの一意な文字列だけを置換し、読み取り後の変更を検出します。
+`WorkspaceTools` は `read`、`list`、`search`、`edit`、`write`、`exec` を提供します。
+`read` は offset/limit で行範囲を読み、`list` は直下の一覧または glob での再帰検索を返します。
+`search` は path・glob・regex で対象を絞り込めます。
+`edit` は既存ファイルの一意な文字列を置換し（replace_all で全箇所も可）、読み取り後の変更を検出します。
+`write` は新規作成と全体の上書きを行い、既存ファイルの上書きには先に read した内容が必要です。
 `exec` は終了コードが非ゼロなら tool エラーを返し、標準出力と標準エラーの本文を
-合わせて出力上限内に収めます。中止・timeout・I/O エラーでも起動した shell を回収します。
-`read` と `edit` は workspace 外のパスを拒否します。`exec` は shell を起動するため、
-許可する場合は呼出し側で適切な隔離環境を用意してください。timeout は直接起動した
-shell の終了を制御しますが、その子プロセスまで停止する保証はありません。
+出力上限内に収めます（長い出力は先頭と末尾を残して省略）。timeout の既定は 120 秒で、
+timeout_seconds で最大 600 秒まで延ばせます。中止・timeout・I/O エラーでも起動した shell を回収します。
+システムプロンプトには workspace の `AGENTS.md` があればその内容を含めます。
+モデル呼出し・ツール呼出しの上限やエラーで止まった turn も会話履歴に残し、
+次の依頼で続きを再開できます。
+`read`・`list`・`search`・`edit`・`write` は workspace 外のパスを拒否します。
+`exec` は shell を起動するため、許可する場合は呼出し側で適切な隔離環境を用意してください。
+timeout は直接起動した shell の終了を制御しますが、その子プロセスまで停止する保証はありません。
 
 **変更** タブの差分は `edit` の置換だけでなく、`exec` が実行前後で書き換えた
 ファイル(workspace スナップショットの比較)からも生成します。ベースラインは承認の後、
@@ -363,7 +371,10 @@ session_store/model.rs 保存メタ・順番待ち・復元セッションのデ
 session_store/transcript.rs セッションの Markdown 書き出し
 mock.rs        疑似イベント、backpressure、中止、障害注入、ログ退避
 harness.rs     モデル・tool・承認を接続する実行ループと中止・呼出し上限
-harness/workspace.rs ワークスペース内のファイル操作と tool の引数・結果の変換
+harness/workspace.rs tool 名・spec・引数の解釈と dispatch
+harness/workspace/files.rs read/write/edit とパス解決・上書きガード
+harness/workspace/search.rs search/list の走査と glob 絞り込み
+harness/workspace/prompt.rs システムプロンプトと AGENTS.md の埋め込み
 harness/workspace/command.rs コマンドの起動・出力制限・中止・終了処理
 codex.rs       ChatGPT OAuth と Codex モデルを使う Model アダプター
 config.rs      ~/.config/solo/config.yml の読み込み・検証・保存

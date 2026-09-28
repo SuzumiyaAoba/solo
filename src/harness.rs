@@ -53,10 +53,19 @@ impl ToolResult {
     }
 }
 
+/// モデル応答に添えられるトークン使用量。未取得は None のまま残す。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TokenUsage {
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ModelOutput {
     pub text: String,
     pub tool_calls: Vec<ToolCall>,
+    #[serde(default)]
+    pub usage: Option<TokenUsage>,
 }
 
 /// アダプターは provider 固有の形式を ModelOutput に変換する。
@@ -108,8 +117,8 @@ pub struct Limits {
 impl Default for Limits {
     fn default() -> Self {
         Self {
-            max_model_requests: 32,
-            max_tool_calls: 128,
+            max_model_requests: 64,
+            max_tool_calls: 256,
             max_result_bytes: 64 * 1024,
         }
     }
@@ -142,6 +151,28 @@ pub enum StopReason {
     InvalidResponse(String),
 }
 
+impl StopReason {
+    /// ユーザー向けの停止理由。上限系の文言は実際の上限値を含める。
+    pub fn message(&self, limits: &Limits) -> String {
+        match self {
+            Self::Completed => "実行完了".into(),
+            Self::Cancelled => "実行を中止しました".into(),
+            Self::ModelLimit => format!(
+                "モデル呼び出しが上限の {} 回に達したため停止しました。続ける場合は、続きを依頼してください",
+                limits.max_model_requests
+            ),
+            Self::ToolLimit => format!(
+                "ツール呼び出しが上限の {} 回に達したため停止しました。続ける場合は、続きを依頼してください",
+                limits.max_tool_calls
+            ),
+            Self::ModelError(error) => format!("モデルの呼び出しに失敗しました: {error}"),
+            Self::InvalidResponse(error) => {
+                format!("モデルの応答が不正なため停止しました: {error}")
+            }
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub enum Update {
     ModelRequested,
@@ -158,6 +189,8 @@ pub struct Run {
     pub model_requests: usize,
     pub tool_calls: usize,
     pub stop: StopReason,
+    /// usage を返した応答の合計。1 件も無ければ None。
+    pub usage: Option<TokenUsage>,
 }
 
 /// 一回のユーザー入力を処理する。中止はモデル呼出しと tool 実行の間で確認する。
@@ -179,6 +212,7 @@ where
 {
     let mut requests = 0;
     let mut calls: usize = 0;
+    let mut usage = None;
     let mut seen_ids = HashSet::new();
     let stop = loop {
         if cancellation.is_cancelled() {
@@ -203,6 +237,11 @@ where
         };
         if cancellation.is_cancelled() {
             break StopReason::Cancelled;
+        }
+        if let Some(report) = output.usage {
+            let total = usage.get_or_insert(TokenUsage::default());
+            total.input_tokens = total.input_tokens.saturating_add(report.input_tokens);
+            total.output_tokens = total.output_tokens.saturating_add(report.output_tokens);
         }
         if output.tool_calls.iter().any(|call| {
             call.id.is_empty() || call.name.is_empty() || !seen_ids.insert(call.id.clone())
@@ -262,6 +301,7 @@ where
         model_requests: requests,
         tool_calls: calls,
         stop,
+        usage,
     }
 }
 

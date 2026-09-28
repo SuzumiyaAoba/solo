@@ -3,7 +3,9 @@ use crate::{
     diffgen::unified_diff,
     harness::{
         ToolCall, ToolExecutor, ToolResult, ToolSpec,
-        workspace::{TOOL_EDIT, TOOL_EXEC, WorkspaceTools, is_ignored_dir, resolve_file},
+        workspace::{
+            TOOL_EDIT, TOOL_EXEC, TOOL_WRITE, WorkspaceTools, is_ignored_dir, resolve_file,
+        },
     },
 };
 use std::{
@@ -168,7 +170,7 @@ impl DiffTracking {
     }
 }
 
-/// `execute` 直前のベースライン。edit は対象ファイルの本文、exec は workspace 全体。
+/// `execute` 直前のベースライン。edit/write は対象ファイルの本文、exec は workspace 全体。
 enum Baseline {
     Edit {
         path: String,
@@ -189,6 +191,17 @@ impl ToolExecutor for DiffTracking {
                 .map(|relative| Baseline::Edit {
                     path: relative.to_owned(),
                     before: read_workspace_file(&self.root, relative),
+                }),
+            // write の新規作成は空文字からの差分として出す。
+            TOOL_WRITE => call.arguments["path"]
+                .as_str()
+                .map(|relative| Baseline::Edit {
+                    path: relative.to_owned(),
+                    before: if self.root.join(relative).exists() {
+                        read_workspace_file(&self.root, relative)
+                    } else {
+                        Some(String::new())
+                    },
                 }),
             TOOL_EXEC => Some(Baseline::Exec(workspace_snapshot(&self.root))),
             _ => None,
@@ -321,6 +334,51 @@ mod tests {
         let diffs = pending.borrow_mut().remove("exec-1").unwrap();
         let names: Vec<_> = diffs.iter().map(|(path, _)| path.as_str()).collect();
         assert_eq!(names, ["agent.txt"]);
+    }
+
+    #[test]
+    fn write_diffs_cover_creation_overwrite_and_failures() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        fs::write(root.join("existing.txt"), "before").unwrap();
+        let mut tools = DiffTracking::new(WorkspaceTools::new(&root).unwrap(), root);
+        let pending = tools.pending();
+        // 新規作成は空文字からの差分になる。
+        let result = tools.execute(&ToolCall {
+            id: "write-1".into(),
+            name: TOOL_WRITE.into(),
+            arguments: serde_json::json!({"path":"created.txt","content":"new\n"}),
+        });
+        assert!(!result.is_error);
+        let diffs = pending.borrow_mut().remove("write-1").unwrap();
+        assert_eq!(diffs[0].0, "created.txt");
+        assert!(diffs[0].1.contains("+new"));
+
+        // 上書きは read 済みの場合だけ成功し、before→after の差分になる。
+        tools.execute(&ToolCall {
+            id: "read-1".into(),
+            name: "read".into(),
+            arguments: serde_json::json!({"path":"existing.txt"}),
+        });
+        let result = tools.execute(&ToolCall {
+            id: "write-2".into(),
+            name: TOOL_WRITE.into(),
+            arguments: serde_json::json!({"path":"existing.txt","content":"after"}),
+        });
+        assert!(!result.is_error);
+        let diffs = pending.borrow_mut().remove("write-2").unwrap();
+        assert!(diffs[0].1.contains("-before"));
+        assert!(diffs[0].1.contains("+after"));
+
+        // 失敗した write は差分を残さない。
+        fs::write(tools.root.join("locked.txt"), "old").unwrap();
+        let result = tools.execute(&ToolCall {
+            id: "write-3".into(),
+            name: TOOL_WRITE.into(),
+            arguments: serde_json::json!({"path":"locked.txt","content":"x"}),
+        });
+        assert!(result.is_error);
+        assert!(pending.borrow_mut().remove("write-3").is_none());
     }
 
     #[test]
