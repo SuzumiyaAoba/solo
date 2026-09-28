@@ -4,12 +4,12 @@ impl Workspace {
     /// 入力欄・実行先・操作ボタンを一枚のカードにまとめるプロンプト入力。
     pub(super) fn composer(&self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
         let p = ds::theme(cx);
-        let session = &self.sessions[self.selected];
-        let active = session.model.status.is_active();
-        let cancelling = session.model.status == Status::Cancelling;
+        let session = self.session();
+        let active = session.display_status().is_active();
+        let cancelling = session.model.status() == Status::Cancelling;
         let queued = self.queue.position(&session.model.id).is_some();
-        let will_queue = session.selected_backend <= self.acp_agents.len()
-            && (self.workspace_busy() || !self.queue.is_empty() || self.queue.paused);
+        let will_queue = self.picker_uses_workspace(session.selected_backend)
+            && (self.workspace_busy() || !self.queue.is_empty() || self.queue.paused());
         let composer = session.composer.clone();
         let empty = composer.read(cx).value(cx).trim().is_empty();
         let focused = composer.focus_handle(cx).is_focused(window);
@@ -114,6 +114,7 @@ impl Workspace {
                                                         .on_click(cx.listener(|this, _, _, _| {
                                                             if let Some(controller) = &this.sessions
                                                                 [this.selected]
+                                                                .exec
                                                                 .controller
                                                             {
                                                                 controller.disconnect();

@@ -1,4 +1,5 @@
-//! macOS の UTF-16 範囲と Rust の UTF-8 範囲の変換、および IME composition。
+//! IME composition と macOS の UTF-16 範囲と Rust の UTF-8 範囲の変換。
+//! 入力コンポーネント(design/input)とベンチが使う編集バッファ。
 use std::ops::Range;
 use unicode_segmentation::UnicodeSegmentation;
 
@@ -27,7 +28,6 @@ pub fn to_utf16(text: &str, offset: usize) -> usize {
         .map(|(_, ch)| ch.len_utf16())
         .sum()
 }
-
 impl TextBuffer {
     pub fn range_from_utf16(&self, range: Range<usize>) -> Range<usize> {
         let start = from_utf16(&self.content, range.start);

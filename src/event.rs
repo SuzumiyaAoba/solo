@@ -1,28 +1,99 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::{
+    fmt,
+    io::{self, ErrorKind},
+    ops::Deref,
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 pub const SCHEMA_VERSION: u32 = 1;
+
+/// ローカル session の識別子。session_store がディレクトリ名に使うため文字種を検査する。
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct SessionId(String);
+
+impl SessionId {
+    /// 利用可能な文字は [A-Za-z0-9_-] のみ（ディレクトリ名として安全にするため）。
+    pub fn parse(raw: impl AsRef<str>) -> io::Result<Self> {
+        let raw = raw.as_ref();
+        if raw.is_empty()
+            || raw.len() > 40
+            || !raw
+                .chars()
+                .all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_')
+        {
+            return Err(io::Error::new(
+                ErrorKind::InvalidInput,
+                "session_id の形式が不正です",
+            ));
+        }
+        Ok(Self(raw.to_owned()))
+    }
+}
+
+impl Deref for SessionId {
+    type Target = str;
+    fn deref(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for SessionId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+/// worker が採番するターン識別子。ローカル生成なので内容は検査しない。
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct TurnId(String);
+
+impl From<String> for TurnId {
+    fn from(id: String) -> Self {
+        Self(id)
+    }
+}
+
+impl Deref for TurnId {
+    type Target = str;
+    fn deref(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for TurnId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
 
 /// 時刻ではなく session 内の sequence で順序を判断する。
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Envelope {
     pub schema_version: u32,
     pub event_id: String,
-    pub session_id: String,
+    pub session_id: SessionId,
     pub sequence: u64,
     pub timestamp_ms: u64,
-    pub turn_id: Option<String>,
+    pub turn_id: Option<TurnId>,
     pub payload: Value,
 }
 
 impl Envelope {
     /// sequence と turn の管理は producer に任せ、共通のメタデータを付与する。
-    pub(crate) fn new(session_id: &str, sequence: u64, turn_id: String, event: Event) -> Self {
+    pub(crate) fn new(
+        session_id: &SessionId,
+        sequence: u64,
+        turn_id: TurnId,
+        event: Event,
+    ) -> Self {
         Self {
             schema_version: SCHEMA_VERSION,
             event_id: format!("{session_id}-{sequence}"),
-            session_id: session_id.to_owned(),
+            session_id: session_id.clone(),
             sequence,
             timestamp_ms: SystemTime::now()
                 .duration_since(UNIX_EPOCH)
@@ -40,18 +111,18 @@ impl Envelope {
 /// producer 側の sequence / turn_id 採番。時刻ではなく sequence で順序を確定する。
 /// `next` は送信前に採番し、`peek` + `advance` は送信成功時だけ採番を確定する。
 pub struct Sequencer {
-    session_id: String,
+    session_id: SessionId,
     sequence: u64,
-    turn_id: String,
+    turn_id: TurnId,
 }
 
 impl Sequencer {
     /// `turn_id` は SessionCreated など turn 開始前のイベントに付く先行値。
-    pub fn new(session_id: impl Into<String>, start_sequence: u64, turn_id: String) -> Self {
+    pub fn new(session_id: SessionId, start_sequence: u64, turn_id: impl Into<TurnId>) -> Self {
         Self {
-            session_id: session_id.into(),
+            session_id,
             sequence: start_sequence,
-            turn_id,
+            turn_id: turn_id.into(),
         }
     }
 
@@ -61,8 +132,8 @@ impl Sequencer {
     }
 
     /// 次のイベントから使う turn_id。TurnStarted の emit 前に呼ぶ。
-    pub fn begin_turn(&mut self, turn_id: String) {
-        self.turn_id = turn_id;
+    pub fn begin_turn(&mut self, turn_id: impl Into<TurnId>) {
+        self.turn_id = turn_id.into();
     }
 
     /// 採番せずに次の envelope だけ作る。送信に成功したら `advance` で確定する。
@@ -85,6 +156,70 @@ impl Sequencer {
     /// `peek` で作った envelope の送信が成功したときに採番を確定する。
     pub fn advance(&mut self) {
         self.sequence += 1;
+    }
+}
+
+/// Sequencer に Delivery チャネルを束ねた送信器。各ワーカーの Event→Envelope
+/// 送信経路をここに一本化する。
+pub struct Emitter<D> {
+    sequencer: Sequencer,
+    sender: async_channel::Sender<D>,
+}
+
+impl<D: Send> Emitter<D>
+where
+    D: From<Envelope>,
+{
+    pub fn new(sequencer: Sequencer, sender: async_channel::Sender<D>) -> Self {
+        Self { sequencer, sender }
+    }
+
+    /// 確定済みの sequence（最後に送信したイベント番号）。
+    pub fn sequence(&self) -> u64 {
+        self.sequencer.sequence()
+    }
+
+    /// 次のイベントから使う turn_id。TurnStarted の emit 前に呼ぶ。
+    pub fn begin_turn(&mut self, turn_id: impl Into<TurnId>) {
+        self.sequencer.begin_turn(turn_id);
+    }
+
+    /// 採番して送信する。送信失敗でも sequence は進める（切断中の欠番は復元側で扱う）。
+    pub fn emit(&mut self, event: Event) {
+        let _ = self
+            .sender
+            .send_blocking(D::from(self.sequencer.next(event)));
+    }
+
+    /// 採番せずに次の envelope だけ作る。送信は呼出し側が `commit` で確定する。
+    pub fn peek(&self, event: Event) -> Envelope {
+        self.sequencer.peek(event)
+    }
+
+    /// `peek` で作った envelope の送信が成功したときに採番を確定する。
+    pub fn commit(&mut self) {
+        self.sequencer.advance();
+    }
+
+    /// 送信を呼出し側の関数で行い、成功したときだけ採番する。
+    /// 途中中断を許す producer（mock）向け。
+    pub fn send_with(
+        &mut self,
+        event: Event,
+        send: impl FnOnce(&async_channel::Sender<D>, D) -> bool,
+    ) -> bool {
+        let envelope = self.sequencer.peek(event);
+        if send(&self.sender, D::from(envelope)) {
+            self.sequencer.advance();
+            true
+        } else {
+            false
+        }
+    }
+
+    /// イベント以外の Delivery を送る際に使うチャネル。
+    pub fn sender(&self) -> &async_channel::Sender<D> {
+        &self.sender
     }
 }
 
@@ -164,6 +299,20 @@ pub enum Event {
         success: bool,
         summary: String,
     },
+    /// 承認 UI への問い合わせと採番は worker が emit する。決定は ApprovalDecided。
+    ApprovalRequested {
+        request_id: String,
+        title: String,
+        executor: String,
+        command: Option<String>,
+        details: Value,
+    },
+    /// user・auto・denied いずれもここに残る。accepted=false は拒否・中止を含む。
+    ApprovalDecided {
+        request_id: String,
+        accepted: bool,
+        source: String,
+    },
     Log {
         level: String,
         preview: String,
@@ -202,17 +351,10 @@ impl Event {
         "log",
         "diff_updated",
         "turn_completed",
+        "approval_requested",
+        "approval_decided",
         "turn_failed",
         "turn_cancelled",
         "disconnected",
     ];
-}
-
-/// 巨大な一行も UTF-8 を壊さず、表示側へ渡す量を制限する。
-pub fn preview(text: &str, max_bytes: usize) -> String {
-    if text.len() <= max_bytes {
-        return text.to_owned();
-    }
-    let end = text.floor_char_boundary(max_bytes);
-    format!("{}…", &text[..end])
 }

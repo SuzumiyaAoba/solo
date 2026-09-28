@@ -41,14 +41,14 @@ impl ProjectManager {
         let workspace = self.catalog.active.and_then(|id| self.workspace(id));
         let session = workspace.as_ref().map(|w| {
             let w = w.read(cx);
-            w.sessions[w.selected].tab
+            w.session().view.tab
         });
         let thread_open = workspace
             .as_ref()
             .map(|w| {
                 let w = w.read(cx);
-                let session = &w.sessions[w.selected];
-                session.tab == Tab::Chat && session.selected_thread.is_some()
+                let session = w.session();
+                session.view.tab == Tab::Chat && session.view.selected_thread.is_some()
             })
             .unwrap_or(false);
         let dark = ds::scheme(cx) == ColorScheme::Dark;
@@ -181,7 +181,7 @@ impl ProjectManager {
     pub(in crate::ui) fn select_channel(
         &mut self,
         project: u64,
-        session: &str,
+        session: &SessionId,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -238,6 +238,8 @@ impl ProjectManager {
                         }
                         let session_id = session.model.id.clone();
                         let queued = workspace.queue.position(&session_id);
+                        // state_label/state_tone/status_icon はそのまま使い、
+                        // セッション状態に無い「要対応」「順番待ち」だけここで上書きする。
                         let tone = session.state_tone();
                         let state = queued
                             .map(|n| format!("順番待ち {n}"))
@@ -247,10 +249,10 @@ impl ProjectManager {
                         } else if queued.is_some() {
                             Icon::Clock
                         } else {
-                            status_icon(session.model.status)
+                            status_icon(session.model.status())
                         };
                         menu = menu.child(
-                            SidebarMenuItem::new(format!("#  {}", session.model.title))
+                            SidebarMenuItem::new(format!("#  {}", session.model.title()))
                                 .active(selected)
                                 .suffix(move |_, cx| {
                                     ds::indicator(

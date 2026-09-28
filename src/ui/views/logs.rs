@@ -2,8 +2,8 @@ use super::*;
 
 impl Workspace {
     pub(super) fn logs(&self, cx: &mut Context<Self>) -> AnyElement {
-        let session = &self.sessions[self.selected];
-        if session.model.logs.is_empty() {
+        let session = self.session();
+        if session.model.logs().is_empty() {
             return empty(Icon::Terminal, "ログなし", cx).into_any_element();
         }
         let p = ds::theme(cx);
@@ -13,9 +13,9 @@ impl Workspace {
             .flex()
             .flex_col()
             .on_scroll_wheel(cx.listener(|this, _, _, cx| {
-                let session = &mut this.sessions[this.selected];
-                if session.follow_logs {
-                    session.follow_logs = false;
+                let session = this.session_mut();
+                if session.view.follow_logs {
+                    session.view.follow_logs = false;
                     cx.notify();
                 }
             }))
@@ -32,8 +32,8 @@ impl Workspace {
                     .child(caption(
                         format!(
                             "最新 {} 件 · 全文 {:.2} MiB",
-                            session.model.logs.len(),
-                            session.model.log_bytes as f64 / 1048576.
+                            session.model.logs().len(),
+                            session.model.log_bytes() as f64 / 1048576.
                         ),
                         cx,
                     ))
@@ -44,14 +44,14 @@ impl Workspace {
                             .gap(px(space::SM))
                             .child(
                                 Button::icon("follow-logs", Icon::Pin, "ログの自動追従")
-                                    .toggled(session.follow_logs)
+                                    .toggled(session.view.follow_logs)
                                     .control_size(ControlSize::Small)
                                     .on_click(cx.listener(|this, _, _, cx| {
-                                        let session = &mut this.sessions[this.selected];
-                                        session.follow_logs = !session.follow_logs;
-                                        if session.follow_logs {
-                                            session.log_scroll.scroll_to_item(
-                                                session.model.logs.len().saturating_sub(1),
+                                        let session = this.session_mut();
+                                        session.view.follow_logs = !session.view.follow_logs;
+                                        if session.view.follow_logs {
+                                            session.view.log_scroll.scroll_to_item(
+                                                session.model.logs().len().saturating_sub(1),
                                                 ScrollStrategy::Bottom,
                                             );
                                         }
@@ -62,10 +62,10 @@ impl Workspace {
                                 Button::icon("log-tail", Icon::ChevronDown, "最新のログへ")
                                     .control_size(ControlSize::Small)
                                     .on_click(cx.listener(|this, _, _, cx| {
-                                        let s = &mut this.sessions[this.selected];
-                                        s.follow_logs = true;
-                                        s.log_scroll.scroll_to_item(
-                                            s.model.logs.len().saturating_sub(1),
+                                        let s = this.session_mut();
+                                        s.view.follow_logs = true;
+                                        s.view.log_scroll.scroll_to_item(
+                                            s.model.logs().len().saturating_sub(1),
                                             ScrollStrategy::Bottom,
                                         );
                                         cx.notify();
@@ -76,7 +76,8 @@ impl Workspace {
                                     .control_size(ControlSize::Small)
                                     .disabled(session.artifacts.is_empty())
                                     .on_click(cx.listener(|this, _, _, cx| {
-                                        let paths = this.sessions[this.selected]
+                                        let paths = this
+                                            .session()
                                             .artifacts
                                             .iter()
                                             .map(|path| path.display().to_string())
@@ -87,11 +88,11 @@ impl Workspace {
                             ),
                     ),
             )
-            .when(session.model.logs_discarded > 0, |v| {
+            .when(session.model.logs_discarded() > 0, |v| {
                 v.child(div().px_4().pb_2().child(ds::indicator(
                     "discarded-logs",
                     Icon::Info,
-                    format!("{} 件省略", session.model.logs_discarded),
+                    format!("{} 件省略", session.model.logs_discarded()),
                     "表示範囲外のログは全文ファイルに保持",
                     Tone::Neutral,
                     cx,
@@ -100,13 +101,13 @@ impl Workspace {
             .child(
                 uniform_list(
                     "log-rows",
-                    session.model.logs.len(),
+                    session.model.logs().len(),
                     cx.processor(|this, range: std::ops::Range<usize>, _, cx| {
                         let p = ds::theme(cx);
-                        let s = &this.sessions[this.selected];
+                        let s = this.session();
                         range
                             .filter_map(|i| {
-                                s.model.logs.get(i).map(|row| {
+                                s.model.logs().get(i).map(|row| {
                                     let text = row.text.clone();
                                     div()
                                         .id(i)
@@ -151,7 +152,7 @@ impl Workspace {
                             .collect()
                     }),
                 )
-                .track_scroll(&session.log_scroll)
+                .track_scroll(&session.view.log_scroll)
                 .flex_1()
                 .min_h_0(),
             )

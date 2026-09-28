@@ -3,10 +3,13 @@ pub mod acp;
 pub mod acp_worker;
 pub mod approval;
 pub mod auto_approval;
-pub mod codex_subscription;
+pub mod backend;
+pub mod codex;
+pub mod codex_worker;
 pub mod command_rules;
 pub mod config;
 pub mod design_tokens;
+pub mod diffgen;
 pub mod event;
 pub mod harness;
 pub mod mock;
@@ -15,7 +18,6 @@ pub mod projection;
 pub mod projects;
 pub mod session_store;
 mod storage;
-pub mod subscription_worker;
 pub mod text;
 
 #[cfg(all(feature = "gui", target_os = "macos"))]

@@ -5,9 +5,11 @@ mod stdio;
 mod writer;
 use crate::{
     acp::{self, AgentProfile, Client},
-    approval::{ApprovalRequest, wait_for_reply},
-    event::{Envelope, Event, Sequencer, Usage, preview},
+    approval::{self, ApprovalReply, ApprovalRequest},
+    diffgen::unified_diff,
+    event::{Emitter, Envelope, Event, Sequencer, SessionId, Usage},
     harness::Cancellation,
+    text::preview,
 };
 use async_channel::{Receiver, Sender};
 pub use connection::Controller;
@@ -15,7 +17,7 @@ use serde_json::{Value, json};
 use std::{
     collections::HashMap,
     io::{self, BufReader},
-    path::PathBuf,
+    path::{Path, PathBuf},
     thread,
 };
 use writer::Writer;
@@ -24,14 +26,19 @@ pub enum Delivery {
     Event(Envelope),
     Approval {
         request: Box<ApprovalRequest>,
-        reply: Sender<bool>,
+        reply: Sender<ApprovalReply>,
     },
-    SessionId(String),
     Error(String),
 }
 
+impl From<Envelope> for Delivery {
+    fn from(envelope: Envelope) -> Self {
+        Self::Event(envelope)
+    }
+}
+
 pub struct Config {
-    pub local_session_id: String,
+    pub local_session_id: SessionId,
     pub title: String,
     pub workspace: PathBuf,
     pub profile: AgentProfile,
@@ -68,8 +75,11 @@ fn run(
 ) -> io::Result<()> {
     let sender = &connection.output;
     let mut emitter = Emitter::new(
-        config.local_session_id,
-        config.start_sequence,
+        Sequencer::new(
+            config.local_session_id,
+            config.start_sequence,
+            String::new(),
+        ),
         sender.clone(),
     );
     if config.start_sequence == 0 {
@@ -100,15 +110,15 @@ fn run(
     }
     let session = session?;
     connection.initialized(session.clone())?;
-    sender
-        .send_blocking(Delivery::SessionId(session.clone()))
-        .map_err(|_| io::Error::other("UI が閉じました"))?;
     while let Ok(prompt) = input.recv_blocking() {
         if connection.is_disconnected() {
             break;
         }
         let cancellation = Cancellation::default();
-        emitter.begin_turn(&prompt);
+        emitter.begin_turn(format!("acp-turn-{}", emitter.sequence() + 1));
+        emitter.emit(Event::TurnStarted {
+            prompt: prompt.clone(),
+        });
         emitter.emit(Event::ModelRequestStarted {
             provider: format!("ACP / {}", config.profile.name),
             model: "agent の設定".into(),
@@ -128,41 +138,14 @@ fn run(
                 if message["method"] == "session/request_permission"
                     && message["params"]["sessionId"] == session
                 {
-                    let params = bridge.permission_params(&message["params"]);
-                    let (reply, answer) = async_channel::bounded(1);
-                    if sender
-                        .send_blocking(Delivery::Approval {
-                            request: Box::new(ApprovalRequest::acp(
-                                params,
-                                &config.profile,
-                                &config.workspace,
-                            )),
-                            reply,
-                        })
-                        .is_err()
-                    {
-                        return Some(json!({"outcome":{"outcome":"cancelled"}}));
-                    }
-                    let accepted = wait_for_reply(answer, &cancellation);
-                    if cancellation.is_cancelled() {
-                        return Some(json!({"outcome":{"outcome":"cancelled"}}));
-                    }
-                    let kind = if accepted {
-                        "allow_once"
-                    } else {
-                        "reject_once"
-                    };
-                    let option = message["params"]["options"]
-                        .as_array()
-                        .and_then(|options| options.iter().find(|option| option["kind"] == kind))
-                        .and_then(|option| option["optionId"].as_str())
-                        .filter(|id| !id.is_empty());
-                    return Some(match option {
-                        Some(option_id) => {
-                            json!({"outcome":{"outcome":"selected","optionId":option_id}})
-                        }
-                        None => json!({"outcome":{"outcome":"cancelled"}}),
-                    });
+                    return Some(bridge.request_permission(
+                        &message["params"],
+                        sender,
+                        &mut emitter,
+                        &config.profile,
+                        &config.workspace,
+                        &cancellation,
+                    ));
                 }
                 None
             },
@@ -194,38 +177,13 @@ fn run(
     Ok(())
 }
 
-struct Emitter {
-    sequencer: Sequencer,
-    sender: Sender<Delivery>,
-}
-impl Emitter {
-    fn new(session_id: String, sequence: u64, sender: Sender<Delivery>) -> Self {
-        Self {
-            sequencer: Sequencer::new(session_id, sequence, String::new()),
-            sender,
-        }
-    }
-    fn sequence(&self) -> u64 {
-        self.sequencer.sequence()
-    }
-    fn begin_turn(&mut self, prompt: &str) {
-        self.sequencer
-            .begin_turn(format!("acp-turn-{}", self.sequencer.sequence() + 1));
-        self.emit(Event::TurnStarted {
-            prompt: prompt.into(),
-        });
-    }
-    fn emit(&mut self, event: Event) {
-        let _ = self
-            .sender
-            .send_blocking(Delivery::Event(self.sequencer.next(event)));
-    }
-}
-
 #[derive(Default)]
 struct Bridge {
     tools: HashMap<String, ToolState>,
     log_offset: u64,
+    /// messageId の無い chunk に割り当てる区切り番号。tool 呼出しを挟むと進める。
+    segment: u64,
+    segment_has_text: bool,
 }
 
 #[derive(Default, PartialEq, Eq)]
@@ -269,23 +227,94 @@ impl Bridge {
         }
         params
     }
-    fn handle(&mut self, update: &Value, out: &mut Emitter) {
+    /// session/request_permission: UI 承認を問い、options から対応する optionId を返す。
+    /// 送信不能・中止・不一致は cancelled として返す。
+    /// 問い合わせと決定は ApprovalRequested / ApprovalDecided として記録する。
+    fn request_permission(
+        &mut self,
+        params: &Value,
+        sender: &Sender<Delivery>,
+        out: &mut Emitter<Delivery>,
+        profile: &AgentProfile,
+        workspace: &Path,
+        cancellation: &Cancellation,
+    ) -> Value {
+        let params = self.permission_params(params);
+        // permission_params は toolCall のメタデータだけを補うので options は同一。
+        // ask() が params を move するため、optionId の探索だけ先に済ませる。
+        let option_id = |kind: &str| {
+            params["options"]
+                .as_array()
+                .and_then(|options| options.iter().find(|option| option["kind"] == kind))
+                .and_then(|option| option["optionId"].as_str())
+                .filter(|id| !id.is_empty())
+                .map(str::to_owned)
+        };
+        let (allow, reject) = (option_id("allow_once"), option_id("reject_once"));
+        let request_id = format!("approval-{}", out.sequence() + 1);
+        let request = ApprovalRequest::acp(params, profile, workspace);
+        out.emit(Event::ApprovalRequested {
+            request_id: request_id.clone(),
+            title: request.title.clone(),
+            executor: request.executor.clone(),
+            command: request.display_command.clone(),
+            details: request.details.clone(),
+        });
+        let reply = approval::ask(
+            sender,
+            request,
+            |request, reply| Delivery::Approval { request, reply },
+            cancellation,
+        );
+        let (accepted, source) = match reply {
+            Some(reply) => (reply.accepted, reply.source.label()),
+            None if cancellation.is_cancelled() => (false, "cancelled"),
+            None => (false, "closed"),
+        };
+        out.emit(Event::ApprovalDecided {
+            request_id,
+            accepted,
+            source: source.into(),
+        });
+        if cancellation.is_cancelled() {
+            return json!({"outcome":{"outcome":"cancelled"}});
+        }
+        match if accepted { allow } else { reject } {
+            Some(option_id) => {
+                json!({"outcome":{"outcome":"selected","optionId":option_id}})
+            }
+            None => json!({"outcome":{"outcome":"cancelled"}}),
+        }
+    }
+    fn handle(&mut self, update: &Value, out: &mut Emitter<Delivery>) {
         match update["sessionUpdate"].as_str() {
             Some("agent_message_chunk") => {
                 if let Some(text) = update["content"]["text"].as_str() {
-                    let id = update["messageId"].as_str().unwrap_or("acp-message");
+                    // ACP v1 の chunk は messageId を持たないことが多い。tool 呼出しの
+                    // 前後で別ブロックになるよう、区切り番号で message_id を分ける。
+                    let id = update["messageId"]
+                        .as_str()
+                        .map(str::to_owned)
+                        .unwrap_or_else(|| format!("acp-message-{}", self.segment));
+                    self.segment_has_text = true;
                     out.emit(Event::MessageDelta {
-                        message_id: id.into(),
+                        message_id: id,
                         text: text.into(),
                     });
                 }
             }
             Some("tool_call" | "tool_call_update") => {
                 self.remember_tool(update);
-                if let Some(id) = update["toolCallId"].as_str() {
-                    let tool = self.tools.get_mut(id).expect("tool metadata was recorded");
+                if let Some(id) = update["toolCallId"].as_str()
+                    && let Some(tool) = self.tools.get_mut(id)
+                {
                     if tool.phase == ToolPhase::Proposed {
                         tool.phase = ToolPhase::Running;
+                        // tool の後に続く本文は別のメッセージブロックに分ける。
+                        if self.segment_has_text {
+                            self.segment += 1;
+                            self.segment_has_text = false;
+                        }
                         out.emit(Event::ToolStarted {
                             agent_id: None,
                             invocation_id: id.into(),
@@ -310,10 +339,12 @@ impl Bridge {
                                     (item["path"].as_str(), item["newText"].as_str())
                             {
                                 let old = item["oldText"].as_str().unwrap_or("");
-                                out.emit(Event::DiffUpdated {
-                                    path: path.into(),
-                                    unified_diff: simple_diff(path, old, new),
-                                });
+                                if let Some(diff) = unified_diff(path, old, new) {
+                                    out.emit(Event::DiffUpdated {
+                                        path: path.into(),
+                                        unified_diff: diff,
+                                    });
+                                }
                             }
                         }
                     }
@@ -353,27 +384,6 @@ impl Bridge {
             _ => {}
         }
     }
-}
-
-fn simple_diff(path: &str, old: &str, new: &str) -> String {
-    let old_lines: Vec<_> = old.lines().collect();
-    let new_lines: Vec<_> = new.lines().collect();
-    let mut diff = format!(
-        "--- a/{path}\n+++ b/{path}\n@@ -1,{} +1,{} @@\n",
-        old_lines.len(),
-        new_lines.len()
-    );
-    for line in old_lines {
-        diff.push('-');
-        diff.push_str(line);
-        diff.push('\n');
-    }
-    for line in new_lines {
-        diff.push('+');
-        diff.push_str(line);
-        diff.push('\n');
-    }
-    diff
 }
 
 #[cfg(test)]

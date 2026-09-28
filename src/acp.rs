@@ -1,5 +1,5 @@
 //! ACP v1 の最小 client。Agent は stdio の JSON-RPC 2.0 peer として扱う。
-use crate::storage::read_optional;
+use crate::storage::{invalid, read_optional};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::{
@@ -186,11 +186,6 @@ impl<R: BufRead, W: Write> Client<R, W> {
             .map(str::to_owned)
             .ok_or_else(|| invalid("ACP stopReason がありません"))
     }
-
-    pub fn send_notification(&mut self, method: &str, params: Value) -> io::Result<()> {
-        self.send(json!({"jsonrpc":"2.0","method":method,"params":params}))
-    }
-
     fn request(
         &mut self,
         method: &str,
@@ -277,10 +272,6 @@ pub(crate) fn write_message(writer: &mut impl Write, value: Value) -> io::Result
     line.push(b'\n');
     writer.write_all(&line)?;
     writer.flush()
-}
-
-fn invalid(error: impl std::fmt::Display) -> io::Error {
-    io::Error::new(io::ErrorKind::InvalidData, error.to_string())
 }
 
 #[cfg(test)]

@@ -6,6 +6,8 @@ use gpui_kit::component::WindowExt;
 use gpui_kit::{HeadlessAppContext, WindowHandle};
 use std::{path::Path, sync::Arc};
 
+use solo::event::{Event, Sequencer};
+
 pub(super) fn run(dir: &Path) {
     std::fs::create_dir_all(dir).expect("visual output dir");
     let platform = gpui_kit::platform::current_platform(true);
@@ -24,7 +26,7 @@ pub(super) fn run(dir: &Path) {
         let window = idle_window(&mut cx);
         window
             .update(&mut cx, |workspace, window, cx| {
-                let composer = workspace.sessions[workspace.selected].composer.clone();
+                let composer = workspace.session().composer.clone();
                 composer.update(cx, |input, cx| {
                     input.set_value("差分の作り込みを続けてください", cx)
                 });
@@ -35,7 +37,17 @@ pub(super) fn run(dir: &Path) {
         let window = idle_window(&mut cx);
         window
             .update(&mut cx, |workspace, window, _cx| {
-                workspace.sessions[workspace.selected].model.status = Status::Running;
+                // status はイベント駆動なので、fixture でも Sequencer 経由で注入する。
+                let session = workspace.session_mut();
+                let start = session.model.last_sequence();
+                let mut seq = Sequencer::new(
+                    session.model.id.clone(),
+                    start,
+                    format!("visual-turn-{}", start + 1),
+                );
+                session.model.apply(seq.next(Event::TurnStarted {
+                    prompt: "visual".into(),
+                }));
                 window.refresh();
             })
             .unwrap();
@@ -78,10 +90,7 @@ pub(super) fn run(dir: &Path) {
             std::thread::sleep(std::time::Duration::from_millis(20));
             let done = window
                 .update(&mut cx, |workspace, _, _| {
-                    !workspace.sessions[workspace.selected]
-                        .model
-                        .diffs
-                        .is_empty()
+                    !workspace.session().model.diffs().is_empty()
                 })
                 .unwrap();
             if done {

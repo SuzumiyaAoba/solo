@@ -1,5 +1,5 @@
 //! Unified diff の行番号・追加削除数と表示上限。
-use crate::event::preview;
+use crate::text::preview;
 
 pub const MAX_DIFF_LINES: usize = 20_000;
 const MAX_LINE_BYTES: usize = 2_048;
@@ -89,25 +89,36 @@ impl Diff {
             })
             .map(|(i, _)| i)
             .collect();
-        // 連続する削除行と追加行をペアにして語レベルの差分範囲を求める。
-        for i in 0..lines.len() {
-            if lines[i].kind != DiffKind::Added {
+        // 連続する削除行と直後の追加行を先頭から順にペアにして語レベルの差分範囲を求める。
+        // Context やハンク見出しで run が切れ、`\ No newline` の注記行は run を切らない。
+        let is_marker =
+            |line: &DiffLine| line.kind == DiffKind::Header && line.text.starts_with('\\');
+        let mut i = 0;
+        while i < lines.len() {
+            if lines[i].kind != DiffKind::Removed {
+                i += 1;
                 continue;
             }
-            // 直前の同種ブロック内で、未ペアの削除行を探す。
-            let Some(j) = (0..i)
-                .rev()
-                .take_while(|&k| lines[k].kind != DiffKind::Header)
-                .find(|&k| lines[k].kind == DiffKind::Removed && lines[k].changed.is_none())
-            else {
-                continue;
-            };
-            let added_body = lines[i].text.get(1..).unwrap_or("");
-            let removed_body = lines[j].text.get(1..).unwrap_or("");
-            let (ra, rb) = changed_ranges(removed_body, added_body);
-            if !ra.is_empty() || !rb.is_empty() {
-                lines[j].changed = (!ra.is_empty()).then_some(ra);
-                lines[i].changed = (!rb.is_empty()).then_some(rb);
+            let mut removed = Vec::new();
+            let mut added = Vec::new();
+            while i < lines.len() && (lines[i].kind == DiffKind::Removed || is_marker(&lines[i])) {
+                if lines[i].kind == DiffKind::Removed {
+                    removed.push(i);
+                }
+                i += 1;
+            }
+            while i < lines.len() && (lines[i].kind == DiffKind::Added || is_marker(&lines[i])) {
+                if lines[i].kind == DiffKind::Added {
+                    added.push(i);
+                }
+                i += 1;
+            }
+            for (&r, &a) in removed.iter().zip(&added) {
+                let removed_body = lines[r].text.get(1..).unwrap_or("");
+                let added_body = lines[a].text.get(1..).unwrap_or("");
+                let (ra, rb) = changed_ranges(removed_body, added_body);
+                lines[r].changed = (!ra.is_empty()).then_some(ra);
+                lines[a].changed = (!rb.is_empty()).then_some(rb);
             }
         }
         Self {

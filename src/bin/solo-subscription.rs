@@ -1,11 +1,11 @@
 use solo::{
     approval::{ApprovalPlan, ApprovalRequest},
     auto_approval::{self, CodexReviewer, ReviewInput},
-    codex_subscription::{Authentication, DEFAULT_MODEL},
+    codex::{Authentication, DEFAULT_MODEL},
     command_rules::{RuleList, RuleStore},
     harness::{
         self, Cancellation, Limits, Message, StopReason, ToolCall, Update,
-        workspace::{WorkspaceTools, is_read_only_tool},
+        workspace::WorkspaceTools,
     },
 };
 use std::{
@@ -74,15 +74,10 @@ fn run() -> io::Result<()> {
     let user_prompt = prompt.join(" ");
     let review_prompt = user_prompt.clone();
     let mut policy = |call: &ToolCall| {
-        let tool_decision = rule_store
-            .load()
-            .ok()
-            .and_then(|rules| rules.tool_decision(&call.name));
-        match tool_decision {
-            Some(solo::command_rules::Decision::Allow) => return true,
-            Some(solo::command_rules::Decision::Deny) => return false,
-            _ if is_read_only_tool(&call.name) => return true,
-            _ => {}
+        if let Some((decision, _)) =
+            solo::approval::precheck_with(call, &cwd, rule_store.load().ok().as_ref())
+        {
+            return decision;
         }
         let request = ApprovalRequest::tool(call, &cwd);
         let plan = match request.plan(&rule_store) {

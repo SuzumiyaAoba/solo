@@ -2,8 +2,26 @@
 use std::{
     fs::{self, File},
     io::{self, Read, Write},
-    path::Path,
+    path::{Path, PathBuf},
 };
+
+/// 入力検証・保存形式の不一致など、呼出し側へ表示するエラーを畳む。
+pub(crate) fn invalid(error: impl std::fmt::Display) -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidData, error.to_string())
+}
+
+/// $HOME。空文字も未設定として扱う。
+pub(crate) fn home_dir() -> io::Result<PathBuf> {
+    std::env::var_os("HOME")
+        .filter(|home| !home.is_empty())
+        .map(PathBuf::from)
+        .ok_or_else(|| invalid("HOME が設定されていません"))
+}
+
+/// $HOME/.solo/<sub>
+pub(crate) fn solo_dir(sub: &str) -> io::Result<PathBuf> {
+    Ok(home_dir()?.join(".solo").join(sub))
+}
 
 /// ファイルが存在しない場合だけ None。破損・権限・サイズ超過は呼出し元へ返す。
 pub(crate) fn read_optional(

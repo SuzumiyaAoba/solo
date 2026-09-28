@@ -3,7 +3,7 @@ use super::*;
 
 impl Workspace {
     pub(super) fn overview(&self, cx: &mut Context<Self>) -> AnyElement {
-        let s = &self.sessions[self.selected];
+        let s = self.session();
         let p = ds::theme(cx);
         if let Some(approval) = self.approval_card(cx) {
             return div()
@@ -13,8 +13,8 @@ impl Workspace {
                 .child(approval)
                 .into_any_element();
         }
-        let fresh = s.model.chat.is_empty()
-            && s.model.status == Status::Idle
+        let fresh = s.model.chat().is_empty()
+            && s.display_status() == Status::Idle
             && self.queue.position(&s.model.id).is_none();
         if fresh {
             return div()
@@ -29,8 +29,6 @@ impl Workspace {
                 .child(self.starters(cx))
                 .into_any_element();
         }
-        let active = s.model.status.is_active();
-        let unreviewed = s.model.unreviewed_count();
         div()
             .id(("task-overview", self.selected))
             .size_full()
@@ -53,9 +51,9 @@ impl Workspace {
                                 div()
                                     .text_size(px(22.))
                                     .font_weight(FontWeight::SEMIBOLD)
-                                    .child(s.model.title.clone()),
+                                    .child(s.model.title().to_owned()),
                             )
-                            .child(caption(s.model.provider.clone(), cx)),
+                            .child(caption(s.provider_display().unwrap_or_default(), cx)),
                     )
                     .when_some(s.approval_note.clone(), |v, note| {
                         v.child(
@@ -66,256 +64,237 @@ impl Workspace {
                         )
                     })
                     .when_some(s.login.as_ref(), |v, login| {
-                        let url = login.verification_url.clone();
-                        let code = login.user_code.clone();
-                        v.child(
-                            ds::card(cx)
-                                .p_4()
-                                .gap_3()
-                                .border_color(rgb(p.warning))
-                                .child(
-                                    div()
-                                        .flex()
-                                        .items_center()
-                                        .gap_2()
-                                        .child(Icon::OpenAi.view(p.text))
-                                        .child("ChatGPT")
-                                        .child(ds::badge("ログイン待ち", Tone::Warning, cx)),
-                                )
-                                .child(
-                                    div()
-                                        .flex()
-                                        .items_center()
-                                        .gap_2()
-                                        .child(
-                                            div()
-                                                .flex_1()
-                                                .font_family(typography::MONO)
-                                                .text_size(px(20.))
-                                                .child(code.clone()),
-                                        )
-                                        .child(
-                                            Button::icon(
-                                                "copy-login-code",
-                                                Icon::Copy,
-                                                "認証コードをコピー",
-                                            )
-                                            .on_click(
-                                                cx.listener(move |this, _, _, cx| {
-                                                    this.copy(
-                                                        code.clone(),
-                                                        "コードをコピーしました",
-                                                        cx,
-                                                    )
-                                                }),
-                                            ),
-                                        )
-                                        .child(
-                                            Button::icon(
-                                                "open-login-url",
-                                                Icon::ExternalLink,
-                                                "認証ページを開く",
-                                            )
-                                            .variant(ButtonVariant::Primary)
-                                            .tooltip(format!("認証ページ · {url}"))
-                                            .on_click(move |_, _, cx| cx.open_url(&url)),
-                                        ),
-                                ),
-                        )
+                        v.child(self.login_card(login, cx))
                     })
                     .child(self.run_summary(cx))
-                    .when(!s.model.tool_activity.is_empty(), |v| {
-                        v.child(
-                            div()
-                                .flex()
-                                .flex_col()
-                                .gap_3()
-                                .child(
-                                    div()
-                                        .flex()
-                                        .items_center()
-                                        .justify_between()
-                                        .child(
-                                            div().font_weight(FontWeight::SEMIBOLD).child("操作"),
-                                        )
-                                        .child(
-                                            Button::icon(
-                                                "activity-logs",
-                                                Icon::Terminal,
-                                                "ログを開く",
-                                            )
-                                            .control_size(ControlSize::Small)
-                                            .on_click(
-                                                cx.listener(|this, _, _, cx| {
-                                                    this.show_tab(Tab::Logs, cx)
-                                                }),
-                                            ),
-                                        ),
-                                )
-                                .child(ds::card(cx).overflow_hidden().children(
-                                    s.model.tool_activity.iter().rev().take(12).map(|activity| {
-                                        let (label, tone, icon) = match activity.exit_code {
-                                            Some(0) => {
-                                                ("完了".to_owned(), Tone::Success, Icon::Check)
-                                            }
-                                            Some(code) => (
-                                                format!("exit {code}"),
-                                                Tone::Warning,
-                                                Icon::Warning,
-                                            ),
-                                            None if active => {
-                                                ("実行中".into(), Tone::Accent, Icon::Spinner)
-                                            }
-                                            None => {
-                                                ("結果未確認".into(), Tone::Warning, Icon::Warning)
-                                            }
-                                        };
-                                        div()
-                                            .px_4()
-                                            .py_3()
-                                            .border_b_1()
-                                            .border_color(rgb(p.border))
-                                            .flex()
-                                            .items_center()
-                                            .gap_3()
-                                            .child(icon.view(p.tone(tone).0))
-                                            .child(
-                                                div()
-                                                    .flex_1()
-                                                    .min_w_0()
-                                                    .flex()
-                                                    .flex_col()
-                                                    .gap_1()
-                                                    .child(
-                                                        div()
-                                                            .font_family(typography::MONO)
-                                                            .text_size(px(12.))
-                                                            .truncate()
-                                                            .child(activity.command.clone()),
-                                                    )
-                                                    .child(
-                                                        caption(activity.cwd.clone(), cx)
-                                                            .truncate(),
-                                                    ),
-                                            )
-                                            .child(ds::badge(label, tone, cx))
-                                    }),
-                                )),
-                        )
+                    .when(!s.model.tool_activity().is_empty(), |v| {
+                        v.child(self.tool_list(cx))
                     })
-                    .when(!s.model.diffs.is_empty(), |v| {
-                        v.child(
-                            div()
-                                .flex()
-                                .flex_col()
-                                .gap_3()
-                                .child(
-                                    div()
-                                        .flex()
-                                        .items_center()
-                                        .justify_between()
-                                        .child(
-                                            div().font_weight(FontWeight::SEMIBOLD).child("変更"),
-                                        )
-                                        .child(ds::indicator(
-                                            "review-count",
-                                            Icon::CircleCheck,
-                                            format!(
-                                                "{} / {}",
-                                                s.model.diffs.len() - unreviewed,
-                                                s.model.diffs.len()
-                                            ),
-                                            format!(
-                                                "確認済み {} / {} ファイル",
-                                                s.model.diffs.len() - unreviewed,
-                                                s.model.diffs.len()
-                                            ),
-                                            Tone::Neutral,
-                                            cx,
-                                        )),
-                                )
-                                .child(ds::card(cx).overflow_hidden().children(
-                                    s.model.diffs.iter().enumerate().map(|(index, diff)| {
-                                        let (added, removed) = diff.line_counts();
-                                        div()
-                                            .px_4()
-                                            .py_2()
-                                            .border_b_1()
-                                            .border_color(rgb(p.border))
-                                            .flex()
-                                            .items_center()
-                                            .gap_3()
-                                            .child(
-                                                if diff.reviewed {
-                                                    Icon::CircleCheck
-                                                } else {
-                                                    Icon::FileDiff
-                                                }
-                                                .view(if diff.reviewed {
-                                                    p.success
-                                                } else {
-                                                    p.muted
-                                                }),
-                                            )
-                                            .child(
-                                                div()
-                                                    .flex_1()
-                                                    .min_w_0()
-                                                    .truncate()
-                                                    .font_family(typography::MONO)
-                                                    .text_size(px(12.))
-                                                    .child(diff.path.clone()),
-                                            )
-                                            .child(
-                                                div()
-                                                    .text_size(px(12.))
-                                                    .text_color(rgb(p.success))
-                                                    .child(format!("+{added}")),
-                                            )
-                                            .child(
-                                                div()
-                                                    .text_size(px(12.))
-                                                    .text_color(rgb(p.danger))
-                                                    .child(format!("−{removed}")),
-                                            )
-                                            .child(
-                                                Button::icon(
-                                                    ("review-file", index),
-                                                    Icon::ChevronRight,
-                                                    format!("差分を開く · {}", diff.path),
-                                                )
-                                                .control_size(ControlSize::Small)
-                                                .on_click(cx.listener(move |this, _, _, cx| {
-                                                    let session = &mut this.sessions[this.selected];
-                                                    session.diff_index = index;
-                                                    session.diff_scroll =
-                                                        UniformListScrollHandle::new();
-                                                    this.show_tab(Tab::Diff, cx);
-                                                })),
-                                            )
-                                    }),
-                                )),
-                        )
-                    }),
+                    .when(!s.model.diffs().is_empty(), |v| v.child(self.diff_list(cx))),
             )
             .into_any_element()
     }
 
+    /// ChatGPT デバイスログインの案内カード。コード表示と認証ページへの導線。
+    fn login_card(&self, login: &DeviceLogin, cx: &mut Context<Self>) -> Div {
+        let p = ds::theme(cx);
+        let url = login.verification_url.clone();
+        let code = login.user_code.clone();
+        ds::card(cx)
+            .p_4()
+            .gap_3()
+            .border_color(rgb(p.warning))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(Icon::OpenAi.view(p.text))
+                    .child("ChatGPT")
+                    .child(ds::badge("ログイン待ち", Tone::Warning, cx)),
+            )
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        div()
+                            .flex_1()
+                            .font_family(typography::MONO)
+                            .text_size(px(20.))
+                            .child(code.clone()),
+                    )
+                    .child(
+                        Button::icon("copy-login-code", Icon::Copy, "認証コードをコピー").on_click(
+                            cx.listener(move |this, _, _, cx| {
+                                this.copy(code.clone(), "コードをコピーしました", cx)
+                            }),
+                        ),
+                    )
+                    .child(
+                        Button::icon("open-login-url", Icon::ExternalLink, "認証ページを開く")
+                            .variant(ButtonVariant::Primary)
+                            .tooltip(format!("認証ページ · {url}"))
+                            .on_click(move |_, _, cx| cx.open_url(&url)),
+                    ),
+            )
+    }
+
+    /// 直近のツール実行を最大12件だけ新しい順で並べる。
+    fn tool_list(&self, cx: &mut Context<Self>) -> Div {
+        let s = self.session();
+        let p = ds::theme(cx);
+        let active = s.display_status().is_active();
+        div()
+            .flex()
+            .flex_col()
+            .gap_3()
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .child(div().font_weight(FontWeight::SEMIBOLD).child("操作"))
+                    .child(
+                        Button::icon("activity-logs", Icon::Terminal, "ログを開く")
+                            .control_size(ControlSize::Small)
+                            .on_click(cx.listener(|this, _, _, cx| this.show_tab(Tab::Logs, cx))),
+                    ),
+            )
+            .child(
+                ds::card(cx).overflow_hidden().children(
+                    s.model
+                        .tool_activity()
+                        .iter()
+                        .rev()
+                        .take(12)
+                        .map(|activity| {
+                            let (label, tone, icon) = match activity.exit_code {
+                                Some(0) => ("完了".to_owned(), Tone::Success, Icon::Check),
+                                Some(code) => {
+                                    (format!("exit {code}"), Tone::Warning, Icon::Warning)
+                                }
+                                None if active => ("実行中".into(), Tone::Accent, Icon::Spinner),
+                                None => ("結果未確認".into(), Tone::Warning, Icon::Warning),
+                            };
+                            div()
+                                .px_4()
+                                .py_3()
+                                .border_b_1()
+                                .border_color(rgb(p.border))
+                                .flex()
+                                .items_center()
+                                .gap_3()
+                                .child(icon.view(p.tone(tone).0))
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .min_w_0()
+                                        .flex()
+                                        .flex_col()
+                                        .gap_1()
+                                        .child(
+                                            div()
+                                                .font_family(typography::MONO)
+                                                .text_size(px(12.))
+                                                .truncate()
+                                                .child(activity.command.clone()),
+                                        )
+                                        .child(caption(activity.cwd.clone(), cx).truncate()),
+                                )
+                                .child(ds::badge(label, tone, cx))
+                        }),
+                ),
+            )
+    }
+
+    /// 変更ファイル一覧。行クリックで Diff タブの該当ファイルへ飛ぶ。
+    fn diff_list(&self, cx: &mut Context<Self>) -> Div {
+        let s = self.session();
+        let p = ds::theme(cx);
+        let unreviewed = s.model.unreviewed_count();
+        div()
+            .flex()
+            .flex_col()
+            .gap_3()
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .child(div().font_weight(FontWeight::SEMIBOLD).child("変更"))
+                    .child(review_indicator(
+                        "review-count",
+                        s.model.diffs().len() - unreviewed,
+                        s.model.diffs().len(),
+                        cx,
+                    )),
+            )
+            .child(
+                ds::card(cx)
+                    .overflow_hidden()
+                    .children(s.model.diffs().iter().enumerate().map(|(index, diff)| {
+                        let (added, removed) = diff.line_counts();
+                        div()
+                            .px_4()
+                            .py_2()
+                            .border_b_1()
+                            .border_color(rgb(p.border))
+                            .flex()
+                            .items_center()
+                            .gap_3()
+                            .child(
+                                if diff.reviewed {
+                                    Icon::CircleCheck
+                                } else {
+                                    Icon::FileDiff
+                                }
+                                .view(if diff.reviewed {
+                                    p.success
+                                } else {
+                                    p.muted
+                                }),
+                            )
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .truncate()
+                                    .font_family(typography::MONO)
+                                    .text_size(px(12.))
+                                    .child(diff.path.clone()),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(12.))
+                                    .text_color(rgb(p.success))
+                                    .child(format!("+{added}")),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(12.))
+                                    .text_color(rgb(p.danger))
+                                    .child(format!("−{removed}")),
+                            )
+                            .child(
+                                Button::icon(
+                                    ("review-file", index),
+                                    Icon::ChevronRight,
+                                    format!("差分を開く · {}", diff.path),
+                                )
+                                .control_size(ControlSize::Small)
+                                .on_click(cx.listener(
+                                    move |this, _, _, cx| {
+                                        this.session_mut().select_diff(index);
+                                        this.show_tab(Tab::Diff, cx);
+                                    },
+                                )),
+                            )
+                    })),
+            )
+    }
+
     fn run_summary(&self, cx: &mut Context<Self>) -> Div {
-        let s = &self.sessions[self.selected];
+        let s = self.session();
         let p = ds::theme(cx);
         let queued = self.queue.position(&s.model.id);
-        let active = s.model.status.is_active();
+        let active = s.display_status().is_active();
         let unreviewed = s.model.unreviewed_count();
-        let finished = s.model.tools.values().filter(|code| code.is_some()).count();
+        let finished = s
+            .model
+            .tools()
+            .values()
+            .filter(|code| code.is_some())
+            .count();
         let failed = s
             .model
-            .tools
+            .tools()
             .values()
             .filter(|code| code.is_some_and(|code| code != 0))
             .count();
         let issue = matches!(
-            s.model.status,
+            s.model.status(),
             Status::Failed | Status::Disconnected | Status::Cancelled
         );
         ds::card(cx)
@@ -337,7 +316,7 @@ impl Workspace {
                                 if queued.is_some() {
                                     Icon::Clock
                                 } else {
-                                    status_icon(s.model.status)
+                                    status_icon(s.display_status())
                                 }
                                 .view(p.tone(s.state_tone()).0),
                             )
@@ -348,7 +327,7 @@ impl Workspace {
                                     s.state_label().into()
                                 },
                             ))
-                            .when(s.selected_backend > self.acp_agents.len(), |v| {
+                            .when(!self.picker_uses_workspace(s.selected_backend), |v| {
                                 v.child(ds::badge("デモ", Tone::Neutral, cx))
                             }),
                     )
@@ -368,9 +347,7 @@ impl Workspace {
                                         |this, _, window, cx| {
                                             this.cancel_queued(cx);
                                             window.focus(
-                                                &this.sessions[this.selected]
-                                                    .composer
-                                                    .focus_handle(cx),
+                                                &this.session().composer.focus_handle(cx),
                                                 cx,
                                             );
                                         },
@@ -388,7 +365,7 @@ impl Workspace {
                                     .on_click(cx.listener(|this, _, _, cx| this.review_next(cx))),
                                 )
                             })
-                            .when(!s.model.chat.is_empty(), |v| {
+                            .when(!s.model.chat().is_empty(), |v| {
                                 v.child(
                                     Button::icon(
                                         "overview-chat",
@@ -397,7 +374,7 @@ impl Workspace {
                                     )
                                     .on_click(cx.listener(
                                         |this, _, _, cx| {
-                                            this.sessions[this.selected].unread_result = false;
+                                            this.session_mut().unread_result = false;
                                             this.show_tab(Tab::Chat, cx);
                                         },
                                     )),
@@ -407,7 +384,7 @@ impl Workspace {
                                 v.child(
                                     Button::icon("overview-recovery", Icon::Terminal, "ログを確認")
                                         .on_click(cx.listener(|this, _, _, cx| {
-                                            this.sessions[this.selected].unread_result = false;
+                                            this.session_mut().unread_result = false;
                                             this.show_tab(Tab::Logs, cx);
                                         })),
                                 )
@@ -422,9 +399,7 @@ impl Workspace {
                                             )
                                             .on_click(
                                                 cx.listener(|this, _, window, cx| {
-                                                    let prompt = this.sessions[this.selected]
-                                                        .last_prompt
-                                                        .clone();
+                                                    let prompt = this.session().last_prompt.clone();
                                                     this.fill_prompt(&prompt, window, cx);
                                                 }),
                                             ),
@@ -443,36 +418,26 @@ impl Workspace {
                     .child(ds::indicator(
                         "summary-tools",
                         Icon::Terminal,
-                        format!("{finished} / {}", s.model.tools.len()),
-                        format!("完了した操作 {finished} / {}", s.model.tools.len()),
+                        format!("{finished} / {}", s.model.tools().len()),
+                        format!("完了した操作 {finished} / {}", s.model.tools().len()),
                         Tone::Neutral,
                         cx,
                     ))
                     .child(ds::indicator(
                         "summary-files",
                         Icon::FileDiff,
-                        s.model.diffs.len().to_string(),
-                        format!("変更ファイル {} 件", s.model.diffs.len()),
+                        s.model.diffs().len().to_string(),
+                        format!("変更ファイル {} 件", s.model.diffs().len()),
                         Tone::Neutral,
                         cx,
                     ))
-                    .child(ds::indicator(
+                    .child(review_indicator(
                         "summary-reviewed",
-                        Icon::CircleCheck,
-                        format!(
-                            "{} / {}",
-                            s.model.diffs.len() - unreviewed,
-                            s.model.diffs.len()
-                        ),
-                        format!(
-                            "確認済み {} / {} ファイル",
-                            s.model.diffs.len() - unreviewed,
-                            s.model.diffs.len()
-                        ),
-                        Tone::Neutral,
+                        s.model.diffs().len() - unreviewed,
+                        s.model.diffs().len(),
                         cx,
                     ))
-                    .when_some(s.elapsed, |v, elapsed| {
+                    .when_some(s.metrics.elapsed, |v, elapsed| {
                         v.child(ds::indicator(
                             "summary-time",
                             Icon::Clock,

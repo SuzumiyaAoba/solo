@@ -6,7 +6,8 @@ pub use thread::{
     MAX_THREAD_ACTIVITIES,
 };
 
-use crate::event::{Decoded, Envelope, Event, Usage, preview};
+use crate::event::{Decoded, Envelope, Event, SessionId, TurnId, Usage};
+use crate::text::preview;
 use std::collections::{HashMap, HashSet, VecDeque};
 
 pub const MAX_LOG_ROWS: usize = 1_000;
@@ -17,7 +18,6 @@ pub const MAX_TOOL_ACTIVITIES: usize = 256;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Status {
     Idle,
-    Connecting,
     Running,
     Cancelling,
     Completed,
@@ -30,7 +30,6 @@ impl Status {
     pub fn label(self) -> &'static str {
         match self {
             Self::Idle => "待機中",
-            Self::Connecting => "接続中",
             Self::Running => "受信中",
             Self::Cancelling => "停止要求中",
             Self::Completed => "完了",
@@ -39,8 +38,16 @@ impl Status {
             Self::Disconnected => "切断・結果未確認",
         }
     }
+    /// 「接続中」は UI 側の表示状態で、ドメインの status には存在しない。
     pub fn is_active(self) -> bool {
-        matches!(self, Self::Connecting | Self::Running | Self::Cancelling)
+        matches!(self, Self::Running | Self::Cancelling)
+    }
+}
+
+impl SessionProjection {
+    /// UI からの中断要求。実行系の確認を待つ Cancelling に進め、完了イベントで終了する。
+    pub fn request_cancel(&mut self) {
+        self.status = Status::Cancelling;
     }
 }
 
@@ -76,32 +83,32 @@ pub struct ToolActivity {
 }
 
 #[derive(Debug)]
-pub struct Session {
-    pub id: String,
-    pub title: String,
-    pub workspace: String,
-    pub status: Status,
-    pub reason: String,
-    pub turn_id: Option<String>,
-    pub usage: Usage,
-    pub provider: String,
-    pub chat: VecDeque<ChatBlock>,
-    pub chat_discarded: usize,
-    pub logs: VecDeque<LogRow>,
-    pub logs_discarded: usize,
-    pub diffs: Vec<Diff>,
-    pub tools: HashMap<String, Option<i32>>,
-    pub tool_activity: VecDeque<ToolActivity>,
-    pub threads: VecDeque<ExecutionThread>,
-    pub threads_discarded: usize,
-    pub thread_revision: u64,
-    pub last_sequence: u64,
-    pub accepted: u64,
-    pub duplicates: u64,
-    pub unknown: u64,
-    pub rejected: u64,
-    pub log_bytes: u64,
-    pub incomplete: bool,
+pub struct SessionProjection {
+    pub id: SessionId,
+    title: String,
+    workspace: String,
+    status: Status,
+    reason: String,
+    turn_id: Option<TurnId>,
+    usage: Usage,
+    provider: Option<String>,
+    chat: VecDeque<ChatBlock>,
+    chat_discarded: usize,
+    logs: VecDeque<LogRow>,
+    logs_discarded: usize,
+    diffs: Vec<Diff>,
+    tools: HashMap<String, Option<i32>>,
+    tool_activity: VecDeque<ToolActivity>,
+    threads: VecDeque<ExecutionThread>,
+    threads_discarded: usize,
+    thread_revision: u64,
+    last_sequence: u64,
+    accepted: u64,
+    duplicates: u64,
+    unknown: u64,
+    rejected: u64,
+    log_bytes: u64,
+    incomplete: bool,
     turn_open: bool,
     seen: HashSet<String>,
     agents: HashMap<String, bool>,
@@ -114,8 +121,8 @@ pub enum Apply {
     Rejected,
 }
 
-impl Session {
-    pub fn new(id: String, title: String) -> Self {
+impl SessionProjection {
+    pub fn new(id: SessionId, title: String) -> Self {
         Self {
             id,
             title,
@@ -124,7 +131,7 @@ impl Session {
             reason: String::new(),
             turn_id: None,
             usage: Usage::default(),
-            provider: "疑似プロバイダー".into(),
+            provider: None,
             chat: VecDeque::new(),
             chat_discarded: 0,
             logs: VecDeque::new(),
@@ -148,18 +155,123 @@ impl Session {
         }
     }
 
+    pub fn id(&self) -> &SessionId {
+        &self.id
+    }
+    pub fn title(&self) -> &str {
+        &self.title
+    }
+    pub fn workspace(&self) -> &str {
+        &self.workspace
+    }
+    pub fn status(&self) -> Status {
+        self.status
+    }
+    pub fn reason(&self) -> &str {
+        &self.reason
+    }
+    pub fn turn_id(&self) -> Option<&TurnId> {
+        self.turn_id.as_ref()
+    }
+    pub fn usage(&self) -> &Usage {
+        &self.usage
+    }
+    /// `provider / model` の表示名。ModelRequestStarted を受けるまでは None。
+    pub fn provider(&self) -> Option<&str> {
+        self.provider.as_deref()
+    }
+    pub fn chat(&self) -> &VecDeque<ChatBlock> {
+        &self.chat
+    }
+    pub fn chat_discarded(&self) -> usize {
+        self.chat_discarded
+    }
+    pub fn logs(&self) -> &VecDeque<LogRow> {
+        &self.logs
+    }
+    pub fn logs_discarded(&self) -> usize {
+        self.logs_discarded
+    }
+    pub fn diffs(&self) -> &[Diff] {
+        &self.diffs
+    }
+    pub fn tools(&self) -> &HashMap<String, Option<i32>> {
+        &self.tools
+    }
+    pub fn tool_activity(&self) -> &VecDeque<ToolActivity> {
+        &self.tool_activity
+    }
+    pub fn threads(&self) -> &VecDeque<ExecutionThread> {
+        &self.threads
+    }
+    pub fn threads_discarded(&self) -> usize {
+        self.threads_discarded
+    }
+    pub fn thread_revision(&self) -> u64 {
+        self.thread_revision
+    }
+    pub fn last_sequence(&self) -> u64 {
+        self.last_sequence
+    }
+    pub fn accepted(&self) -> u64 {
+        self.accepted
+    }
+    pub fn duplicates(&self) -> u64 {
+        self.duplicates
+    }
+    pub fn unknown(&self) -> u64 {
+        self.unknown
+    }
+    pub fn rejected(&self) -> u64 {
+        self.rejected
+    }
+    pub fn log_bytes(&self) -> u64 {
+        self.log_bytes
+    }
+    pub fn incomplete(&self) -> bool {
+        self.incomplete
+    }
+
+    /// SessionCreated/TurnStarted は turn が開く前に来るため turn_id 判定の例外。
+    fn is_turn_boundary(event: &Event) -> bool {
+        matches!(
+            event,
+            Event::SessionCreated { .. } | Event::TurnStarted { .. }
+        )
+    }
+
     pub fn apply(&mut self, envelope: Envelope) -> Apply {
+        let sequence = envelope.sequence;
+        let turn_id = envelope.turn_id.clone();
+        let gap = envelope.sequence != self.last_sequence + 1;
+        let event = match self.validate_envelope(envelope) {
+            Ok(event) => event,
+            Err(result) => return result,
+        };
+        if let Some(thread) = self.threads.back_mut()
+            && thread.record(&event)
+        {
+            self.thread_revision += 1;
+        }
+        self.accepted += 1;
+        self.apply_event(event, sequence, turn_id, gap);
+        Apply::Applied
+    }
+
+    /// 受け入れ可否だけを判断する。順序・turn・tool/agent の不整合を検査し、
+    /// 通れば解読済みの event を返す。拒否時は副作用(notice/reject/counter)もここ。
+    fn validate_envelope(&mut self, envelope: Envelope) -> Result<Event, Apply> {
         if envelope.session_id != self.id {
             self.reject("別セッションのイベントを拒否しました");
-            return Apply::Rejected;
+            return Err(Apply::Rejected);
         }
         if self.seen.contains(&envelope.event_id) {
             self.duplicates += 1;
-            return Apply::Duplicate;
+            return Err(Apply::Duplicate);
         }
         if envelope.sequence <= self.last_sequence || envelope.event_id.is_empty() {
             self.reject("順序が逆転した、または ID がないイベントを拒否しました");
-            return Apply::Rejected;
+            return Err(Apply::Rejected);
         }
         let gap = envelope.sequence != self.last_sequence + 1;
         if gap {
@@ -176,7 +288,7 @@ impl Session {
             Err(error) => {
                 self.incomplete = true;
                 self.reject(&format!("不正なイベント: {error}"));
-                return Apply::Rejected;
+                return Err(Apply::Rejected);
             }
         };
         let event = match decoded {
@@ -188,41 +300,48 @@ impl Session {
                     preview(&payload.to_string(), 384)
                 ));
                 self.accepted += 1;
-                return Apply::Applied;
+                return Err(Apply::Applied);
             }
             Decoded::Known(event) => event,
         };
         // 遅れて届いた旧 turn の delta/完了を、新しい turn へ混入させない。
-        if !matches!(
-            event,
-            Event::SessionCreated { .. } | Event::TurnStarted { .. }
-        ) && (envelope.turn_id != self.turn_id || self.turn_id.is_none())
+        if !Self::is_turn_boundary(&event)
+            && (envelope.turn_id != self.turn_id || self.turn_id.is_none())
         {
             self.reject("turn_id が現在の実行と一致しません");
-            return Apply::Rejected;
+            return Err(Apply::Rejected);
         }
         if matches!(event, Event::TurnStarted { .. }) && envelope.turn_id.is_none() {
             self.reject("TurnStarted に turn_id がありません");
-            return Apply::Rejected;
+            return Err(Apply::Rejected);
         }
         if matches!(event, Event::TurnStarted { .. }) && self.turn_open {
             self.incomplete = true;
             self.reject("実行中の turn を別の TurnStarted で上書きできません");
-            return Apply::Rejected;
+            return Err(Apply::Rejected);
         }
         if matches!(event, Event::SessionCreated { .. }) && self.accepted > 0 {
             self.reject("作成済みセッションへの SessionCreated を拒否しました");
-            return Apply::Rejected;
+            return Err(Apply::Rejected);
         }
-        if !matches!(
-            event,
-            Event::SessionCreated { .. } | Event::TurnStarted { .. }
-        ) && !self.turn_open
-        {
+        if !Self::is_turn_boundary(&event) && !self.turn_open {
             self.reject("終了済み turn へのイベントを拒否しました");
-            return Apply::Rejected;
+            return Err(Apply::Rejected);
         }
-        let invalid_tool = match &event {
+        if let Some(reason) = self
+            .invalid_tool_transition(&event)
+            .or_else(|| self.invalid_agent_transition(&event))
+        {
+            self.incomplete = true;
+            self.reject(reason);
+            return Err(Apply::Rejected);
+        }
+        Ok(event)
+    }
+
+    /// tool の開始/終了の対応が崩れている場合だけ理由を返す。
+    fn invalid_tool_transition(&self, event: &Event) -> Option<&'static str> {
+        let invalid = match event {
             Event::ToolStarted {
                 invocation_id,
                 agent_id,
@@ -238,12 +357,12 @@ impl Session {
             }
             _ => false,
         };
-        if invalid_tool {
-            self.incomplete = true;
-            self.reject("tool の開始・終了記録が一致しません");
-            return Apply::Rejected;
-        }
-        let invalid_agent = match &event {
+        invalid.then_some("tool の開始・終了記録が一致しません")
+    }
+
+    /// サブエージェントの開始/終了の対応が崩れている場合だけ理由を返す。
+    fn invalid_agent_transition(&self, event: &Event) -> Option<&'static str> {
+        let invalid = match event {
             Event::AgentStarted {
                 agent_id,
                 parent_agent_id,
@@ -258,17 +377,11 @@ impl Session {
             Event::AgentFinished { agent_id, .. } => self.agents.get(agent_id) != Some(&false),
             _ => false,
         };
-        if invalid_agent {
-            self.incomplete = true;
-            self.reject("サブエージェントの開始・終了記録が一致しません");
-            return Apply::Rejected;
-        }
-        if let Some(thread) = self.threads.back_mut()
-            && thread.record(&event)
-        {
-            self.thread_revision += 1;
-        }
-        self.accepted += 1;
+        invalid.then_some("サブエージェントの開始・終了記録が一致しません")
+    }
+
+    /// 受理済みイベントを表示モデルへ反映する。
+    fn apply_event(&mut self, event: Event, sequence: u64, turn_id: Option<TurnId>, gap: bool) {
         match event {
             Event::SessionCreated {
                 title,
@@ -289,26 +402,33 @@ impl Session {
                 self.tools.clear();
                 self.agents.clear();
                 self.tool_activity.clear();
-                self.turn_id = envelope.turn_id;
+                self.turn_id = turn_id;
                 if self.threads.len() == MAX_EXECUTION_THREADS {
                     self.threads.pop_front();
                     self.threads_discarded += 1;
                 }
                 self.threads.push_back(ExecutionThread::new(
-                    envelope.sequence,
+                    sequence,
                     self.turn_id.clone().expect("validated turn id"),
                     &prompt,
                 ));
                 self.thread_revision += 1;
-                self.append(
-                    Speaker::User,
-                    &format!("prompt-{}", envelope.sequence),
-                    &prompt,
-                );
+                self.append(Speaker::User, &format!("prompt-{sequence}"), &prompt);
             }
             Event::ModelRequestStarted {
                 provider, model, ..
-            } => self.provider = format!("{provider} / {model}"),
+            } => self.provider = Some(format!("{provider} / {model}")),
+            Event::ApprovalRequested { title, .. } => {
+                self.notice(format!("承認要求: {title}"));
+            }
+            Event::ApprovalDecided {
+                accepted, source, ..
+            } => {
+                self.notice(format!(
+                    "承認決定: {}({source})",
+                    if accepted { "許可" } else { "拒否" }
+                ));
+            }
             Event::MessageDelta { message_id, text } => {
                 self.append(Speaker::Assistant, &message_id, &text);
             }
@@ -320,7 +440,7 @@ impl Session {
             } => {
                 self.log_bytes += bytes;
                 self.log(LogRow {
-                    sequence: envelope.sequence,
+                    sequence,
                     level,
                     text,
                     offset: Some(offset),
@@ -400,7 +520,6 @@ impl Session {
             Event::TurnFailed { reason } => self.finish(Status::Failed, reason),
             Event::Disconnected { reason } => self.finish(Status::Disconnected, reason),
         }
-        Apply::Applied
     }
 
     pub fn transport_closed(&mut self) {
@@ -409,6 +528,24 @@ impl Session {
                 Status::Disconnected,
                 "完了イベントを受信する前に接続が閉じました".into(),
             );
+        }
+    }
+
+    /// TurnStarted 前(待機中)に transport が閉じた/失敗した場合に「結果未確認」へ落とす。
+    /// UI の connecting 表示から呼ぶ。実行が始まっていないので中断ではなく未確認。
+    pub fn disconnect_pending(&mut self, reason: impl Into<String>) {
+        if !self.turn_open && self.status == Status::Idle {
+            self.incomplete = true;
+            self.finish(Status::Disconnected, reason.into());
+        }
+    }
+
+    /// 実行と無関係な UI 遷移(ログイン完了・中止など)で待機へ戻す。
+    /// 実行経路ではなく表示の都合なので履歴には残さない。
+    pub fn reset_idle(&mut self) {
+        if !self.turn_open {
+            self.status = Status::Idle;
+            self.reason.clear();
         }
     }
 

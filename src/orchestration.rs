@@ -1,11 +1,13 @@
 //! 同じ workspace の実行を直列化する、UI に依存しない順番待ち。
+use crate::backend::BackendKind;
+use crate::event::SessionId;
 use std::collections::VecDeque;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct QueuedRun {
-    pub session_id: String,
-    /// 実行先選択の index(SessionView::selected_backend と同じ座標系)。
-    pub backend_index: usize,
+    pub session_id: SessionId,
+    /// 保存形式(QueueEntry)と同じ識別。表示側の選択 index は持たない。
+    pub backend: BackendKind,
     /// UI から届いた prompt。末尾改行を残すとキュー一覧のタイトルが崩れるので strip する。
     pub prompt: String,
 }
@@ -13,7 +15,7 @@ pub struct QueuedRun {
 #[derive(Debug, Default)]
 pub struct RunQueue {
     pending: VecDeque<QueuedRun>,
-    pub paused: bool,
+    paused: bool,
 }
 
 impl RunQueue {
@@ -26,10 +28,10 @@ impl RunQueue {
         true
     }
 
-    pub fn position(&self, session_id: &str) -> Option<usize> {
+    pub fn position(&self, session_id: &SessionId) -> Option<usize> {
         self.pending
             .iter()
-            .position(|run| run.session_id == session_id)
+            .position(|run| run.session_id == *session_id)
             .map(|n| n + 1)
     }
 
@@ -40,11 +42,20 @@ impl RunQueue {
         self.pending.is_empty()
     }
 
-    pub fn cancel(&mut self, session_id: &str) -> Option<QueuedRun> {
+    /// 失敗・切断時に呼出し側が止める。再開は set_paused(false)。
+    pub fn paused(&self) -> bool {
+        self.paused
+    }
+
+    pub fn set_paused(&mut self, paused: bool) {
+        self.paused = paused;
+    }
+
+    pub fn cancel(&mut self, session_id: &SessionId) -> Option<QueuedRun> {
         let index = self
             .pending
             .iter()
-            .position(|run| run.session_id == session_id)?;
+            .position(|run| run.session_id == *session_id)?;
         self.pending.remove(index)
     }
 
@@ -65,20 +76,4 @@ impl RunQueue {
         self.pending = entries.into_iter().collect();
         self.paused = paused;
     }
-}
-
-/// 最初の依頼をセッション名にする。日本語や絵文字の途中で切らない。
-pub fn task_title(prompt: &str) -> String {
-    use unicode_segmentation::UnicodeSegmentation;
-    let line = prompt
-        .lines()
-        .map(str::trim)
-        .find(|line| !line.is_empty())
-        .unwrap_or("新しいタスク");
-    let mut graphemes = line.graphemes(true);
-    let mut title = graphemes.by_ref().take(36).collect::<String>();
-    if graphemes.next().is_some() {
-        title.push('…');
-    }
-    title
 }

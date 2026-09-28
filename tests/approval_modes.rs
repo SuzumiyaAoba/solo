@@ -1,7 +1,7 @@
 use serde_json::json;
 use solo::{
     acp::AgentProfile,
-    approval::{ApprovalPlan, ApprovalRequest},
+    approval::{ApprovalPlan, ApprovalRequest, ApprovalSource, precheck_with},
     auto_approval::{self, Assessment, ReviewInput, Reviewer, Verdict},
     command_rules::{CommandInvocation, Decision, RuleList, RuleStore},
     config::{AppConfig, ApprovalMode, ApprovalSettings, AutoSettings, ConfigStore},
@@ -358,4 +358,111 @@ fn valid_config_roundtrips_without_erasing_other_workspaces() {
     config.approval.mode = ApprovalMode::Manual;
     store.set_approval(config.approval.clone()).unwrap();
     assert_eq!(store.load().unwrap().approval, config.approval);
+}
+
+#[test]
+fn tool_decisions_drive_precheck_and_respect_command_denies() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = RuleStore::at_path(dir.path().join("config.yml"), dir.path()).unwrap();
+    let call = |name: &str| ToolCall {
+        id: "call".into(),
+        name: name.into(),
+        arguments: json!({"command":"cargo test --locked","path":"src/lib.rs","old":"o","new":"n"}),
+    };
+    // 既定: read/search は read-only で許可、edit/exec は承認フローへ。
+    let rules = store.load().unwrap();
+    for name in ["read", "search"] {
+        assert_eq!(
+            precheck_with(&call(name), dir.path(), Some(&rules)),
+            Some((true, "read-only"))
+        );
+    }
+    for name in ["edit", "exec"] {
+        assert_eq!(precheck_with(&call(name), dir.path(), Some(&rules)), None);
+    }
+    // Ask は読み取り専用ツールでも承認フローへ回す。
+    store.set_tool("read", Some(Decision::Ask)).unwrap();
+    let rules = store.load().unwrap();
+    assert_eq!(precheck_with(&call("read"), dir.path(), Some(&rules)), None);
+    // ツールの Allow は確認を省略する。
+    store.set_tool("exec", Some(Decision::Allow)).unwrap();
+    let rules = store.load().unwrap();
+    assert_eq!(
+        precheck_with(&call("exec"), dir.path(), Some(&rules)),
+        Some((true, "rule"))
+    );
+    // ただしコマンドの Deny ルールに一致する exec は承認フローへ回し Deny を優先する。
+    let request = request(dir.path(), "exec");
+    store
+        .add(RuleList::Deny, request.command.clone().unwrap())
+        .unwrap();
+    let rules = store.load().unwrap();
+    assert_eq!(precheck_with(&call("exec"), dir.path(), Some(&rules)), None);
+    assert_eq!(request.plan(&store).unwrap(), ApprovalPlan::Deny("Deny"));
+    // edit の Deny はそのまま拒否。
+    store.set_tool("edit", Some(Decision::Deny)).unwrap();
+    let rules = store.load().unwrap();
+    assert_eq!(
+        precheck_with(&call("edit"), dir.path(), Some(&rules)),
+        Some((false, "rule"))
+    );
+    // rules が無い呼出しでは読み取り専用の既定だけが効く。
+    assert_eq!(
+        precheck_with(&call("read"), dir.path(), None),
+        Some((true, "read-only"))
+    );
+    assert_eq!(precheck_with(&call("exec"), dir.path(), None), None);
+}
+
+#[test]
+fn plan_replies_report_rule_or_bypass_sources() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = RuleStore::at_path(dir.path().join("config.yml"), dir.path()).unwrap();
+    // Manual/Auto は UI や判定モデルが返答を作るので reply() は None。
+    let request = request(dir.path(), "exec");
+    let plan = request.plan(&store).unwrap();
+    assert_eq!(plan, ApprovalPlan::Manual);
+    assert_eq!(plan.reply(), None);
+    assert_eq!(
+        ApprovalPlan::Auto(settings(ApprovalMode::Auto).auto).reply(),
+        None
+    );
+    // Allow ルールの即決は source=rule。
+    store
+        .add(RuleList::Allow, request.command.clone().unwrap())
+        .unwrap();
+    let reply = request.plan(&store).unwrap().reply().unwrap();
+    assert_eq!((reply.accepted, reply.source), (true, ApprovalSource::Rule));
+    // Deny ルールの拒否も source=rule。
+    let denied = ApprovalRequest::tool(
+        &ToolCall {
+            id: "call".into(),
+            name: "exec".into(),
+            arguments: json!({"command":"rm -f marker"}),
+        },
+        dir.path(),
+    );
+    store
+        .add(RuleList::Deny, denied.command.clone().unwrap())
+        .unwrap();
+    let reply = denied.plan(&store).unwrap().reply().unwrap();
+    assert_eq!(
+        (reply.accepted, reply.source),
+        (false, ApprovalSource::Rule)
+    );
+    // Bypass モードの即時許可は source=bypass。
+    store
+        .config_store()
+        .unwrap()
+        .set_approval(settings(ApprovalMode::Bypass))
+        .unwrap();
+    let reply = request.plan(&store).unwrap().reply().unwrap();
+    assert_eq!(
+        (reply.accepted, reply.source),
+        (true, ApprovalSource::Bypass)
+    );
+    assert_eq!(ApprovalSource::User.label(), "user");
+    assert_eq!(ApprovalSource::Auto.label(), "auto");
+    assert_eq!(ApprovalSource::Rule.label(), "rule");
+    assert_eq!(ApprovalSource::Bypass.label(), "bypass");
 }

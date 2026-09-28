@@ -1,7 +1,8 @@
-use super::smoke::until;
+use super::smoke::{env_pause_ms, preview_cycle, start_smoke_turn, until};
 use super::*;
 use gpui_kit::component::WindowExt;
-use solo::subscription_worker::Delivery as SubscriptionDelivery;
+use solo::codex_worker::Delivery as SubscriptionDelivery;
+use solo::event::{Event, Sequencer};
 use std::time::Duration;
 
 pub(super) async fn run(this: &WeakEntity<Workspace>, cx: &mut AsyncWindowContext) {
@@ -12,8 +13,8 @@ pub(super) async fn run(this: &WeakEntity<Workspace>, cx: &mut AsyncWindowContex
         .update_in(cx, |this, window, cx| {
             this.new_session(window, cx);
             let blocker = this.selected;
-            this.sessions[blocker].model.status = Status::Running;
-            this.sessions[blocker].backend = Some(Backend::Subscription);
+            start_smoke_turn(this.session_at_mut(blocker));
+            this.session_at_mut(blocker).backend = Some(Backend::Subscription);
             this.new_session(window, cx);
             let queued = this.selected;
             // 表示用 picker と異なっても、依頼元セッションの実行先を使う。
@@ -25,31 +26,31 @@ pub(super) async fn run(this: &WeakEntity<Workspace>, cx: &mut AsyncWindowContex
                 cx,
             );
             assert_eq!(
-                this.queue.position(&this.sessions[queued].model.id),
+                this.queue.position(&this.session_at(queued).model.id),
                 Some(1)
             );
-            assert!(this.sessions[queued].composer.read(cx).read_only);
-            assert!(!this.sessions[queued].composer.read(cx).can_submit);
+            assert!(this.session_at(queued).composer.read(cx).read_only);
+            assert!(!this.session_at(queued).composer.read(cx).can_submit);
             assert!(this.scenario_picker.read(cx).disabled);
             this.cancel_queued(cx);
             assert!(this.queue.is_empty());
             assert_eq!(
-                this.sessions[queued].composer.read(cx).value(cx),
+                this.session_at(queued).composer.read(cx).value(cx),
                 "順番待ちの日本語の依頼🙂\n完了条件を保持"
             );
-            assert!(!this.sessions[queued].composer.read(cx).read_only);
+            assert!(!this.session_at(queued).composer.read(cx).read_only);
             this.fill_prompt("追加の完了条件", window, cx);
             assert!(
-                this.sessions[queued]
+                this.session_at(queued)
                     .composer
                     .read(cx)
                     .value(cx)
                     .contains("保持\n\n追加の完了条件")
             );
-            this.sessions[queued].selected_backend = 1 + this.acp_agents.len();
+            this.session_at_mut(queued).selected_backend = 1 + this.acp_agents.len();
             this.enqueue(queued, "順番待ちから開始するデモ".into(), cx);
-            let id = this.sessions[blocker].model.id.clone();
-            let generation = this.sessions[blocker].stream_generation;
+            let id = this.session_at(blocker).model.id.clone();
+            let generation = this.session_at(blocker).exec.stream_generation;
             this.consume(
                 &id,
                 generation,
@@ -59,18 +60,19 @@ pub(super) async fn run(this: &WeakEntity<Workspace>, cx: &mut AsyncWindowContex
                 false,
                 cx,
             );
-            assert!(this.queue.paused, "a failed agent must pause queued work");
+            assert!(this.queue.paused(), "a failed agent must pause queued work");
             this.dispatch_queue(cx);
-            assert!(!this.sessions[queued].model.status.is_active());
-            this.sessions[blocker].model.status = Status::Idle;
-            this.sessions[blocker].backend = None;
-            this.sessions[blocker].unread_result = false;
-            this.queue.paused = false;
-            this.select_session(&this.sessions[blocker].model.id.clone(), window, cx);
+            assert!(!this.session_at(queued).display_status().is_active());
+            // Error で Failed になっているため、再開にはキューの停止解除だけ要る。
+            this.session_at_mut(blocker).model.reset_idle();
+            this.session_at_mut(blocker).backend = None;
+            this.session_at_mut(blocker).unread_result = false;
+            this.queue.set_paused(false);
+            this.select_session(&this.session_at(blocker).model.id.clone(), window, cx);
             this.dispatch_queue(cx);
-            assert!(this.sessions[queued].model.status.is_active());
+            assert!(this.session_at(queued).display_status().is_active());
             assert!(matches!(
-                this.sessions[queued].backend,
+                this.session_at(queued).backend,
                 Some(Backend::Mock(_))
             ));
             assert_eq!(
@@ -88,7 +90,7 @@ pub(super) async fn run(this: &WeakEntity<Workspace>, cx: &mut AsyncWindowContex
         "queued mock timed out",
         |cx| {
             this.update_in(cx, |this, _, _| {
-                !this.sessions[queued].model.status.is_active()
+                !this.session_at(queued).display_status().is_active()
             })
             .unwrap()
             .then_some(())
@@ -96,23 +98,23 @@ pub(super) async fn run(this: &WeakEntity<Workspace>, cx: &mut AsyncWindowContex
     )
     .await;
     this.update_in(cx, |this, window, cx| {
-        assert!(this.sessions[queued].needs_attention());
+        assert!(this.session_at(queued).needs_attention());
         assert_eq!(
-            this.sessions[queued].last_prompt,
+            this.session_at(queued).last_prompt,
             "順番待ちから開始するデモ"
         );
-        this.select_session(&this.sessions[blocker].model.id.clone(), window, cx);
+        this.select_session(&this.session_at(blocker).model.id.clone(), window, cx);
         this.next_attention(window, cx);
         assert_eq!(this.selected, queued);
-        assert!(this.sessions[queued].tab == Tab::Overview);
+        assert!(this.session_at(queued).view.tab == Tab::Overview);
         this.review_next(cx);
-        assert!(this.sessions[queued].tab == Tab::Diff);
-        let count = this.sessions[queued].model.unreviewed_count();
+        assert!(this.session_at(queued).view.tab == Tab::Diff);
+        let count = this.session_at(queued).model.unreviewed_count();
         assert!(count > 0);
         this.toggle_review(cx);
-        assert_eq!(this.sessions[queued].model.unreviewed_count(), count - 1);
+        assert_eq!(this.session_at(queued).model.unreviewed_count(), count - 1);
         this.toggle_review(cx);
-        assert_eq!(this.sessions[queued].model.unreviewed_count(), count);
+        assert_eq!(this.session_at(queued).model.unreviewed_count(), count);
         let count = this.sessions.len();
         this.request_close_session(window, cx);
         assert_eq!(
@@ -124,36 +126,34 @@ pub(super) async fn run(this: &WeakEntity<Workspace>, cx: &mut AsyncWindowContex
         this.show_tab(Tab::Overview, cx);
     })
     .unwrap();
-    for (scheme, width, height, tab) in [
-        (ColorScheme::Dark, 1240., 840., Tab::Overview),
-        (ColorScheme::Light, 820., 620., Tab::Overview),
-        (ColorScheme::Light, 820., 620., Tab::Diff),
-    ] {
-        this.update_in(cx, |this, window, cx| {
+    preview_cycle(
+        this,
+        cx,
+        [
+            (ColorScheme::Dark, 1240., 840., Tab::Overview),
+            (ColorScheme::Light, 820., 620., Tab::Overview),
+            (ColorScheme::Light, 820., 620., Tab::Diff),
+        ],
+        |this, window, cx, &(scheme, width, height, tab)| {
             ds::set_theme(scheme, cx);
             window.resize(size(px(width), px(height)));
             this.show_tab(tab, cx);
-        })
-        .unwrap();
-        println!(
-            "UX preview: {} / {} / {}",
-            scheme.label(),
-            width,
-            if tab == Tab::Overview {
-                "overview"
-            } else {
-                "review"
-            }
-        );
-        let pause = std::env::var("SOLO_UX_PREVIEW_MS")
-            .ok()
-            .and_then(|value| value.parse::<u64>().ok())
-            .unwrap_or(150)
-            .min(30_000);
-        cx.background_executor()
-            .timer(Duration::from_millis(pause))
-            .await;
-    }
+        },
+        |&(scheme, width, _, tab)| {
+            Some(format!(
+                "UX preview: {} / {} / {}",
+                scheme.label(),
+                width,
+                if tab == Tab::Overview {
+                    "overview"
+                } else {
+                    "review"
+                }
+            ))
+        },
+        Duration::from_millis(env_pause_ms("SOLO_UX_PREVIEW_MS", 150)),
+    )
+    .await;
     this.update_in(cx, |this, window, cx| {
         this.close_session(window, cx);
         assert_eq!(this.selected, blocker);
@@ -180,18 +180,27 @@ fn closed_acp_conversation(this: &mut Workspace, window: &mut Window, cx: &mut C
     });
     this.new_session(window, cx);
     let index = this.selected;
-    let session = &mut this.sessions[index];
+    // acp_agents を読むため sessions の借用をフィールド分割する。
+    let sessions = &mut this.sessions;
+    let session = &mut sessions[index];
     session.selected_backend = this.acp_agents.len();
     session.backend = Some(Backend::Acp(id.into()));
-    session.model.last_sequence = 4;
-    session.model.turn_id = Some("previous-turn".into());
-    session.model.status = Status::Completed;
+    // 終了済みターンの履歴(last_sequence/turn_id)をイベント注入で再現する。
+    // 新規セッションなので sequence は 1 から始める(先頭欠落は incomplete 扱いになる)。
+    let mut seq = Sequencer::new(session.model.id.clone(), 0, "previous-turn".to_owned());
+    session.model.apply(seq.next(Event::TurnStarted {
+        prompt: "smoke".into(),
+    }));
+    session.model.apply(seq.next(Event::TurnCompleted {
+        reason: "smoke".into(),
+        usage: Default::default(),
+    }));
     this.start_selected(index, "続きの依頼を保持".into(), cx);
     assert!(this.message.contains("新しいチャンネル"));
-    assert!(this.sessions[index].controller.is_none());
-    assert_eq!(this.sessions[index].model.status, Status::Completed);
+    assert!(this.session_at(index).exec.controller.is_none());
+    assert_eq!(this.session_at(index).model.status(), Status::Completed);
     assert_eq!(
-        this.sessions[index].composer.read(cx).value(cx),
+        this.session_at(index).composer.read(cx).value(cx),
         "続きの依頼を保持"
     );
     this.acp_agents.pop();
@@ -211,12 +220,13 @@ fn login_lifecycle(this: &mut Workspace, window: &mut Window, cx: &mut Context<W
             Status::Failed,
         ),
     ] {
-        let session = &mut this.sessions[this.selected];
-        session.model.status = Status::Connecting;
+        let session = this.session_mut();
+        // 「接続中」はドメイン status ではなく UI の表示状態なので exec 側で立てる。
+        session.exec.connecting = true;
         session.login_only = true;
-        session.stream_generation += 1;
+        session.exec.stream_generation += 1;
         let id = session.model.id.clone();
-        let generation = session.stream_generation;
+        let generation = session.exec.stream_generation;
         this.sync_controls(cx);
         assert!(this.workspace_busy());
         assert!(this.scenario_picker.read(cx).disabled);
@@ -229,9 +239,9 @@ fn login_lifecycle(this: &mut Workspace, window: &mut Window, cx: &mut Context<W
             true,
             cx,
         );
-        assert_eq!(
-            this.sessions[this.selected].model.status,
-            Status::Connecting
+        assert!(
+            this.session().exec.connecting,
+            "stale stream touched the live run"
         );
         this.consume(
             &id,
@@ -240,8 +250,8 @@ fn login_lifecycle(this: &mut Workspace, window: &mut Window, cx: &mut Context<W
             true,
             cx,
         );
-        let session = &this.sessions[this.selected];
-        assert_eq!(session.model.status, expected);
+        let session = this.session();
+        assert_eq!(session.model.status(), expected);
         assert_eq!(
             session.backend, None,
             "logging in must not bind a new conversation"
@@ -252,12 +262,37 @@ fn login_lifecycle(this: &mut Workspace, window: &mut Window, cx: &mut Context<W
         assert!(!this.scenario_picker.read(cx).disabled);
     }
 
-    for status in [Status::Cancelling, Status::Completed] {
-        let session = &mut this.sessions[this.selected];
-        session.model.status = status;
-        session.model.provider = "previous provider".into();
-        let id = session.model.id.clone();
-        let generation = session.stream_generation;
+    for expected in [Status::Cancelling, Status::Completed] {
+        {
+            let session = this.session_mut();
+            let mut seq = Sequencer::new(
+                session.model.id.clone(),
+                session.model.last_sequence(),
+                format!("late-login-{}", session.model.last_sequence() + 1),
+            );
+            session.model.apply(seq.next(Event::TurnStarted {
+                prompt: "smoke".into(),
+            }));
+            session.model.apply(seq.next(Event::ModelRequestStarted {
+                provider: "previous".into(),
+                model: "provider".into(),
+                request_id: "smoke".into(),
+            }));
+            if expected == Status::Cancelling {
+                session.model.request_cancel();
+                // turn を閉じて次のイテレーションが TurnStarted を受け付けるようにする。
+                session.model.apply(seq.next(Event::TurnCancelled {
+                    reason: "smoke".into(),
+                }));
+            } else {
+                session.model.apply(seq.next(Event::TurnCompleted {
+                    reason: "smoke".into(),
+                    usage: Default::default(),
+                }));
+            }
+        }
+        let id = this.session().model.id.clone();
+        let generation = this.session().exec.stream_generation;
         this.consume(
             &id,
             generation,
@@ -270,20 +305,20 @@ fn login_lifecycle(this: &mut Workspace, window: &mut Window, cx: &mut Context<W
             false,
             cx,
         );
-        let session = &this.sessions[this.selected];
+        let session = this.session();
         assert!(
             session.login.is_none(),
             "late login must not reopen a cancelled or completed task"
         );
-        assert_eq!(session.model.provider, "previous provider");
+        assert_eq!(session.model.provider(), Some("previous / provider"));
     }
 
-    let session = &mut this.sessions[this.selected];
+    let session = this.session_mut();
     session.backend = Some(Backend::Subscription);
-    session.model.status = Status::Connecting;
+    session.exec.connecting = true;
     session.login_only = true;
     let id = session.model.id.clone();
-    let generation = session.stream_generation;
+    let generation = session.exec.stream_generation;
     this.consume(
         &id,
         generation,
@@ -293,20 +328,14 @@ fn login_lifecycle(this: &mut Workspace, window: &mut Window, cx: &mut Context<W
         true,
         cx,
     );
-    assert_eq!(
-        this.sessions[this.selected].backend,
-        Some(Backend::Subscription)
-    );
+    assert_eq!(this.session().backend, Some(Backend::Subscription));
     assert!(
         this.scenario_picker.read(cx).disabled,
         "login must preserve an existing conversation backend"
     );
     this.scenario(Scenario::Demo, cx);
-    assert_eq!(this.sessions[this.selected].model.status, Status::Idle);
-    assert_eq!(
-        this.sessions[this.selected].backend,
-        Some(Backend::Subscription)
-    );
+    assert_eq!(this.session().model.status(), Status::Idle);
+    assert_eq!(this.session().backend, Some(Backend::Subscription));
     this.close_session(window, cx);
     println!(
         "Login smoke OK: completion, cancellation, failure, stale stream, late login and conversation backend"

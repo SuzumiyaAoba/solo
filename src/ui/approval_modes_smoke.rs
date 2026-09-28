@@ -1,4 +1,4 @@
-use super::smoke::{approval_preview_pause, inject_approval, until};
+use super::smoke::{approval_preview_pause, inject_approval, start_smoke_turn, until};
 use super::*;
 use solo::auto_approval::{ReviewInput, Verdict};
 use std::{
@@ -59,14 +59,17 @@ fn config(mode: ApprovalMode, model: &str) -> ApprovalSettings {
         },
     }
 }
-async fn wait_answer(answer: &async_channel::Receiver<bool>, cx: &mut AsyncWindowContext) -> bool {
+async fn wait_answer(
+    answer: &async_channel::Receiver<ApprovalReply>,
+    cx: &mut AsyncWindowContext,
+) -> bool {
     until(
         cx,
         Duration::from_secs(5),
         Duration::from_millis(20),
         "approval did not complete",
         |_| match answer.try_recv() {
-            Ok(answer) => Some(answer),
+            Ok(answer) => Some(answer.accepted),
             Err(async_channel::TryRecvError::Closed) => {
                 panic!("approval reply closed unexpectedly")
             }
@@ -83,7 +86,7 @@ async fn wait_manual(this: &WeakEntity<Workspace>, cx: &mut AsyncWindowContext) 
         "manual fallback did not appear",
         |cx| {
             this.update_in(cx, |this, _, _| {
-                this.sessions[this.selected]
+                this.session()
                     .approval
                     .as_ref()
                     .is_some_and(|request| !request.is_reviewing())
@@ -102,8 +105,8 @@ pub(super) async fn check(this: &WeakEntity<Workspace>, cx: &mut AsyncWindowCont
             let old = this.approval_reviewer.clone();
             this.approval_reviewer = fake.clone();
             this.new_session(window, cx);
-            this.sessions[this.selected].model.status = Status::Running;
-            this.sessions[this.selected].last_prompt = "テストを実行してください".into();
+            start_smoke_turn(this.session_mut());
+            this.session_mut().last_prompt = "テストを実行してください".into();
             let request = ApprovalRequest::tool(
                 &solo::harness::ToolCall {
                     id: "mode-smoke".into(),
@@ -150,7 +153,7 @@ pub(super) async fn check(this: &WeakEntity<Workspace>, cx: &mut AsyncWindowCont
         ));
         this.update_in(cx, |this, _, cx| {
             assert!(
-                this.sessions[this.selected]
+                this.session()
                     .approval
                     .as_ref()
                     .unwrap()

@@ -13,6 +13,7 @@ pub enum Icon {
     ChevronDown,
     ChevronRight,
     ArrowRight,
+    ArrowLeft,
     Search,
     Grid,
     Layers,
@@ -52,7 +53,7 @@ pub enum Icon {
     OpenAi,
 }
 impl Icon {
-    pub const ALL: [Self; 44] = [
+    pub const ALL: [Self; 45] = [
         Self::Plus,
         Self::Check,
         Self::Minus,
@@ -60,6 +61,7 @@ impl Icon {
         Self::ChevronDown,
         Self::ChevronRight,
         Self::ArrowRight,
+        Self::ArrowLeft,
         Self::Search,
         Self::Grid,
         Self::Layers,
@@ -107,6 +109,7 @@ impl Icon {
             Self::ChevronDown => "chevron-down",
             Self::ChevronRight => "chevron-right",
             Self::ArrowRight => "arrow-right",
+            Self::ArrowLeft => "arrow-left",
             Self::Search => "search",
             Self::Grid => "grid",
             Self::Layers => "layers",
@@ -156,6 +159,7 @@ impl Icon {
             Self::ChevronDown => N::ChevronDown,
             Self::ChevronRight => N::ChevronRight,
             Self::ArrowRight => N::ArrowRight,
+            Self::ArrowLeft => N::ArrowLeft,
             Self::Search => N::Search,
             Self::Grid => N::LayoutGrid,
             Self::Layers => N::Layers,

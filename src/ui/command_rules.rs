@@ -1,4 +1,4 @@
-use super::approvals::command_block;
+use super::approvals::{command_block, rule_store};
 use super::*;
 use gpui_kit::component::{
     Sizable, WindowExt,
@@ -37,9 +37,8 @@ impl CommandRuleEditor {
     ) -> Self {
         let draft = cx.new(|cx| Composer::multiline(window, cx).placeholder("例: cargo test *"));
         let mode_picker = cx.new(|cx| Select::new(["Manual", "Bypass", "Auto"], 0, window, cx));
-        let auto_model = cx.new(|cx| {
-            Composer::new(window, cx).placeholder(solo::codex_subscription::DEFAULT_MODEL)
-        });
+        let auto_model =
+            cx.new(|cx| Composer::new(window, cx).placeholder(solo::codex::DEFAULT_MODEL));
         let mut subscriptions = vec![cx.subscribe(
             &mode_picker,
             |this, _, selected: &ds::SelectionChanged, cx| {
@@ -92,10 +91,7 @@ impl CommandRuleEditor {
         this
     }
     pub(super) fn reload(&mut self, cx: &mut Context<Self>) {
-        match self
-            .store
-            .as_ref()
-            .map_err(Clone::clone)
+        match rule_store(&self.store)
             .and_then(|store| store.approval_policy().map_err(|error| error.to_string()))
         {
             Ok((approval, rules)) => {
@@ -132,7 +128,7 @@ impl CommandRuleEditor {
         cx.notify();
     }
     pub(super) fn add(&mut self, cx: &mut Context<Self>) {
-        let result = self.store.as_ref().map_err(Clone::clone).and_then(|store| {
+        let result = rule_store(&self.store).and_then(|store| {
             let text = self.draft.read(cx).value(cx).to_string();
             let mut rule = if let Some(old) = &self.editing {
                 let mut rule = old.clone();
@@ -152,17 +148,14 @@ impl CommandRuleEditor {
             }
             .map_err(|error| error.to_string())
         });
-        match result {
-            Ok(()) => {
-                self.cancel_edit(cx);
-                self.reload(cx);
-                super::approvals::changed(cx);
-            }
-            Err(error) => {
-                self.error = Some(error);
-                cx.notify();
-            }
-        }
+        self.applied(
+            result,
+            |this, cx| {
+                this.cancel_edit(cx);
+                this.reload(cx);
+            },
+            cx,
+        );
     }
     pub(super) fn edit(&mut self, rule: CommandRule, cx: &mut Context<Self>) {
         self.draft
@@ -184,53 +177,53 @@ impl CommandRuleEditor {
         decision: Option<Decision>,
         cx: &mut Context<Self>,
     ) {
-        let result = self.store.as_ref().map_err(Clone::clone).and_then(|store| {
+        let result = rule_store(&self.store).and_then(|store| {
             store
                 .set_tool(tool, decision)
                 .map_err(|error| error.to_string())
         });
-        match result {
-            Ok(()) => {
-                self.rules.set_tool(tool, decision);
-                self.error = None;
-                super::approvals::changed(cx);
-            }
-            Err(error) => {
-                self.error = Some(error);
-            }
-        }
-        cx.notify();
+        self.applied(
+            result,
+            |this, cx| {
+                this.rules.set_tool(tool, decision);
+                this.error = None;
+                cx.notify();
+            },
+            cx,
+        );
     }
     pub(super) fn remove(&mut self, command: &CommandRule, cx: &mut Context<Self>) {
-        let result = self.store.as_ref().map_err(Clone::clone).and_then(|store| {
+        let result = rule_store(&self.store).and_then(|store| {
             store
                 .remove(self.list, command)
                 .map_err(|error| error.to_string())
         });
-        match result {
-            Ok(()) => {
-                self.reload(cx);
-                super::approvals::changed(cx);
-            }
-            Err(error) => {
-                self.error = Some(error);
-                cx.notify();
-            }
-        }
+        self.applied(result, Self::reload, cx);
     }
     pub(super) fn save_settings(&mut self, cx: &mut Context<Self>) {
         let mut settings = self.approval.clone();
         settings.auto.model = self.auto_model.read(cx).value(cx).trim().to_owned();
-        let result = self.store.as_ref().map_err(Clone::clone).and_then(|store| {
+        let result = rule_store(&self.store).and_then(|store| {
             store
                 .config_store()
                 .ok_or_else(|| "承認モードは config.yml に保存してください".to_owned())?
                 .set_approval(settings)
                 .map_err(|error| error.to_string())
         });
+        self.applied(result, Self::reload, cx);
+    }
+
+    /// ルール保存後の共通処理。成功なら画面を再反映してポリシー変更を通知し、
+    /// 失敗ならエラーを保持する。
+    fn applied(
+        &mut self,
+        result: Result<(), String>,
+        refresh: impl FnOnce(&mut Self, &mut Context<Self>),
+        cx: &mut Context<Self>,
+    ) {
         match result {
             Ok(()) => {
-                self.reload(cx);
+                refresh(self, cx);
                 super::approvals::changed(cx);
             }
             Err(error) => {
@@ -239,203 +232,18 @@ impl CommandRuleEditor {
             }
         }
     }
-    fn tools_view(&self, cx: &mut Context<Self>) -> AnyElement {
-        let p = ds::theme(cx);
-        div()
-            .id("tool-rules")
-            .flex_1()
-            .min_h_0()
-            .overflow_y_scroll()
-            .flex()
-            .flex_col()
-            .gap_3()
-            .child(
-                ds::card(cx)
-                    .p_4()
-                    .gap_3()
-                    .child(
-                        div()
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .child("基本ツール · このプロジェクト"),
-                    )
-                    .child(
-                        div()
-                            .text_size(px(12.))
-                            .text_color(rgb(p.secondary))
-                            .child("Allow は確認を省略し、Deny は常に拒否、Ask はコマンドルールと同じ承認確認に戻します。既定はツールごとの安全な初期値です。"),
-                    )
-                    .children(TOOL_NAMES.iter().enumerate().map(|(index, name)| {
-                        let decision = self.rules.tool_decision(name);
-                        let default = if is_read_only_tool(name) { "許可" } else { "確認" };
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap_3()
-                            .child(
-                                div()
-                                    .w(px(56.))
-                                    .flex_shrink_0()
-                                    .font_weight(FontWeight::MEDIUM)
-                                    .child(*name),
-                            )
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .min_w_0()
-                                    .text_size(px(12.))
-                                    .text_color(rgb(p.secondary))
-                                    .truncate()
-                                    .child(format!("{default} · {}", tool_description(name))),
-                            )
-                            .child(
-                                div()
-                                    .w(px(148.))
-                                    .flex_shrink_0()
-                                    .child(self.tool_pickers[index].clone()),
-                            )
-                            .when_some(decision, |v, decision| {
-                                v.child(ds::badge(
-                                    match decision {
-                                        Decision::Allow => "許可",
-                                        Decision::Deny => "拒否",
-                                        Decision::Ask => "確認",
-                                    },
-                                    match decision {
-                                        Decision::Allow => Tone::Success,
-                                        Decision::Deny => Tone::Danger,
-                                        Decision::Ask => Tone::Neutral,
-                                    },
-                                    cx,
-                                ))
-                            })
-                    })),
-            )
-            .when_some(self.error.clone(), |v, error| {
-                v.child(ds::alert("ツール設定を保存できません", error, Tone::Danger, cx))
-            })
-            .into_any_element()
-    }
-    fn settings_view(&self, cx: &mut Context<Self>) -> AnyElement {
-        let p = ds::theme(cx);
-        let description = match self.approval.mode {
-            ApprovalMode::Manual => "リストで決まらない要求を、実行前に確認します。",
-            ApprovalMode::Bypass => {
-                "承認確認と Allow / Deny の判定を省略し、すべての要求を許可します。"
-            }
-            ApprovalMode::Auto => {
-                "Deny / Allow を優先し、未登録の要求を指定モデルで判定します。判断できない場合は手動確認に戻ります。"
-            }
-        };
-        div()
-            .id("approval-settings-form")
-            .flex_1()
-            .min_h_0()
-            .overflow_y_scroll()
-            .flex()
-            .flex_col()
-            .gap_4()
-            .child(
-                ds::card(cx)
-                    .p_4()
-                    .gap_3()
-                    .child(
-                        div()
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .child("承認モード · 全プロジェクト共通"),
-                    )
-                    .child(self.mode_picker.clone())
-                    .child(
-                        div()
-                            .text_size(px(12.))
-                            .text_color(rgb(p.secondary))
-                            .child(description),
-                    )
-                    .child(
-                        div()
-                            .font_weight(FontWeight::MEDIUM)
-                            .child("Auto の判定モデル"),
-                    )
-                    .child(self.auto_model.clone())
-                    .child(
-                        div()
-                            .text_size(px(11.))
-                            .text_color(rgb(p.muted))
-                            .child(format!(
-                                "ChatGPT ログインで利用できるモデル名 · 制限時間 {} 秒",
-                                self.approval.auto.timeout_seconds,
-                            )),
-                    )
-                    .child(
-                        Button::new("save-approval-settings", "承認設定を保存")
-                            .variant(ButtonVariant::Primary)
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.save_settings(cx);
-                                if this.error.is_none() {
-                                    window.push_notification("承認設定を保存しました", cx);
-                                }
-                            })),
-                    ),
-            )
-            .when_some(self.error.clone(), |v, error| {
-                v.child(ds::alert("設定を保存できません", error, Tone::Danger, cx))
-            })
-            .when_some(self.store.as_ref().ok(), |v, store| {
-                v.child(
-                    div()
-                        .text_size(px(11.))
-                        .text_color(rgb(p.muted))
-                        .child(format!("設定ファイル: {}", store.path().display())),
-                )
-            })
-            .into_any_element()
-    }
-}
-impl Render for CommandRuleEditor {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    /// コマンドルールページ。登録フォームと Allow/Deny リストの編集。
+    fn commands_view(&self, cx: &mut Context<Self>) -> AnyElement {
         let p = ds::theme(cx);
         let entries = self.rules.entries(self.list);
         let list = self.list;
-        let navigation = TabBar::new("approval-settings-pages")
-            .segmented()
-            .small()
-            .selected_index(match self.page {
-                Page::Commands => 0,
-                Page::Tools => 1,
-                Page::Settings => 2,
-            })
-            .child(KitTab::new().label("コマンドルール"))
-            .child(KitTab::new().label("ツール"))
-            .child(KitTab::new().label("承認モード"))
-            .on_click(cx.listener(|this, index: &usize, _, cx| {
-                this.page = match *index {
-                    1 => Page::Tools,
-                    2 => Page::Settings,
-                    _ => Page::Commands,
-                };
-                cx.notify();
-            }));
-        if self.page != Page::Commands {
-            return div()
-                .size_full()
-                .flex()
-                .flex_col()
-                .min_h_0()
-                .gap_3()
-                .child(navigation)
-                .child(if self.page == Page::Tools {
-                    self.tools_view(cx)
-                } else {
-                    self.settings_view(cx)
-                })
-                .into_any_element();
-        }
         div()
-            .size_full()
+            .id("command-rules-page")
+            .flex_1()
+            .min_h_0()
             .flex()
             .flex_col()
-            .min_h_0()
             .gap_3()
-            .child(navigation)
             .child(
                 div()
                     .flex()
@@ -771,6 +579,193 @@ impl Render for CommandRuleEditor {
                         )
                     }),
             )
+            .into_any_element()
+    }
+
+    fn tools_view(&self, cx: &mut Context<Self>) -> AnyElement {
+        let p = ds::theme(cx);
+        div()
+            .id("tool-rules")
+            .flex_1()
+            .min_h_0()
+            .overflow_y_scroll()
+            .flex()
+            .flex_col()
+            .gap_3()
+            .child(
+                ds::card(cx)
+                    .p_4()
+                    .gap_3()
+                    .child(
+                        div()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .child("基本ツール · このプロジェクト"),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(12.))
+                            .text_color(rgb(p.secondary))
+                            .child("Allow は確認を省略し、Deny は常に拒否、Ask はコマンドルールと同じ承認確認に戻します。既定はツールごとの安全な初期値です。"),
+                    )
+                    .children(TOOL_NAMES.iter().enumerate().map(|(index, name)| {
+                        let decision = self.rules.tool_decision(name);
+                        let default = if is_read_only_tool(name) { "許可" } else { "確認" };
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_3()
+                            .child(
+                                div()
+                                    .w(px(56.))
+                                    .flex_shrink_0()
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .child(*name),
+                            )
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .text_size(px(12.))
+                                    .text_color(rgb(p.secondary))
+                                    .truncate()
+                                    .child(format!("{default} · {}", tool_description(name))),
+                            )
+                            .child(
+                                div()
+                                    .w(px(148.))
+                                    .flex_shrink_0()
+                                    .child(self.tool_pickers[index].clone()),
+                            )
+                            .when_some(decision, |v, decision| {
+                                v.child(ds::badge(
+                                    match decision {
+                                        Decision::Allow => "許可",
+                                        Decision::Deny => "拒否",
+                                        Decision::Ask => "確認",
+                                    },
+                                    match decision {
+                                        Decision::Allow => Tone::Success,
+                                        Decision::Deny => Tone::Danger,
+                                        Decision::Ask => Tone::Neutral,
+                                    },
+                                    cx,
+                                ))
+                            })
+                    })),
+            )
+            .when_some(self.error.clone(), |v, error| {
+                v.child(ds::alert("ツール設定を保存できません", error, Tone::Danger, cx))
+            })
+            .into_any_element()
+    }
+    fn settings_view(&self, cx: &mut Context<Self>) -> AnyElement {
+        let p = ds::theme(cx);
+        let description = match self.approval.mode {
+            ApprovalMode::Manual => "リストで決まらない要求を、実行前に確認します。",
+            ApprovalMode::Bypass => {
+                "承認確認と Allow / Deny の判定を省略し、すべての要求を許可します。"
+            }
+            ApprovalMode::Auto => {
+                "Deny / Allow を優先し、未登録の要求を指定モデルで判定します。判断できない場合は手動確認に戻ります。"
+            }
+        };
+        div()
+            .id("approval-settings-form")
+            .flex_1()
+            .min_h_0()
+            .overflow_y_scroll()
+            .flex()
+            .flex_col()
+            .gap_4()
+            .child(
+                ds::card(cx)
+                    .p_4()
+                    .gap_3()
+                    .child(
+                        div()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .child("承認モード · 全プロジェクト共通"),
+                    )
+                    .child(self.mode_picker.clone())
+                    .child(
+                        div()
+                            .text_size(px(12.))
+                            .text_color(rgb(p.secondary))
+                            .child(description),
+                    )
+                    .child(
+                        div()
+                            .font_weight(FontWeight::MEDIUM)
+                            .child("Auto の判定モデル"),
+                    )
+                    .child(self.auto_model.clone())
+                    .child(
+                        div()
+                            .text_size(px(11.))
+                            .text_color(rgb(p.muted))
+                            .child(format!(
+                                "ChatGPT ログインで利用できるモデル名 · 制限時間 {} 秒",
+                                self.approval.auto.timeout_seconds,
+                            )),
+                    )
+                    .child(
+                        Button::new("save-approval-settings", "承認設定を保存")
+                            .variant(ButtonVariant::Primary)
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.save_settings(cx);
+                                if this.error.is_none() {
+                                    window.push_notification("承認設定を保存しました", cx);
+                                }
+                            })),
+                    ),
+            )
+            .when_some(self.error.clone(), |v, error| {
+                v.child(ds::alert("設定を保存できません", error, Tone::Danger, cx))
+            })
+            .when_some(self.store.as_ref().ok(), |v, store| {
+                v.child(
+                    div()
+                        .text_size(px(11.))
+                        .text_color(rgb(p.muted))
+                        .child(format!("設定ファイル: {}", store.path().display())),
+                )
+            })
+            .into_any_element()
+    }
+}
+impl Render for CommandRuleEditor {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let navigation = TabBar::new("approval-settings-pages")
+            .segmented()
+            .small()
+            .selected_index(match self.page {
+                Page::Commands => 0,
+                Page::Tools => 1,
+                Page::Settings => 2,
+            })
+            .child(KitTab::new().label("コマンドルール"))
+            .child(KitTab::new().label("ツール"))
+            .child(KitTab::new().label("承認モード"))
+            .on_click(cx.listener(|this, index: &usize, _, cx| {
+                this.page = match *index {
+                    1 => Page::Tools,
+                    2 => Page::Settings,
+                    _ => Page::Commands,
+                };
+                cx.notify();
+            }));
+        div()
+            .size_full()
+            .flex()
+            .flex_col()
+            .min_h_0()
+            .gap_3()
+            .child(navigation)
+            .child(match self.page {
+                Page::Commands => self.commands_view(cx),
+                Page::Tools => self.tools_view(cx),
+                Page::Settings => self.settings_view(cx),
+            })
             .into_any_element()
     }
 }

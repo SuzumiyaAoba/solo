@@ -3,9 +3,13 @@ mod common;
 use common::{complete, delta, event, session};
 use serde_json::json;
 use solo::{
-    event::{Decoded, Envelope, Event, Usage},
+    event::{Decoded, Envelope, Event, SessionId, TurnId, Usage},
     projection::{Apply, CHAT_BLOCK_BYTES, Diff, DiffKind, MAX_CHAT_BLOCKS, MAX_LOG_ROWS, Status},
 };
+
+fn turn(s: &str) -> TurnId {
+    TurnId::from(s.to_owned())
+}
 
 #[test]
 fn envelope_roundtrip_preserves_related_ids() {
@@ -27,9 +31,9 @@ fn unknown_kind_preserves_payload_and_is_visible() {
     }
     let mut session = session();
     session.apply(envelope);
-    assert_eq!(session.unknown, 1);
-    assert!(session.logs.back().unwrap().text.contains("future_event"));
-    assert_eq!(session.status, Status::Running);
+    assert_eq!(session.unknown(), 1);
+    assert!(session.logs().back().unwrap().text.contains("future_event"));
+    assert_eq!(session.status(), Status::Running);
 }
 
 #[test]
@@ -38,9 +42,9 @@ fn newer_schema_cannot_complete_a_turn() {
     let mut terminal = complete(2);
     terminal.schema_version = 2;
     session.apply(terminal);
-    assert_eq!(session.unknown, 1);
+    assert_eq!(session.unknown(), 1);
     session.transport_closed();
-    assert_eq!(session.status, Status::Disconnected);
+    assert_eq!(session.status(), Status::Disconnected);
 }
 
 #[test]
@@ -50,7 +54,7 @@ fn malformed_known_event_is_rejected() {
     malformed.payload = json!({"type":"message_delta", "text":42});
     assert_eq!(session.apply(malformed), Apply::Rejected);
     session.apply(complete(3));
-    assert_eq!(session.status, Status::Disconnected);
+    assert_eq!(session.status(), Status::Disconnected);
 }
 
 #[test]
@@ -61,8 +65,8 @@ fn duplicate_id_never_appends_twice_even_with_new_sequence() {
     let mut duplicate = envelope;
     duplicate.sequence = 3;
     assert_eq!(session.apply(duplicate), Apply::Duplicate);
-    assert_eq!(session.chat.back().unwrap().text, "こんにちは");
-    assert_eq!(session.last_sequence, 2);
+    assert_eq!(session.chat().back().unwrap().text, "こんにちは");
+    assert_eq!(session.last_sequence(), 2);
 }
 
 #[test]
@@ -73,19 +77,19 @@ fn reversed_sequence_and_other_session_do_not_mutate_chat() {
     late.event_id = "late".into();
     assert_eq!(session.apply(late), Apply::Rejected);
     let mut foreign = delta(3, "C");
-    foreign.session_id = "s2".into();
+    foreign.session_id = SessionId::parse("s2").unwrap();
     assert_eq!(session.apply(foreign), Apply::Rejected);
-    assert_eq!(session.chat.back().unwrap().text, "A");
-    assert_eq!(session.last_sequence, 2);
+    assert_eq!(session.chat().back().unwrap().text, "A");
+    assert_eq!(session.last_sequence(), 2);
 }
 
 #[test]
 fn gap_is_visible_and_prevents_unqualified_completion() {
     let mut session = session();
     session.apply(delta(3, "A"));
-    assert!(session.logs.iter().any(|row| row.text.contains("欠落")));
+    assert!(session.logs().iter().any(|row| row.text.contains("欠落")));
     session.apply(complete(4));
-    assert_eq!(session.status, Status::Disconnected);
+    assert_eq!(session.status(), Status::Disconnected);
 }
 
 #[test]
@@ -98,16 +102,16 @@ fn a_gap_at_turn_start_is_preserved_until_the_next_clean_turn() {
             prompt: "new turn".into(),
         },
     );
-    next.turn_id = Some("turn-2".into());
+    next.turn_id = Some(turn("turn-2"));
     session.apply(next);
     assert!(
-        session.incomplete,
+        session.incomplete(),
         "starting a turn must preserve the gap detected on that event"
     );
     let mut end = complete(5);
-    end.turn_id = Some("turn-2".into());
+    end.turn_id = Some(turn("turn-2"));
     session.apply(end);
-    assert_eq!(session.status, Status::Disconnected);
+    assert_eq!(session.status(), Status::Disconnected);
 
     let mut clean = event(
         6,
@@ -115,25 +119,25 @@ fn a_gap_at_turn_start_is_preserved_until_the_next_clean_turn() {
             prompt: "clean turn".into(),
         },
     );
-    clean.turn_id = Some("turn-3".into());
+    clean.turn_id = Some(turn("turn-3"));
     session.apply(clean);
     assert!(
-        !session.incomplete,
+        !session.incomplete(),
         "a clean new turn must reset earlier incompleteness"
     );
     let mut end = complete(7);
-    end.turn_id = Some("turn-3".into());
+    end.turn_id = Some(turn("turn-3"));
     session.apply(end);
-    assert_eq!(session.status, Status::Completed);
+    assert_eq!(session.status(), Status::Completed);
 }
 
 #[test]
 fn previous_turn_cannot_complete_current_turn() {
     let mut session = session();
     let mut wrong = complete(2);
-    wrong.turn_id = Some("old-turn".into());
+    wrong.turn_id = Some(turn("old-turn"));
     assert_eq!(session.apply(wrong), Apply::Rejected);
-    assert_eq!(session.status, Status::Running);
+    assert_eq!(session.status(), Status::Running);
 }
 
 #[test]
@@ -146,7 +150,7 @@ fn terminal_state_cannot_be_overwritten_by_late_completion() {
         },
     ));
     assert_eq!(session.apply(complete(3)), Apply::Rejected);
-    assert_eq!(session.status, Status::Cancelled);
+    assert_eq!(session.status(), Status::Cancelled);
 }
 
 #[test]
@@ -162,23 +166,23 @@ fn completion_with_unfinished_tool_remains_uncertain() {
         },
     ));
     session.apply(complete(3));
-    assert_eq!(session.status, Status::Disconnected);
-    assert_eq!(session.tools["tool-1"], None);
+    assert_eq!(session.status(), Status::Disconnected);
+    assert_eq!(session.tools()["tool-1"], None);
 }
 
 #[test]
 fn cancel_request_and_confirmation_are_separate() {
     let mut session = session();
-    session.status = Status::Cancelling;
+    session.request_cancel();
     session.apply(delta(2, "already queued"));
-    assert_eq!(session.status, Status::Cancelling);
+    assert_eq!(session.status(), Status::Cancelling);
     session.apply(event(
         3,
         Event::TurnCancelled {
             reason: "confirmed".into(),
         },
     ));
-    assert_eq!(session.status, Status::Cancelled);
+    assert_eq!(session.status(), Status::Cancelled);
 }
 
 #[test]
@@ -186,10 +190,10 @@ fn closing_transport_does_not_change_completed_turn() {
     let mut session = session();
     session.apply(complete(2));
     session.transport_closed();
-    assert_eq!(session.status, Status::Completed);
-    assert_eq!(session.usage, Usage::default());
+    assert_eq!(session.status(), Status::Completed);
+    assert_eq!(*session.usage(), Usage::default());
     assert_eq!(
-        serde_json::to_value(&session.usage).unwrap()["cost_usd"],
+        serde_json::to_value(session.usage()).unwrap()["cost_usd"],
         serde_json::Value::Null
     );
 }
@@ -208,10 +212,10 @@ fn log_preview_retention_is_bounded() {
             },
         ));
     }
-    assert_eq!(session.logs.len(), MAX_LOG_ROWS);
-    assert_eq!(session.logs_discarded, 10_000 - MAX_LOG_ROWS);
-    assert_eq!(session.log_bytes, 10_000 * 4096);
-    assert_eq!(session.logs.front().unwrap().offset, Some(9_000 * 4096));
+    assert_eq!(session.logs().len(), MAX_LOG_ROWS);
+    assert_eq!(session.logs_discarded(), 10_000 - MAX_LOG_ROWS);
+    assert_eq!(session.log_bytes(), 10_000 * 4096);
+    assert_eq!(session.logs().front().unwrap().offset, Some(9_000 * 4096));
 }
 
 #[test]
@@ -220,7 +224,7 @@ fn long_unicode_message_uses_bounded_blocks_without_losing_bytes() {
     let text = "日本語🙂e\u{301}🧑🏽‍💻".repeat(10_000);
     session.apply(delta(2, &text));
     let joined = session
-        .chat
+        .chat()
         .iter()
         .skip(1)
         .map(|block| block.text.as_str())
@@ -228,7 +232,7 @@ fn long_unicode_message_uses_bounded_blocks_without_losing_bytes() {
     assert_eq!(joined, text);
     assert!(
         session
-            .chat
+            .chat()
             .iter()
             .all(|block| block.text.len() <= CHAT_BLOCK_BYTES)
     );
@@ -241,8 +245,8 @@ fn chat_retention_limit_is_explicit() {
     for i in 0..MAX_CHAT_BLOCKS + 10 {
         session.apply(delta(i as u64 + 2, &text));
     }
-    assert_eq!(session.chat.len(), MAX_CHAT_BLOCKS);
-    assert!(session.chat_discarded > 0);
+    assert_eq!(session.chat().len(), MAX_CHAT_BLOCKS);
+    assert!(session.chat_discarded() > 0);
 }
 
 #[test]
@@ -276,10 +280,13 @@ fn overlapping_turn_does_not_clear_unfinished_tool() {
             prompt: "overlap".into(),
         },
     );
-    overlapping.turn_id = Some("turn-2".into());
+    overlapping.turn_id = Some(turn("turn-2"));
     assert_eq!(session.apply(overlapping), Apply::Rejected);
-    assert_eq!(session.turn_id.as_deref(), Some("turn-1"));
-    assert_eq!(session.tools["tool-1"], None);
+    assert_eq!(
+        session.turn_id().map(|id| id.to_string()).as_deref(),
+        Some("turn-1")
+    );
+    assert_eq!(session.tools()["tool-1"], None);
 }
 
 #[test]
@@ -296,7 +303,7 @@ fn unmatched_tool_completion_cannot_be_success() {
         Apply::Rejected
     );
     session.apply(complete(3));
-    assert_eq!(session.status, Status::Disconnected);
+    assert_eq!(session.status(), Status::Disconnected);
 }
 
 #[test]
@@ -328,22 +335,25 @@ fn tool_completion_cannot_be_rewritten_with_new_id() {
         )),
         Apply::Rejected
     );
-    assert_eq!(session.tools["tool-1"], Some(1));
+    assert_eq!(session.tools()["tool-1"], Some(1));
 }
 
 #[test]
 fn cancelling_before_next_turn_started_keeps_request_and_new_identity() {
     let mut session = session();
     session.apply(complete(2));
-    session.status = Status::Cancelling;
+    session.request_cancel();
     let mut started = event(
         3,
         Event::TurnStarted {
             prompt: "next".into(),
         },
     );
-    started.turn_id = Some("turn-2".into());
+    started.turn_id = Some(turn("turn-2"));
     assert_eq!(session.apply(started), Apply::Applied);
-    assert_eq!(session.status, Status::Cancelling);
-    assert_eq!(session.turn_id.as_deref(), Some("turn-2"));
+    assert_eq!(session.status(), Status::Cancelling);
+    assert_eq!(
+        session.turn_id().map(|id| id.to_string()).as_deref(),
+        Some("turn-2")
+    );
 }

@@ -1,6 +1,6 @@
 //! User-owned, workspace-scoped command rules with explicit exact / wildcard matching.
 mod matcher;
-use crate::storage::{FileTransaction, read_optional};
+use crate::storage::{FileTransaction, invalid, read_optional};
 pub(crate) use matcher::command_text;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -26,6 +26,16 @@ pub enum Executor {
     },
 }
 
+impl Executor {
+    /// 承認画面とルール一覧で共有する実行元の表示名。
+    pub fn label(&self) -> String {
+        match self {
+            Self::Shell => "ローカル · sh -c".into(),
+            Self::Acp { agent_id, .. } => format!("ACP · {agent_id}"),
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CommandInvocation {
@@ -44,10 +54,7 @@ impl CommandInvocation {
         Ok(this)
     }
     pub fn executor_label(&self) -> String {
-        match &self.executor {
-            Executor::Shell => "ローカル · sh -c".into(),
-            Executor::Acp { agent_id, .. } => format!("ACP · {agent_id}"),
-        }
+        self.executor.label()
     }
     pub(crate) fn validate(&self) -> io::Result<()> {
         if self.command.trim().is_empty()
@@ -131,7 +138,7 @@ impl CommandRule {
         self
     }
     pub fn executor_label(&self) -> String {
-        self.invocation().executor_label()
+        self.executor.label()
     }
     fn invocation(&self) -> CommandInvocation {
         CommandInvocation {
@@ -297,18 +304,25 @@ impl Default for Store {
     }
 }
 
+/// ルールの保存先。workspace 直下の JSON か、ユーザー共有の config.yml 内 workspaces[]。
+#[derive(Clone, Debug)]
+enum Backend {
+    Json,
+    Config(crate::config::ConfigStore),
+}
+
 /// Configuration is outside the repository; cloning a repository cannot grant execution rights.
 #[derive(Clone, Debug)]
 pub struct RuleStore {
     path: PathBuf,
     workspace: PathBuf,
-    config: Option<crate::config::ConfigStore>,
+    backend: Backend,
 }
 impl RuleStore {
     pub fn for_workspace(workspace: &Path) -> io::Result<Self> {
         let config = crate::config::ConfigStore::user()?;
         let mut store = Self::at_path(config.path(), workspace)?;
-        store.config = Some(config);
+        store.backend = Backend::Config(config);
         Ok(store)
     }
     pub fn at_path(path: impl Into<PathBuf>, workspace: &Path) -> io::Result<Self> {
@@ -317,12 +331,15 @@ impl RuleStore {
             return Err(invalid("workspace はディレクトリである必要があります"));
         }
         let path = path.into();
-        let config = (path.extension().and_then(|ext| ext.to_str()) != Some("json"))
-            .then(|| crate::config::ConfigStore::at_path(&path));
+        let backend = if path.extension().and_then(|ext| ext.to_str()) == Some("json") {
+            Backend::Json
+        } else {
+            Backend::Config(crate::config::ConfigStore::at_path(&path))
+        };
         Ok(Self {
             path,
             workspace,
-            config,
+            backend,
         })
     }
     pub fn path(&self) -> &Path {
@@ -332,10 +349,13 @@ impl RuleStore {
         &self.workspace
     }
     pub fn config_store(&self) -> Option<&crate::config::ConfigStore> {
-        self.config.as_ref()
+        match &self.backend {
+            Backend::Config(config) => Some(config),
+            Backend::Json => None,
+        }
     }
     pub fn approval_policy(&self) -> io::Result<(crate::config::ApprovalSettings, Rules)> {
-        if let Some(store) = &self.config {
+        if let Backend::Config(store) = &self.backend {
             let mut config = store.load()?;
             return Ok((
                 config.approval,
@@ -348,7 +368,7 @@ impl RuleStore {
         Ok((crate::config::ApprovalSettings::default(), self.load()?))
     }
     pub fn load(&self) -> io::Result<Rules> {
-        if let Some(config) = &self.config {
+        if let Backend::Config(config) = &self.backend {
             return Ok(config
                 .load()?
                 .workspaces
@@ -435,7 +455,7 @@ impl RuleStore {
         Ok(store)
     }
     fn modify(&self, edit: impl FnOnce(&mut Rules) -> io::Result<()>) -> io::Result<()> {
-        if let Some(store) = &self.config {
+        if let Backend::Config(store) = &self.backend {
             return store.update(|config| {
                 edit(config.workspaces.entry(self.workspace.clone()).or_default())
             });
@@ -457,15 +477,12 @@ impl RuleStore {
         transaction.commit(&bytes)
     }
 }
-fn invalid(message: impl Into<String>) -> io::Error {
-    io::Error::new(io::ErrorKind::InvalidData, message.into())
-}
 
 pub(crate) fn load_legacy_workspaces(path: &Path) -> io::Result<BTreeMap<PathBuf, Rules>> {
     RuleStore {
         path: path.into(),
         workspace: PathBuf::new(),
-        config: None,
+        backend: Backend::Json,
     }
     .read()
     .map(|store| store.workspaces)

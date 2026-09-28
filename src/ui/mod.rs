@@ -1,19 +1,25 @@
+#[cfg(debug_assertions)]
 mod approval_modes_smoke;
 mod approvals;
 mod command_rules;
+#[cfg(debug_assertions)]
 mod command_rules_smoke;
 mod execution;
 mod overview;
 mod persistence;
 mod projects;
+#[cfg(debug_assertions)]
 mod projects_smoke;
+#[cfg(debug_assertions)]
 mod smoke;
 mod stream;
+#[cfg(debug_assertions)]
 mod threads_smoke;
 mod views;
 #[cfg(feature = "gui-visual")]
 mod visual;
 mod workflow;
+#[cfg(debug_assertions)]
 mod workflow_smoke;
 
 use approvals::PendingApproval;
@@ -26,31 +32,29 @@ use solo::design::{
 };
 use solo::{
     acp::{self, AgentProfile},
-    approval::{ApprovalPlan, ApprovalRequest},
+    approval::{ApprovalPlan, ApprovalReply, ApprovalRequest},
     auto_approval::{self, Assessment, CodexReviewer, Reviewer},
-    codex_subscription::DeviceLogin,
+    backend::BackendKind,
+    codex::DeviceLogin,
     command_rules::{Decision, RuleList, RuleStore},
     config::{ApprovalMode, ApprovalSettings, AutoSettings},
-    event::SCHEMA_VERSION,
+    event::{SCHEMA_VERSION, SessionId},
     harness::Message,
-    mock::Scenario,
-    orchestration::{QueuedRun, RunQueue, task_title},
-    projection::{DiffKind, Session, Speaker, Status},
+    mock::{SCENARIOS, Scenario},
+    orchestration::{QueuedRun, RunQueue},
+    projection::{DiffKind, SessionProjection, Speaker, Status},
     session_store::{
-        BackendKind, QueueEntry, RestoredSession, SessionFile, SessionMeta, StoredQueue,
-        WorkspaceState, WorkspaceStore,
+        QueueEntry, RestoredSession, SessionFile, SessionMeta, StoredQueue, WorkspaceState,
+        WorkspaceStore,
     },
+    text::task_title,
 };
-use std::{path::PathBuf, sync::Arc, time::Instant};
+use std::{
+    path::PathBuf,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 use stream::UiDelivery;
-const SCENARIOS: [Scenario; 6] = [
-    Scenario::Demo,
-    Scenario::Threads,
-    Scenario::Events10k,
-    Scenario::Events100k,
-    Scenario::Log100MiB,
-    Scenario::Faults,
-];
 
 actions!(
     solo_app,
@@ -96,7 +100,17 @@ pub fn run() {
         );
         return;
     }
+    // smoke 系モジュールは debug ビルドだけに含める。
+    #[cfg(debug_assertions)]
     let smoke = args.iter().any(|arg| arg == "--smoke");
+    #[cfg(not(debug_assertions))]
+    let smoke = {
+        if args.iter().any(|arg| arg == "--smoke") {
+            eprintln!("--smoke は debug ビルドでのみ有効です");
+            return;
+        }
+        false
+    };
     let light = args.iter().any(|arg| arg == "--light");
     let compact = args.iter().any(|arg| arg == "--compact");
     gpui_kit::application()
@@ -172,31 +186,34 @@ enum Tab {
     Logs,
 }
 
-struct SessionView {
-    model: Session,
-    composer: Entity<Composer>,
-    chat_list: Entity<MessageScrollerState>,
-    log_scroll: UniformListScrollHandle,
-    diff_scroll: UniformListScrollHandle,
-    diff_index: usize,
+/// 表示の切り替えとスクロール位置。実行・永続化と独立して維持する。
+struct ViewState {
     tab: Tab,
-    selected_thread: Option<u64>,
+    diff_index: usize,
     /// 差分レビュー中のハンク位置。ファイル切替時に先頭へ戻す。
     diff_hunk: usize,
-    thread_scroll: ScrollHandle,
+    selected_thread: Option<u64>,
     expanded_activity: Option<String>,
     follow_logs: bool,
-    /// 全文ログのパス。ストアありの実行ではセッションの logs/ を指し、再起動後も残る。
-    artifacts: Vec<Arc<PathBuf>>,
+    log_scroll: UniformListScrollHandle,
+    diff_scroll: UniformListScrollHandle,
+    thread_scroll: ScrollHandle,
+}
+
+/// 実行系の接続状態。「接続中」はドメイン status ではなく UI の表示状態なので
+/// SessionView 側に持ち、Connecting 相当の間だけ立てる。
+struct ExecState {
     controller: Option<UiController>,
-    history: Vec<Message>,
-    login: Option<DeviceLogin>,
-    login_only: bool,
-    approval: Option<PendingApproval>,
-    backend: Option<Backend>,
-    selected_backend: usize,
     task: Option<Task<()>>,
     stream_generation: u64,
+    /// begin_run から最初の応答(TurnStarted)または終了までの接続中フラグ。
+    connecting: bool,
+    /// model.provider() が返す値が無い間の表示名フォールバック。
+    provider_hint: Option<String>,
+}
+
+/// セッションの追記ストアと属性の保存状態。
+struct PersistState {
     /// セッションの追記ストア。初回の保存要求で open/create する。
     file: Option<SessionFile>,
     /// 保存中のセッション属性。イベント由来の差分は sync_meta で都度反映する。
@@ -205,16 +222,38 @@ struct SessionView {
     meta_save_gen: u64,
     /// append/保存の失敗を Workspace.message へ一度だけ伝えるための退避。
     persist_error: Option<String>,
-    _input_subscription: Subscription,
+}
+
+/// バッチ処理と実行時間の計測値。
+struct Metrics {
     batches: u64,
     max_batch_ms: f64,
     started_at: Option<Instant>,
-    elapsed: Option<std::time::Duration>,
+    elapsed: Option<Duration>,
+}
+
+struct SessionView {
+    model: SessionProjection,
+    composer: Entity<Composer>,
+    chat_list: Entity<MessageScrollerState>,
+    /// 全文ログのパス。ストアありの実行ではセッションの logs/ を指し、再起動後も残る。
+    artifacts: Vec<Arc<PathBuf>>,
+    history: Vec<Message>,
+    login: Option<DeviceLogin>,
+    login_only: bool,
+    approval: Option<PendingApproval>,
+    backend: Option<Backend>,
+    selected_backend: usize,
+    _input_subscription: Subscription,
     unread_result: bool,
     input_composing: bool,
     last_prompt: String,
     approval_note: Option<String>,
     _change_subscription: Subscription,
+    view: ViewState,
+    exec: ExecState,
+    persist: PersistState,
+    metrics: Metrics,
 }
 
 struct Workspace {
@@ -278,7 +317,7 @@ impl Workspace {
         let picker_subscription = cx.subscribe(
             &scenario_picker,
             |this, _, selected: &solo::design::SelectionChanged, cx| {
-                this.sessions[this.selected].selected_backend = selected.index;
+                this.session_mut().selected_backend = selected.index;
                 cx.notify();
             },
         );
@@ -327,7 +366,7 @@ impl Workspace {
         if this.sessions.is_empty() {
             this.new_session(window, cx);
         } else {
-            let id = this.sessions[this.selected].model.id.clone();
+            let id = this.session().model.id.clone();
             this.select_session(&id, window, cx);
         }
         if this.store.is_none() {
@@ -358,10 +397,32 @@ impl Workspace {
     }
 
     /// model.id → sessions の index。コールバックで頻出する検索。
-    pub(super) fn session_index(&self, id: &str) -> Option<usize> {
+    pub(super) fn session_index(&self, id: &SessionId) -> Option<usize> {
         self.sessions
             .iter()
-            .position(|session| session.model.id == id)
+            .position(|session| session.model.id == *id)
+    }
+
+    /// 選択中のセッション。
+    pub(super) fn session(&self) -> &SessionView {
+        &self.sessions[self.selected]
+    }
+
+    /// 選択中のセッション(可変)。
+    /// `&mut self` 全体を借用するため、借用中に self の他フィールドへ触れる箇所は
+    /// `let sessions = &mut self.sessions` で分割するか直接 index する。
+    pub(super) fn session_mut(&mut self) -> &mut SessionView {
+        &mut self.sessions[self.selected]
+    }
+
+    /// index 指定のセッション。
+    pub(super) fn session_at(&self, index: usize) -> &SessionView {
+        &self.sessions[index]
+    }
+
+    /// index 指定のセッション(可変)。session_mut と同じ借用上の注意。
+    pub(super) fn session_at_mut(&mut self, index: usize) -> &mut SessionView {
+        &mut self.sessions[index]
     }
 
     /// 通知領域が空のときだけメッセージを載せる(既存の通知を潰さない)。
@@ -373,7 +434,7 @@ impl Workspace {
 
     /// 永続化の失敗を一度だけ通知領域へ移す。
     pub(super) fn drain_persist_error(&mut self, index: usize) {
-        if let Some(error) = self.sessions[index].persist_error.take() {
+        if let Some(error) = self.session_at_mut(index).persist.persist_error.take() {
             self.report(error);
         }
     }
@@ -382,48 +443,59 @@ impl Workspace {
     /// `id` はストア採番済みの最終 ID(コールバックがこの ID で検索する)。
     fn build_session_view(
         &mut self,
-        id: String,
+        id: SessionId,
+        title: String,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> SessionView {
         let (composer, subscription, change_subscription) = self.build_composer(&id, window, cx);
         SessionView {
-            model: Session::new(id, String::new()),
+            model: SessionProjection::new(id, title),
             composer,
             chat_list: cx.new(|cx| MessageScrollerState::new(0, cx)),
-            log_scroll: UniformListScrollHandle::new(),
-            diff_scroll: UniformListScrollHandle::new(),
-            diff_index: 0,
-            tab: Tab::Chat,
-            diff_hunk: 0,
-            selected_thread: None,
-            thread_scroll: ScrollHandle::new(),
-            expanded_activity: None,
-            follow_logs: true,
             artifacts: Vec::new(),
-            controller: None,
             history: Vec::new(),
             login: None,
             login_only: false,
             approval: None,
             backend: None,
             selected_backend: 0,
-            task: None,
-            stream_generation: 0,
-            file: None,
-            meta: SessionMeta::default(),
-            meta_save_gen: 0,
-            persist_error: None,
             _input_subscription: subscription,
-            batches: 0,
-            max_batch_ms: 0.,
-            started_at: None,
-            elapsed: None,
             unread_result: false,
             input_composing: false,
             last_prompt: String::new(),
             approval_note: None,
             _change_subscription: change_subscription,
+            view: ViewState {
+                tab: Tab::Chat,
+                diff_index: 0,
+                diff_hunk: 0,
+                selected_thread: None,
+                expanded_activity: None,
+                follow_logs: true,
+                log_scroll: UniformListScrollHandle::new(),
+                diff_scroll: UniformListScrollHandle::new(),
+                thread_scroll: ScrollHandle::new(),
+            },
+            exec: ExecState {
+                controller: None,
+                task: None,
+                stream_generation: 0,
+                connecting: false,
+                provider_hint: None,
+            },
+            persist: PersistState {
+                file: None,
+                meta: SessionMeta::default(),
+                meta_save_gen: 0,
+                persist_error: None,
+            },
+            metrics: Metrics {
+                batches: 0,
+                max_batch_ms: 0.,
+                started_at: None,
+                elapsed: None,
+            },
         }
     }
 
@@ -431,7 +503,7 @@ impl Workspace {
     /// submit は `id` で宛先セッションを引き、change は下書き保存を予約する。
     fn build_composer(
         &mut self,
-        id: &str,
+        id: &SessionId,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> (Entity<Composer>, Subscription, Subscription) {
@@ -442,17 +514,17 @@ impl Workspace {
                 .appearance(false)
                 .clear_on_submit(true)
         });
-        let callback_id = id.to_owned();
+        let callback_id = id.clone();
         let subscription = cx.subscribe(&composer, move |this, _, submitted: &Submitted, cx| {
             if let Some(index) = this.session_index(&callback_id) {
                 this.start_selected(index, submitted.0.clone(), cx);
             }
         });
-        let changed_id = id.to_owned();
+        let changed_id = id.clone();
         let change_subscription =
             cx.subscribe(&composer, move |this, _, change: &ds::InputChanged, cx| {
                 if let Some(index) = this.session_index(&changed_id) {
-                    this.sessions[index].input_composing = change.composing;
+                    this.session_at_mut(index).input_composing = change.composing;
                     this.schedule_meta_save(index, cx);
                 }
                 cx.notify();
@@ -470,11 +542,12 @@ impl Workspace {
         // provision の失敗メッセージを消さないよう、クリアは採番の前に行う。
         self.message.clear();
         let (id, file, meta) = self.provision_session(self.serial);
-        let mut view = self.build_session_view(id, window, cx);
-        view.file = file;
-        view.meta = meta;
-        view.model.title = format!("新しいセッション {}", self.serial);
-        view.model.provider = "Codex / ChatGPT Subscription".into();
+        let mut view =
+            self.build_session_view(id, format!("新しいセッション {}", self.serial), window, cx);
+        view.persist.file = file;
+        view.persist.meta = meta;
+        // provider は ModelRequestStarted が来るまでフォールバックのヒントを表示する。
+        view.exec.provider_hint = Some("Codex / ChatGPT Subscription".into());
         self.sessions.push(view);
         self.selected = self.sessions.len() - 1;
         self.scenario_picker.update(cx, |picker, cx| {
@@ -487,8 +560,8 @@ impl Workspace {
     }
 
     fn sync_controls(&self, cx: &mut Context<Self>) {
-        let session = &self.sessions[self.selected];
-        let locked = session.model.status.is_active()
+        let session = self.session();
+        let locked = session.display_status().is_active()
             || self.queue.position(&session.model.id).is_some()
             || session.uses_workspace();
         if self.scenario_picker.read(cx).disabled != locked {
@@ -499,18 +572,18 @@ impl Workspace {
         }
     }
 
-    fn select_session(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
+    fn select_session(&mut self, id: &SessionId, window: &mut Window, cx: &mut Context<Self>) {
         let Some(index) = self.session_index(id) else {
             return;
         };
         if index != self.selected {
             // 離れるセッションの下書きを確定させてから切り替える。
             self.save_session_meta(self.selected, cx);
-            self.sessions[self.selected].meta_save_gen += 1;
+            self.session_mut().persist.meta_save_gen += 1;
         }
         self.selected = index;
         self.scenario_picker.update(cx, |picker, cx| {
-            picker.selected = self.sessions[index].selected_backend;
+            picker.selected = self.session_at(index).selected_backend;
             picker.close(cx);
         });
         self.sync_controls(cx);
@@ -521,9 +594,9 @@ impl Workspace {
     }
 
     fn content_focus(&self, window: &Window, cx: &App) -> FocusHandle {
-        let session = &self.sessions[self.selected];
-        if session.tab == Tab::Chat
-            && session.selected_thread.is_some()
+        let session = self.session();
+        if session.view.tab == Tab::Chat
+            && session.view.selected_thread.is_some()
             && window.viewport_size().width < px(1120.)
         {
             self.focus.clone()
@@ -533,18 +606,19 @@ impl Workspace {
     }
 
     fn close_session(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let session = &self.sessions[self.selected];
-        self.queue.cancel(&session.model.id);
-        if session.model.status.is_active() && session.uses_workspace() {
-            self.queue.paused = true;
+        // queue.cancel は &mut self.queue を取るため、先に ID を複写して session の借用を終える。
+        let session_id = self.session().model.id.clone();
+        self.queue.cancel(&session_id);
+        if self.session().display_status().is_active() && self.session().uses_workspace() {
+            self.queue.set_paused(true);
         }
         // チャンネルを閉じる = 会話・下書き・全文ログごと削除する。
         let mut removed = self.sessions.remove(self.selected);
-        removed.file = None; // 先にライターを閉じて flush させる
+        removed.persist.file = None; // 先にライターを閉じて flush させる
         if let Some(store) = self.store.clone() {
             // 途中で消えた場合に sweep 対象へ進めるよう、closed 印を書いてから削除する。
-            removed.meta.closed = true;
-            let meta = removed.meta.clone();
+            removed.persist.meta.closed = true;
+            let meta = removed.persist.meta.clone();
             let _ = removed
                 .open_or_create(&store)
                 .and_then(|file| file.save_meta(&meta));
@@ -557,28 +631,28 @@ impl Workspace {
             self.new_session(window, cx);
         }
         self.save_workspace_state(cx);
-        let id = self.sessions[self.selected].model.id.clone();
+        let id = self.session().model.id.clone();
         self.select_session(&id, window, cx);
         self.dispatch_queue(cx);
     }
 
     fn show_tab(&mut self, tab: Tab, cx: &mut Context<Self>) {
-        self.sessions[self.selected].tab = tab;
+        self.session_mut().view.tab = tab;
         self.scenario_picker
             .update(cx, |picker, cx| picker.close(cx));
         cx.notify();
     }
 
     fn cancel(&mut self, cx: &mut Context<Self>) {
-        let session = &mut self.sessions[self.selected];
-        if session.model.status.is_active()
-            && let Some(controller) = &session.controller
+        let session = self.session_mut();
+        if session.display_status().is_active()
+            && let Some(controller) = &session.exec.controller
         {
             controller.cancel();
             if let Some(approval) = session.approval.take() {
                 approval.respond(false);
             }
-            session.model.status = Status::Cancelling;
+            session.model.request_cancel();
             cx.notify();
         }
     }
@@ -588,4 +662,21 @@ impl Workspace {
         self.toast
             .update(cx, |toast, cx| toast.push(message, Tone::Success, cx));
     }
+}
+
+/// 「確認済み N / M ファイル」の共通インジケータ。概要と Diff タブで同じ表示に揃える。
+fn review_indicator(
+    id: impl Into<ElementId>,
+    reviewed: usize,
+    total: usize,
+    cx: &App,
+) -> Stateful<Div> {
+    ds::indicator(
+        id,
+        Icon::CircleCheck,
+        format!("{reviewed} / {total}"),
+        format!("確認済み {reviewed} / {total} ファイル"),
+        Tone::Neutral,
+        cx,
+    )
 }

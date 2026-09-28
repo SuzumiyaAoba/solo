@@ -1,6 +1,6 @@
 //! Shared user configuration. Credentials and project history are separate data stores.
 use crate::command_rules::Rules;
-use crate::storage::{FileTransaction, read_optional};
+use crate::storage::{FileTransaction, invalid, read_optional};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::BTreeMap,
@@ -110,10 +110,7 @@ pub struct ConfigStore {
 }
 impl ConfigStore {
     pub fn user() -> io::Result<Self> {
-        let user_home = std::env::var_os("HOME")
-            .filter(|path| !path.is_empty())
-            .ok_or_else(|| invalid("HOME が設定されていません"))?;
-        let user_home = PathBuf::from(user_home);
+        let user_home = crate::storage::home_dir()?;
         Ok(Self::at_path(user_home.join(".config/solo/config.yml"))
             .with_legacy_rules(user_home.join(".solo/command-rules.json")))
     }
@@ -181,7 +178,4 @@ impl ConfigStore {
         }
         transaction.commit(yaml.as_bytes())
     }
-}
-fn invalid(message: impl Into<String>) -> io::Error {
-    io::Error::new(io::ErrorKind::InvalidData, message.into())
 }

@@ -11,20 +11,33 @@ use std::{
     time::Duration,
 };
 /// 副作用のない組込み tool。承認 policy は read/search を確認なしで許可してよい。
+pub const TOOL_READ: &str = "read";
+pub const TOOL_SEARCH: &str = "search";
+pub const TOOL_EDIT: &str = "edit";
+pub const TOOL_EXEC: &str = "exec";
+
 pub fn is_read_only_tool(name: &str) -> bool {
-    matches!(name, "read" | "search")
+    matches!(name, TOOL_READ | TOOL_SEARCH)
+}
+
+/// 探索・差分追跡から外すディレクトリ。ベンダーやビルド成果物は対象外にする。
+pub(crate) fn is_ignored_dir(name: &str) -> bool {
+    matches!(
+        name,
+        ".git" | "target" | "node_modules" | ".next" | "dist" | "build" | ".venv" | "__pycache__"
+    )
 }
 
 /// 基本ツールの表示順。`specs` の配列と一致させる。
-pub const TOOL_NAMES: &[&str] = &["read", "search", "edit", "exec"];
+pub const TOOL_NAMES: &[&str] = &[TOOL_READ, TOOL_SEARCH, TOOL_EDIT, TOOL_EXEC];
 
 /// 基本ツールの1行説明。ツールタブにそのまま表示する。
 pub fn tool_description(name: &str) -> &'static str {
     match name {
-        "read" => "workspace 内の UTF-8 ファイルを読む",
-        "search" => "workspace 内の UTF-8 ファイルから文字列を探す",
-        "edit" => "既存ファイルの一致する箇所を一度だけ置換する",
-        "exec" => "workspace で shell command を実行する",
+        TOOL_READ => "workspace 内の UTF-8 ファイルを読む",
+        TOOL_SEARCH => "workspace 内の UTF-8 ファイルから文字列を探す",
+        TOOL_EDIT => "既存ファイルの一致する箇所を一度だけ置換する",
+        TOOL_EXEC => "workspace で shell command を実行する",
         _ => "外部ツール",
     }
 }
@@ -35,27 +48,27 @@ pub struct WorkspaceTools {
     cancellation: Option<Cancellation>,
     pub timeout: Duration,
     pub max_output_bytes: usize,
+    /// `search` が走査するエントリ数の上限。超過時は部分結果と注記を返す。
+    pub max_search_entries: usize,
 }
 
 impl WorkspaceTools {
     pub fn new(root: impl AsRef<Path>) -> io::Result<Self> {
-        let root = root.as_ref().canonicalize()?;
-        if !root.is_dir() {
-            return Err(io::Error::other("workspace がディレクトリではありません"));
-        }
+        let root = canonical_workspace(root.as_ref())?;
         Ok(Self {
             root,
             cancellation: None,
             timeout: Duration::from_secs(30),
             max_output_bytes: 64 * 1024,
+            max_search_entries: 20_000,
             specs: TOOL_NAMES
                 .iter()
                 .map(|name| {
                     let fields: &[&str] = match *name {
-                        "read" => &["path"],
-                        "search" => &["query"],
-                        "edit" => &["path", "old", "new"],
-                        "exec" => &["command"],
+                        TOOL_READ => &["path"],
+                        TOOL_SEARCH => &["query"],
+                        TOOL_EDIT => &["path", "old", "new"],
+                        TOOL_EXEC => &["command"],
                         _ => &[],
                     };
                     spec(name, tool_description(name), fields)
@@ -70,14 +83,7 @@ impl WorkspaceTools {
     }
 
     fn path(&self, raw: &str) -> io::Result<PathBuf> {
-        let candidate = self.root.join(raw);
-        let path = candidate.canonicalize()?;
-        if !path.starts_with(&self.root) || !path.is_file() {
-            return Err(io::Error::other(
-                "workspace 外、または通常ファイルではありません",
-            ));
-        }
-        Ok(path)
+        resolve_file(&self.root, raw)
     }
 
     fn read(&self, raw: &str) -> io::Result<String> {
@@ -127,20 +133,30 @@ impl WorkspaceTools {
         let mut dirs = vec![self.root.clone()];
         let mut visited = 0usize;
         let mut output = String::new();
-        while let Some(dir) = dirs.pop() {
-            for entry in fs::read_dir(dir)? {
-                let entry = entry?;
+        let mut capped = false;
+        // workspace 直下の読み取り失敗だけはエラーとして返し、途中の失敗はスキップする。
+        'dirs: while let Some(dir) = dirs.pop() {
+            let entries = match fs::read_dir(&dir) {
+                Ok(entries) => entries,
+                Err(error) if dir == self.root => return Err(error),
+                Err(_) => continue,
+            };
+            for entry in entries {
+                let Ok(entry) = entry else { continue };
                 visited += 1;
-                if visited > 20_000 {
-                    return Err(io::Error::other("検索対象が上限を超えました"));
+                if visited > self.max_search_entries {
+                    capped = true;
+                    break 'dirs;
                 }
-                let ty = entry.file_type()?;
+                let Ok(ty) = entry.file_type() else { continue };
                 if ty.is_dir() {
-                    if entry.file_name() != ".git" && entry.file_name() != "target" {
+                    if !is_ignored_dir(&entry.file_name().to_string_lossy()) {
                         dirs.push(entry.path());
                     }
                 } else if ty.is_file() {
-                    let metadata = entry.metadata()?;
+                    let Ok(metadata) = entry.metadata() else {
+                        continue;
+                    };
                     if metadata.len() > 1024 * 1024 {
                         continue;
                     }
@@ -167,6 +183,9 @@ impl WorkspaceTools {
                 }
             }
         }
+        if capped {
+            output.push_str("[検索対象の上限に達したため、一部のファイルのみ検索しました]\n");
+        }
         Ok(output)
     }
 
@@ -180,12 +199,12 @@ impl WorkspaceTools {
                 })
         };
         match call.name.as_str() {
-            "read" => self.read(string("path")?).map(ToolResult::ok),
-            "search" => self.search(string("query")?).map(ToolResult::ok),
-            "edit" => self
+            TOOL_READ => self.read(string("path")?).map(ToolResult::ok),
+            TOOL_SEARCH => self.search(string("query")?).map(ToolResult::ok),
+            TOOL_EDIT => self
                 .edit(string("path")?, string("old")?, string("new")?)
                 .map(ToolResult::ok),
-            "exec" => self.exec(string("command")?),
+            TOOL_EXEC => self.exec(string("command")?),
             _ => Err(io::Error::other("未知の tool")),
         }
     }
@@ -213,4 +232,25 @@ fn spec(name: &str, description: &str, fields: &[&str]) -> ToolSpec {
         description: description.into(),
         parameters: json!({"type":"object","properties":properties,"required":required,"additionalProperties":false}),
     }
+}
+
+/// workspace root を canonicalize し、ディレクトリであることを確認する。
+pub(crate) fn canonical_workspace(root: &Path) -> io::Result<PathBuf> {
+    let root = root.canonicalize()?;
+    if !root.is_dir() {
+        return Err(io::Error::other("workspace がディレクトリではありません"));
+    }
+    Ok(root)
+}
+
+/// workspace 内の相対パスを canonicalize し、root 配下の通常ファイルに限定する。
+pub(crate) fn resolve_file(root: &Path, raw: &str) -> io::Result<PathBuf> {
+    let candidate = root.join(raw);
+    let path = candidate.canonicalize()?;
+    if !path.starts_with(root) || !path.is_file() {
+        return Err(io::Error::other(
+            "workspace 外、または通常ファイルではありません",
+        ));
+    }
+    Ok(path)
 }

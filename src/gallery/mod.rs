@@ -21,6 +21,15 @@ enum Page {
     Feedback,
     Overlays,
 }
+
+/// 各ページの表示情報。サイドバーと本文ヘッダで共通して使う。
+struct PageInfo {
+    slug: &'static str,
+    title: &'static str,
+    description: &'static str,
+    icon: Icon,
+}
+
 impl Page {
     const ALL: [Self; 8] = [
         Self::Overview,
@@ -32,53 +41,71 @@ impl Page {
         Self::Feedback,
         Self::Overlays,
     ];
-    fn slug(self) -> &'static str {
+
+    fn info(self) -> PageInfo {
         match self {
-            Self::Overview => "overview",
-            Self::Foundations => "foundations",
-            Self::Buttons => "buttons",
-            Self::Inputs => "inputs",
-            Self::Selection => "selection",
-            Self::Navigation => "navigation",
-            Self::Feedback => "feedback",
-            Self::Overlays => "overlays",
+            Self::Overview => PageInfo {
+                slug: "overview",
+                title: "Overview",
+                description: "集中できる画面は、小さな一貫性から。",
+                icon: Icon::Grid,
+            },
+            Self::Foundations => PageInfo {
+                slug: "foundations",
+                title: "Foundations",
+                description: "色、文字、余白。すべてのコンポーネントに共通する基準。",
+                icon: Icon::Layers,
+            },
+            Self::Buttons => PageInfo {
+                slug: "buttons",
+                title: "Buttons",
+                description: "操作の優先順位を、控えめで明確なコントラストで伝える。",
+                icon: Icon::Cursor,
+            },
+            Self::Inputs => PageInfo {
+                slug: "inputs",
+                title: "Inputs",
+                description: "日本語入力と、入力前・入力中・検証後の状態を整える。",
+                icon: Icon::Text,
+            },
+            Self::Selection => PageInfo {
+                slug: "selection",
+                title: "Selection",
+                description: "選択する、切り替える。状態が迷わず伝わるコントロール。",
+                icon: Icon::Sliders,
+            },
+            Self::Navigation => PageInfo {
+                slug: "navigation",
+                title: "Navigation",
+                description: "今いる場所と次の行き先を、さりげなく示す。",
+                icon: Icon::Layout,
+            },
+            Self::Feedback => PageInfo {
+                slug: "feedback",
+                title: "Feedback",
+                description: "進行状況、結果、次に必要な操作を伝える。",
+                icon: Icon::Bell,
+            },
+            Self::Overlays => PageInfo {
+                slug: "overlays",
+                title: "Overlays",
+                description: "必要なときだけ現れ、作業へ自然に戻れる小さな画面。",
+                icon: Icon::Window,
+            },
         }
+    }
+
+    fn slug(self) -> &'static str {
+        self.info().slug
     }
     fn title(self) -> &'static str {
-        match self {
-            Self::Overview => "Overview",
-            Self::Foundations => "Foundations",
-            Self::Buttons => "Buttons",
-            Self::Inputs => "Inputs",
-            Self::Selection => "Selection",
-            Self::Navigation => "Navigation",
-            Self::Feedback => "Feedback",
-            Self::Overlays => "Overlays",
-        }
+        self.info().title
     }
     fn description(self) -> &'static str {
-        match self {
-            Self::Overview => "集中できる画面は、小さな一貫性から。",
-            Self::Foundations => "色、文字、余白。すべてのコンポーネントに共通する基準。",
-            Self::Buttons => "操作の優先順位を、控えめで明確なコントラストで伝える。",
-            Self::Inputs => "日本語入力と、入力前・入力中・検証後の状態を整える。",
-            Self::Selection => "選択する、切り替える。状態が迷わず伝わるコントロール。",
-            Self::Navigation => "今いる場所と次の行き先を、さりげなく示す。",
-            Self::Feedback => "進行状況、結果、次に必要な操作を伝える。",
-            Self::Overlays => "必要なときだけ現れ、作業へ自然に戻れる小さな画面。",
-        }
+        self.info().description
     }
     fn icon(self) -> Icon {
-        match self {
-            Self::Overview => Icon::Grid,
-            Self::Foundations => Icon::Layers,
-            Self::Buttons => Icon::Cursor,
-            Self::Inputs => Icon::Text,
-            Self::Selection => Icon::Sliders,
-            Self::Navigation => Icon::Layout,
-            Self::Feedback => Icon::Bell,
-            Self::Overlays => Icon::Window,
-        }
+        self.info().icon
     }
 }
 

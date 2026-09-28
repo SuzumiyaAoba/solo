@@ -44,3 +44,34 @@ fn line_number_overflow_is_visible_instead_of_panicking_or_wrapping() {
         "unrepresentable line numbers must prevent review confirmation"
     );
 }
+
+#[test]
+fn context_lines_between_removed_and_added_do_not_pair() {
+    let diff = Diff::parse("f".into(), "@@ -1,3 +1,3 @@\n-foo\n ctx\n+bar\n");
+    assert!(
+        diff.lines.iter().all(|line| line.changed.is_none()),
+        "context-separated lines must not be highlighted as a modification"
+    );
+}
+
+#[test]
+fn multi_line_replacements_pair_in_order() {
+    let diff = Diff::parse(
+        "f".into(),
+        "@@ -1,2 +1,2 @@\n-alpha one\n-beta two\n+alpha 1\n+beta 2\n",
+    );
+    assert_eq!(diff.lines[1].changed, Some(6..9));
+    assert_eq!(diff.lines[2].changed, Some(5..8));
+    assert_eq!(diff.lines[3].changed, Some(6..7));
+    assert_eq!(diff.lines[4].changed, Some(5..6));
+}
+
+#[test]
+fn no_newline_markers_do_not_break_pairing() {
+    let diff = Diff::parse(
+        "f".into(),
+        "@@ -1 +1 @@\n-old\n\\ No newline at end of file\n+new\n\\ No newline at end of file\n",
+    );
+    assert_eq!(diff.lines[1].changed, Some(0..3));
+    assert_eq!(diff.lines[3].changed, Some(0..3));
+}

@@ -1,6 +1,7 @@
 //! 実際のモデル、shell、workspace の書込みは一切呼び出さない。
 //! worker がログ I/O を所有し、bounded channel で UI と接続する。
-use crate::event::{Envelope, Event, Sequencer, Usage, preview};
+use crate::event::{Emitter, Envelope, Event, Sequencer, SessionId, Usage};
+use crate::text::preview;
 use async_channel::{Receiver, Sender, TrySendError};
 use std::{
     fs,
@@ -16,8 +17,16 @@ use std::{
 use unicode_segmentation::UnicodeSegmentation;
 
 pub const CHANNEL_CAPACITY: usize = 256;
-pub const FRAME_BATCH: usize = 128;
-pub const FRAME_INTERVAL: Duration = Duration::from_millis(16);
+
+/// UI のシナリオピッカーが並べる一覧。backend::MOCK_SCENARIO_KEYS と同順。
+pub const SCENARIOS: [Scenario; 6] = [
+    Scenario::Demo,
+    Scenario::Threads,
+    Scenario::Events10k,
+    Scenario::Events100k,
+    Scenario::Log100MiB,
+    Scenario::Faults,
+];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Scenario {
@@ -30,6 +39,24 @@ pub enum Scenario {
 }
 
 impl Scenario {
+    /// backend::MOCK_SCENARIO_KEYS と同順の永続化キー。
+    pub fn key(self) -> &'static str {
+        match self {
+            Self::Demo => "demo",
+            Self::Threads => "threads",
+            Self::Events10k => "events-10k",
+            Self::Events100k => "events-100k",
+            Self::Log100MiB => "log-100mib",
+            Self::Faults => "faults",
+        }
+    }
+    /// 永続化キーから復元する。未知キーは None。
+    pub fn from_key(key: &str) -> Option<Scenario> {
+        SCENARIOS
+            .iter()
+            .copied()
+            .find(|scenario| scenario.key() == key)
+    }
     pub fn label(self) -> &'static str {
         match self {
             Self::Demo => "会話と差分",
@@ -53,7 +80,7 @@ impl Scenario {
 }
 
 pub struct Config {
-    pub session_id: String,
+    pub session_id: SessionId,
     pub title: String,
     pub workspace: String,
     pub prompt: String,
@@ -66,9 +93,9 @@ pub struct Config {
 }
 
 impl Config {
-    pub fn new(session_id: &str, scenario: Scenario) -> Self {
+    pub fn new(session_id: SessionId, scenario: Scenario) -> Self {
         Self {
-            session_id: session_id.into(),
+            session_id,
             title: scenario.label().into(),
             workspace: "solo".into(),
             prompt: "調査結果をもとに、イベント表示の試作を確認してください。".into(),
@@ -91,6 +118,12 @@ pub enum Delivery {
     /// 未指定(一時領域)では明示的な削除はしない。
     LogOpened(Arc<PathBuf>),
     Error(String),
+}
+
+impl From<Envelope> for Delivery {
+    fn from(envelope: Envelope) -> Self {
+        Self::Event(envelope)
+    }
 }
 
 /// 0=実行中、1=cancel、2=切断注入、3=window/session 廃棄。
@@ -134,17 +167,21 @@ pub fn start(config: Config) -> io::Result<(Controller, Receiver<Delivery>)> {
         .name(format!("solo-mock-{}", config.session_id))
         .spawn(move || {
             let mut producer = Producer {
-                sequencer: Sequencer::new(
-                    config.session_id.clone(),
-                    config.start_sequence,
-                    format!("turn-{}", config.start_sequence + 1),
+                emitter: Emitter::new(
+                    Sequencer::new(
+                        config.session_id.clone(),
+                        config.start_sequence,
+                        format!("turn-{}", config.start_sequence + 1),
+                    ),
+                    sender,
                 ),
                 config,
-                sender,
                 signal: worker_signal,
             };
             if let Err(error) = producer.run() {
-                producer.send(
+                Producer::deliver(
+                    &producer.signal,
+                    producer.emitter.sender(),
                     Delivery::Error(format!("疑似ストリームの I/O エラー: {error}")),
                     false,
                 );
@@ -160,20 +197,25 @@ pub fn start(config: Config) -> io::Result<(Controller, Receiver<Delivery>)> {
 }
 
 struct Producer {
-    sequencer: Sequencer,
+    emitter: Emitter<Delivery>,
     config: Config,
-    sender: Sender<Delivery>,
     signal: Arc<AtomicU8>,
 }
 
 impl Producer {
-    fn send(&self, mut delivery: Delivery, interruptible: bool) -> bool {
+    /// signal を監視しながら送信する。終了(3)、または interruptible 中の要求で打ち切る。
+    fn deliver(
+        signal: &AtomicU8,
+        sender: &Sender<Delivery>,
+        mut delivery: Delivery,
+        interruptible: bool,
+    ) -> bool {
         loop {
-            let signal = self.signal.load(Ordering::SeqCst);
-            if signal == 3 || (interruptible && signal != 0) {
+            let state = signal.load(Ordering::SeqCst);
+            if state == 3 || (interruptible && state != 0) {
                 return false;
             }
-            match self.sender.try_send(delivery) {
+            match sender.try_send(delivery) {
                 Ok(()) => return true,
                 Err(TrySendError::Closed(_)) => return false,
                 Err(TrySendError::Full(value)) => {
@@ -185,16 +227,46 @@ impl Producer {
     }
 
     fn emit(&mut self, event: Event, interruptible: bool) -> bool {
-        self.emit_envelope(self.sequencer.peek(event), interruptible)
+        self.emitter.send_with(event, |sender, delivery| {
+            Self::deliver(&self.signal, sender, delivery, interruptible)
+        })
     }
 
     fn emit_envelope(&mut self, event: Envelope, interruptible: bool) -> bool {
-        if self.send(Delivery::Event(event), interruptible) {
-            self.sequencer.advance();
+        if Self::deliver(
+            &self.signal,
+            self.emitter.sender(),
+            Delivery::Event(event),
+            interruptible,
+        ) {
+            self.emitter.commit();
             true
         } else {
             false
         }
+    }
+
+    /// emit に失敗したら中断通知を出す。呼出側は false で終了する。
+    fn emit_or_quit(&mut self, event: Event, interruptible: bool) -> bool {
+        let sent = self.emit(event, interruptible);
+        if !sent {
+            self.interrupted();
+        }
+        sent
+    }
+
+    /// 送信失敗時はログを flush してから中断する。Ok(false) = 中断済み。
+    fn emit_or_quit_flushed(
+        &mut self,
+        event: Envelope,
+        writer: &mut BufWriter<impl Write>,
+    ) -> io::Result<bool> {
+        if self.emit_envelope(event, true) {
+            return Ok(true);
+        }
+        writer.flush()?;
+        self.interrupted();
+        Ok(false)
     }
 
     fn interrupted(&mut self) {
@@ -214,7 +286,7 @@ impl Producer {
         // SessionCreated と TurnStarted は中止要求より先に必ず順序を確定する。
         if self.config.start_sequence == 0 && !self.emit(Event::SessionCreated {
             title: self.config.title.clone(), workspace_id: self.config.workspace.clone(),
-            settings: serde_json::json!({"backend": "mock", "scenario": self.config.scenario.label()}),
+            settings: serde_json::json!({"backend": "mock", "scenario": self.config.scenario.key()}),
         }, false) { return Ok(()); }
         if !self.emit(
             Event::TurnStarted {
@@ -228,7 +300,7 @@ impl Producer {
             Event::ModelRequestStarted {
                 provider: "ローカル疑似プロバイダー".into(),
                 model: "phase-0".into(),
-                request_id: format!("request-{}", self.sequencer.sequence()),
+                request_id: format!("request-{}", self.emitter.sequence()),
             },
             true,
         ) {
@@ -260,12 +332,17 @@ impl Producer {
             file.keep().map_err(|error| error.error)?
         };
         let mut writer = BufWriter::new(file);
-        if !self.send(Delivery::LogOpened(Arc::new(path)), true) {
+        if !Self::deliver(
+            &self.signal,
+            self.emitter.sender(),
+            Delivery::LogOpened(Arc::new(path)),
+            true,
+        ) {
             self.interrupted();
             return Ok(());
         }
         let invocation = format!("mock-check-{}", self.config.start_sequence);
-        if !self.emit(
+        if !self.emit_or_quit(
             Event::ToolStarted {
                 agent_id: None,
                 invocation_id: invocation.clone(),
@@ -274,7 +351,6 @@ impl Producer {
             },
             true,
         ) {
-            self.interrupted();
             return Ok(());
         }
         let message_id = format!("assistant-{}", self.config.start_sequence);
@@ -324,19 +400,27 @@ impl Producer {
                     text,
                 }
             };
-            let envelope = self.sequencer.peek(event);
-            if !self.emit_envelope(envelope.clone(), true) {
-                writer.flush()?;
-                self.interrupted();
+            let envelope = self.emitter.peek(event);
+            if !self.emit_or_quit_flushed(envelope.clone(), &mut writer)? {
                 return Ok(());
             }
             if self.config.scenario == Scenario::Faults && index == 8 {
                 // 同一 ID の再送、順序逆転、未知 kind、新 schema、不完全な既知 payload。
-                self.send(Delivery::Event(envelope.clone()), true);
+                Self::deliver(
+                    &self.signal,
+                    self.emitter.sender(),
+                    Delivery::Event(envelope.clone()),
+                    true,
+                );
                 let mut reversed = envelope;
                 reversed.event_id.push_str("-late");
                 reversed.sequence -= 1;
-                self.send(Delivery::Event(reversed), true);
+                Self::deliver(
+                    &self.signal,
+                    self.emitter.sender(),
+                    Delivery::Event(reversed),
+                    true,
+                );
                 for (version, payload) in [
                     (
                         1,
@@ -348,14 +432,12 @@ impl Producer {
                     ),
                     (1, serde_json::json!({"type":"message_delta","text":42})),
                 ] {
-                    let mut unknown = self.sequencer.peek(Event::TurnFailed {
+                    let mut unknown = self.emitter.peek(Event::TurnFailed {
                         reason: String::new(),
                     });
                     unknown.schema_version = version;
                     unknown.payload = payload;
-                    if !self.emit_envelope(unknown, true) {
-                        writer.flush()?;
-                        self.interrupted();
+                    if !self.emit_or_quit_flushed(unknown, &mut writer)? {
                         return Ok(());
                     }
                 }
@@ -369,21 +451,19 @@ impl Producer {
             // terminal event なしで sender を落とす。UI が切断として検出する。
             return Ok(());
         }
-        if !self.emit(Event::DiffUpdated {
+        if !self.emit_or_quit(Event::DiffUpdated {
             path: "src/example.rs (fixture)".into(),
             unified_diff: "--- a/src/example.rs\n+++ b/src/example.rs\n@@ -1,4 +1,5 @@\n fn greeting() -> &'static str {\n-    \"Hello\"\n+    // 日本語の表示を確認\n+    \"こんにちは、Solo 🙂\"\n }\n \n".into(),
-        }, true) || !self.emit(Event::ToolFinished { invocation_id: invocation, exit_code: 0 }, true) {
-            self.interrupted(); return Ok(());
+        }, true) || !self.emit_or_quit(Event::ToolFinished { invocation_id: invocation, exit_code: 0 }, true) {
+            return Ok(());
         }
-        if !self.emit(
+        self.emit_or_quit(
             Event::TurnCompleted {
                 reason: "疑似イベントの再生が完了しました。差分とログを確認できます。".into(),
                 usage: Usage::default(),
             },
             true,
-        ) {
-            self.interrupted();
-        }
+        );
         Ok(())
     }
 
@@ -404,8 +484,7 @@ impl Producer {
             Event::TurnCompleted { reason: "スレッド表示の疑似シナリオが完了しました。".into(), usage: Usage::default() },
         ];
         for event in events {
-            if !self.emit(event, true) {
-                self.interrupted();
+            if !self.emit_or_quit(event, true) {
                 return;
             }
             if !self.config.delay.is_zero() {

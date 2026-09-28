@@ -5,19 +5,57 @@ impl SessionView {
     pub(super) fn needs_attention(&self) -> bool {
         self.approval.is_some()
             || self.login.is_some()
-            || (!self.model.status.is_active()
+            || (!self.display_status().is_active()
                 && (self.unread_result || self.model.unreviewed_count() > 0))
     }
 
+    /// 「接続中」はドメインの Status ではなく UI の表示状態のため、表示用に合成する。
+    /// connecting は worker 起動から最初の受理イベントまでを示し、apply_delivery が
+    /// 降ろす(旧 Status::Connecting 相当)。切断経路は stream.rs の closed 分岐が閉じる。
+    /// 暫定で接続中は Running を返す(表示色は views::status_tone 側)。
+    pub(super) fn display_status(&self) -> Status {
+        if self.exec.connecting {
+            Status::Running
+        } else {
+            self.model.status()
+        }
+    }
+
+    /// model.provider() を優先し、無ければ実行前に立てたヒントを返す。
+    pub(super) fn provider_display(&self) -> Option<&str> {
+        self.model.provider().or(self.exec.provider_hint.as_deref())
+    }
+
+    /// 順番待ち中の composer を依頼文で固定する(送信不可・変更不可)。
+    pub(super) fn lock_composer(&mut self, prompt: impl Into<SharedString>, cx: &mut App) {
+        self.composer.update(cx, |input, cx| {
+            input.set_value(prompt, cx);
+            input.can_submit = false;
+            input.read_only = true;
+        });
+    }
+
+    /// lock_composer の解除。下書きを残したまま編集可能に戻す。
+    pub(super) fn unlock_composer(&mut self, prompt: impl Into<SharedString>, cx: &mut App) {
+        self.composer.update(cx, |input, cx| {
+            input.read_only = false;
+            input.can_submit = true;
+            input.set_value(prompt, cx);
+        });
+    }
+
     pub(super) fn state_label(&self) -> &'static str {
+        let status = self.display_status();
         if self.approval.is_some() {
             "承認待ち"
         } else if self.login.is_some() {
             "ログイン待ち"
-        } else if self.model.status == Status::Completed && self.model.unreviewed_count() > 0 {
+        } else if self.exec.connecting {
+            "接続中"
+        } else if status == Status::Completed && self.model.unreviewed_count() > 0 {
             "レビュー待ち"
         } else {
-            self.model.status.label()
+            status.label()
         }
     }
 
@@ -25,37 +63,39 @@ impl SessionView {
         if self.approval.is_some() || self.login.is_some() {
             Tone::Warning
         } else {
-            super::views::status_tone(self.model.status)
+            super::views::status_tone(self.display_status())
         }
     }
 }
 
 impl Workspace {
     pub(super) fn workspace_busy(&self) -> bool {
-        self.sessions
-            .iter()
-            .any(|session| session.model.status.is_active() && session.uses_workspace())
+        self.sessions.iter().any(|session| {
+            (session.model.status().is_active() || session.exec.connecting)
+                && session.uses_workspace()
+        })
     }
 
     pub(super) fn enqueue(&mut self, index: usize, prompt: String, cx: &mut Context<Self>) {
         // キューに載せる前にストアを確定させ、復元時に同じ ID で紐づくようにする。
         if let Some(store) = self.store.clone()
-            && let Err(error) = self.sessions[index].open_or_create(&store)
+            && let Err(error) = self.session_at_mut(index).open_or_create(&store)
         {
             self.report(format!("セッションを保存できません: {error}"));
         }
-        let session = &mut self.sessions[index];
+        // queue.push は &mut self.queue を取るため、選択 index→BackendKind は先に確定させる。
+        let backend = self
+            .backend_kind_at(self.sessions[index].selected_backend)
+            .unwrap_or(BackendKind::Subscription);
+        let sessions = &mut self.sessions;
+        let session = &mut sessions[index];
         if self.queue.push(QueuedRun {
             session_id: session.model.id.clone(),
-            backend_index: session.selected_backend,
+            backend,
             prompt: prompt.clone(),
         }) {
-            session.composer.update(cx, |input, cx| {
-                input.set_value(prompt, cx);
-                input.can_submit = false;
-                input.read_only = true;
-            });
-            session.tab = Tab::Overview;
+            session.lock_composer(prompt, cx);
+            session.view.tab = Tab::Overview;
             self.message.clear();
             self.save_workspace_state(cx);
             self.sync_controls(cx);
@@ -65,13 +105,9 @@ impl Workspace {
     }
 
     pub(super) fn cancel_queued(&mut self, cx: &mut Context<Self>) {
-        let session = &mut self.sessions[self.selected];
-        if let Some(run) = self.queue.cancel(&session.model.id) {
-            session.composer.update(cx, |input, cx| {
-                input.read_only = false;
-                input.can_submit = true;
-                input.set_value(run.prompt, cx);
-            });
+        let id = self.session().model.id.clone();
+        if let Some(run) = self.queue.cancel(&id) {
+            self.session_mut().unlock_composer(run.prompt, cx);
             self.save_workspace_state(cx);
             self.sync_controls(cx);
             cx.notify();
@@ -83,14 +119,10 @@ impl Workspace {
             let Some(index) = self.session_index(&run.session_id) else {
                 continue;
             };
-            self.sessions[index].composer.update(cx, |input, cx| {
-                input.read_only = false;
-                input.can_submit = true;
-                input.set_value("", cx);
-            });
-            self.run_backend(index, run.backend_index, run.prompt, cx);
-            if !self.sessions[index].model.status.is_active() {
-                self.queue.paused = true;
+            self.session_at_mut(index).unlock_composer("", cx);
+            self.run_backend(index, &run.backend, run.prompt, cx);
+            if !self.session_at(index).display_status().is_active() {
+                self.queue.set_paused(true);
             }
             // 取り出した実行と一時停止を保存する(連続 dispatch でも最終状態を残す)。
             self.save_workspace_state(cx);
@@ -102,32 +134,31 @@ impl Workspace {
     pub(super) fn next_attention(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let next = (1..=self.sessions.len())
             .map(|offset| (self.selected + offset) % self.sessions.len())
-            .find(|&index| self.sessions[index].needs_attention());
+            .find(|&index| self.session_at(index).needs_attention());
         if let Some(index) = next {
-            let id = self.sessions[index].model.id.clone();
+            let id = self.session_at(index).model.id.clone();
             self.select_session(&id, window, cx);
             self.show_tab(Tab::Overview, cx);
         }
     }
 
     pub(super) fn review_next(&mut self, cx: &mut Context<Self>) {
-        let session = &mut self.sessions[self.selected];
-        if let Some(index) = session.model.diffs.iter().position(|diff| !diff.reviewed) {
-            session.diff_index = index;
-            session.diff_scroll = UniformListScrollHandle::new();
+        let session = self.session_mut();
+        if let Some(index) = session.model.diffs().iter().position(|diff| !diff.reviewed) {
+            session.select_diff(index);
         }
         self.show_tab(Tab::Diff, cx);
     }
 
     pub(super) fn toggle_review(&mut self, cx: &mut Context<Self>) {
-        let session = &mut self.sessions[self.selected];
-        if session.model.toggle_reviewed(session.diff_index) {
+        let session = self.session_mut();
+        if session.model.toggle_reviewed(session.view.diff_index) {
             if session.model.unreviewed_count() == 0 {
                 session.unread_result = false;
             }
-            session.meta.reviewed = session
+            session.persist.meta.reviewed = session
                 .model
-                .diffs
+                .diffs()
                 .iter()
                 .filter(|diff| diff.reviewed)
                 .map(|diff| diff.path.clone())
@@ -143,7 +174,7 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let session = &self.sessions[self.selected];
+        let session = self.session();
         if self.queue.position(&session.model.id).is_some() {
             return;
         }
@@ -161,9 +192,9 @@ impl Workspace {
     }
 
     pub(super) fn request_close_session(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let session = &self.sessions[self.selected];
-        if session.model.chat.is_empty()
-            && !session.model.status.is_active()
+        let session = self.session();
+        if session.model.chat().is_empty()
+            && !session.display_status().is_active()
             && session.composer.read(cx).value(cx).is_empty()
             && self.queue.position(&session.model.id).is_none()
         {
@@ -171,7 +202,7 @@ impl Workspace {
             return;
         }
         let id = session.model.id.clone();
-        let title = session.model.title.clone();
+        let title = session.model.title().to_owned();
         let p = ds::theme(cx);
         let weak = cx.weak_entity();
         window.open_dialog(cx, move |dialog, _, _| {

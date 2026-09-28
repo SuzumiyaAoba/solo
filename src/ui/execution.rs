@@ -1,6 +1,6 @@
 //! 実行先の選択、ワーカーの起動、セッションとの接続。
 use super::*;
-use solo::{acp_worker, mock, subscription_worker};
+use solo::{acp_worker, codex_worker, mock};
 
 /// 会話を開始した実行先。選択中の項目やワーカーの接続寿命とは独立して保持する。
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -21,14 +21,14 @@ impl Backend {
         match kind {
             BackendKind::Subscription => Some(Self::Subscription),
             BackendKind::Acp { id } => Some(Self::Acp(id.clone())),
-            BackendKind::Mock { scenario } => SCENARIOS.get(*scenario).copied().map(Self::Mock),
+            BackendKind::Mock { key } => Scenario::from_key(key).map(Self::Mock),
         }
     }
 }
 
 pub(super) enum UiController {
     Mock(mock::Controller),
-    Subscription(subscription_worker::Controller),
+    Subscription(codex_worker::Controller),
     Acp(acp_worker::Controller),
 }
 
@@ -54,11 +54,12 @@ impl SessionView {
         self.login_only || self.backend.as_ref().is_some_and(Backend::uses_workspace)
     }
 
+    /// 実行開始。ドメイン status はイベントで進むため、ここでは UI 側の接続中表示だけ立てる。
+    /// reason は次の TurnStarted/finish が上書きするので触らない。
     fn begin_run(&mut self, cx: &mut Context<Workspace>) {
-        self.model.status = Status::Connecting;
-        self.model.reason.clear();
-        self.started_at = Some(Instant::now());
-        self.elapsed = None;
+        self.exec.connecting = true;
+        self.metrics.started_at = Some(Instant::now());
+        self.metrics.elapsed = None;
         self.unread_result = false;
         self.composer.update(cx, |input, cx| {
             input.can_submit = false;
@@ -69,7 +70,7 @@ impl SessionView {
     /// 実行 backend・永続化 kind・選択 index を一括で確定する(片方だけ更新する漏れを防ぐ)。
     fn assign_backend(&mut self, backend: Backend, kind: BackendKind, selected: usize) {
         self.backend = Some(backend);
-        self.meta.backend = Some(kind);
+        self.persist.meta.backend = Some(kind);
         self.selected_backend = selected;
     }
 
@@ -80,12 +81,12 @@ impl SessionView {
         wrap: fn(D) -> UiDelivery,
         cx: &mut Context<Workspace>,
     ) {
-        self.controller = Some(controller);
-        self.stream_generation += 1;
-        self.task = Some(Workspace::listen(
+        self.exec.controller = Some(controller);
+        self.exec.stream_generation += 1;
+        self.exec.task = Some(Workspace::listen(
             receiver,
             self.model.id.clone(),
-            self.stream_generation,
+            self.exec.stream_generation,
             wrap,
             cx,
         ));
@@ -95,21 +96,20 @@ impl SessionView {
 impl Workspace {
     pub(super) fn start_selected(&mut self, index: usize, prompt: String, cx: &mut Context<Self>) {
         if prompt.trim().is_empty()
-            || self.sessions[index].model.status.is_active()
+            || self.session_at(index).display_status().is_active()
             || self
                 .queue
-                .position(&self.sessions[index].model.id)
+                .position(&self.session_at(index).model.id)
                 .is_some()
         {
             return;
         }
-        let selected = self.sessions[index].selected_backend;
-        let requested = self
-            .backend_kind_at(selected)
-            .and_then(|kind| Backend::from_kind(&kind))
-            .unwrap_or(Backend::Subscription);
-        if self.sessions[index].model.last_sequence > 0
-            && self.sessions[index].backend.as_ref() != Some(&requested)
+        let backend_kind = self
+            .backend_kind_at(self.session_at(index).selected_backend)
+            .unwrap_or(BackendKind::Subscription);
+        let requested = Backend::from_kind(&backend_kind).unwrap_or(Backend::Subscription);
+        if self.session_at(index).model.last_sequence() > 0
+            && self.session_at(index).backend.as_ref() != Some(&requested)
         {
             self.start_failed(
                 index,
@@ -119,37 +119,72 @@ impl Workspace {
             );
             return;
         }
-        if self.sessions[index].model.last_sequence == 0 {
-            self.sessions[index].model.title = task_title(&prompt);
-        }
-        if selected <= self.acp_agents.len()
-            && (self.workspace_busy() || !self.queue.is_empty() || self.queue.paused)
+        // タイトルは各 start_* が config.title へ入れ、SessionCreated イベントで投影される。
+        if self.picker_uses_workspace(self.session_at(index).selected_backend)
+            && (self.workspace_busy() || !self.queue.is_empty() || self.queue.paused())
         {
             self.enqueue(index, prompt, cx);
             return;
         }
-        self.run_backend(index, selected, prompt, cx);
+        self.run_backend(index, &backend_kind, prompt, cx);
     }
 
+    /// キュー/選択の BackendKind から実行を起動する。永続化済みの識別なので
+    /// index ではなく kind を受け取り、解決できない実行先はエラー扱いにする。
     pub(super) fn run_backend(
         &mut self,
         index: usize,
-        selected: usize,
+        kind: &BackendKind,
         prompt: String,
         cx: &mut Context<Self>,
     ) {
-        self.sessions[index].last_prompt = prompt.clone();
-        if selected == 0 {
-            self.start_subscription(index, prompt, cx);
-        } else if let Some(agent) = self.acp_agents.get(selected - 1).cloned() {
-            self.start_acp(index, agent, prompt, cx);
-        } else {
-            self.start_mock(
-                index,
-                SCENARIOS[selected - 1 - self.acp_agents.len()],
-                prompt,
-                cx,
-            );
+        self.session_at_mut(index).last_prompt = prompt.clone();
+        match kind {
+            BackendKind::Subscription => self.start_subscription(index, prompt, cx),
+            BackendKind::Acp { id } => {
+                match self
+                    .acp_agents
+                    .iter()
+                    .find(|agent| &agent.id == id)
+                    .cloned()
+                {
+                    Some(agent) => self.start_acp(index, agent, prompt, cx),
+                    None => self.start_failed(
+                        index,
+                        prompt,
+                        format!("ACP agent {id} が見つかりません"),
+                        cx,
+                    ),
+                }
+            }
+            BackendKind::Mock { key } => match Scenario::from_key(key) {
+                Some(scenario) => self.start_mock(index, scenario, prompt, cx),
+                None => self.start_failed(
+                    index,
+                    prompt,
+                    format!("Mock シナリオ {key} が見つかりません"),
+                    cx,
+                ),
+            },
+        }
+    }
+
+    /// 起動後の共通処理: メッセージを消し、セッション情報を保存して操作状態を更新する。
+    fn finish_start(&mut self, index: usize, cx: &mut Context<Self>) {
+        self.message.clear();
+        self.save_session_meta(index, cx);
+        self.sync_controls(cx);
+        cx.notify();
+    }
+
+    /// 表示中のセッションが対象なら picker の選択を確定した実行先へ合わせて閉じる。
+    fn sync_picker(&mut self, index: usize, cx: &mut Context<Self>) {
+        if index == self.selected {
+            let selected = self.session_at(index).selected_backend;
+            self.scenario_picker.update(cx, |picker, cx| {
+                picker.selected = selected;
+                picker.close(cx);
+            });
         }
     }
 
@@ -160,18 +195,28 @@ impl Workspace {
         prompt: String,
         cx: &mut Context<Self>,
     ) {
-        let session = &mut self.sessions[index];
-        if session.model.status.is_active() {
+        let backend_kind = BackendKind::Mock {
+            key: scenario.key().to_owned(),
+        };
+        let backend_index = self.backend_index(&backend_kind).unwrap_or(0);
+        // session を保持しながら self.workspace_path/self.store/self.message に触れるため、
+        // sessions の借用をフィールド分割する(session_at_mut だと &mut self 全体になり衝突する)。
+        let sessions = &mut self.sessions;
+        let session = &mut sessions[index];
+        if session.display_status().is_active() {
             return;
         }
+        // scenario() など run_backend を通らず直接呼ばれる経路があるため、last_prompt はここで設定する。
         session.last_prompt = prompt.clone();
-        let mut config = mock::Config::new(&session.model.id, scenario);
-        if session.model.last_sequence == 0 {
-            session.model.title = task_title(&prompt);
+        let mut config = mock::Config::new(session.model.id.clone(), scenario);
+        // タイトルは SessionCreated イベントで投影へ反映されるため、config.title へだけ入れる。
+        if session.model.last_sequence() == 0 {
+            config.title = task_title(&prompt);
+        } else {
+            config.title = session.model.title().to_owned();
         }
-        config.title = session.model.title.clone();
         config.prompt = prompt.clone();
-        config.start_sequence = session.model.last_sequence;
+        config.start_sequence = session.model.last_sequence();
         config.workspace = self.workspace_path.clone();
         // 全文ログはセッションの保存領域へ書き、再起動後も参照できるようにする。
         if let Some(store) = self.store.clone() {
@@ -180,7 +225,7 @@ impl Workspace {
             {
                 self.message = format!("セッションを保存できません: {error}");
             }
-            config.log_dir = session.file.as_ref().map(|file| file.log_dir());
+            config.log_dir = session.persist.file.as_ref().map(|file| file.log_dir());
         }
         let (controller, receiver) = match mock::start(config) {
             Ok(stream) => stream,
@@ -195,50 +240,38 @@ impl Workspace {
             }
         };
         session.begin_run(cx);
-        let scenario_index = SCENARIOS
-            .iter()
-            .position(|item| *item == scenario)
-            .unwrap_or(0);
-        session.assign_backend(
-            Backend::Mock(scenario),
-            BackendKind::Mock {
-                scenario: scenario_index,
-            },
-            1 + self.acp_agents.len() + scenario_index,
-        );
-        if index == self.selected {
-            self.scenario_picker.update(cx, |picker, cx| {
-                picker.selected = session.selected_backend;
-                picker.close(cx);
-            });
-        }
+        session.assign_backend(Backend::Mock(scenario), backend_kind, backend_index);
         session.attach_stream(
             UiController::Mock(controller),
             receiver,
             UiDelivery::Mock,
             cx,
         );
-        self.message.clear();
-        self.save_session_meta(index, cx);
-        self.sync_controls(cx);
-        cx.notify();
+        self.sync_picker(index, cx);
+        self.finish_start(index, cx);
     }
 
     fn start_subscription(&mut self, index: usize, prompt: String, cx: &mut Context<Self>) {
-        let session = &mut self.sessions[index];
-        if session.model.status.is_active() {
+        // config 組み立てで self.workspace_path を読むため、session の借用前に取り出す。
+        let workspace = PathBuf::from(&self.workspace_path);
+        let session = self.session_at_mut(index);
+        if session.display_status().is_active() {
             return;
         }
-        let config = subscription_worker::Config {
+        let config = codex_worker::Config {
             session_id: session.model.id.clone(),
-            title: session.model.title.clone(),
-            workspace: PathBuf::from(&self.workspace_path),
+            title: if session.model.last_sequence() == 0 {
+                task_title(&prompt)
+            } else {
+                session.model.title().to_owned()
+            },
+            workspace,
             prompt: prompt.clone(),
             history: session.history.clone(),
-            start_sequence: session.model.last_sequence,
+            start_sequence: session.model.last_sequence(),
             model: std::env::var("SOLO_MODEL").unwrap_or_default(),
         };
-        let (controller, receiver) = match subscription_worker::start(config) {
+        let (controller, receiver) = match codex_worker::start(config) {
             Ok(stream) => stream,
             Err(error) => {
                 self.start_failed(
@@ -254,28 +287,21 @@ impl Workspace {
         session.login = None;
         session.login_only = false;
         session.approval = None;
+        session.exec.provider_hint = Some("Codex / ChatGPT Subscription".into());
         session.assign_backend(Backend::Subscription, BackendKind::Subscription, 0);
-        if index == self.selected {
-            self.scenario_picker.update(cx, |picker, cx| {
-                picker.selected = 0;
-                picker.close(cx);
-            });
-        }
         session.attach_stream(
             UiController::Subscription(controller),
             receiver,
             UiDelivery::Subscription,
             cx,
         );
-        self.message.clear();
-        self.save_session_meta(index, cx);
-        self.sync_controls(cx);
-        cx.notify();
+        self.sync_picker(index, cx);
+        self.finish_start(index, cx);
     }
 
     pub(super) fn start_login(&mut self, cx: &mut Context<Self>) {
-        let session = &mut self.sessions[self.selected];
-        if session.model.status.is_active()
+        let session = self.session();
+        if session.display_status().is_active()
             || self.queue.position(&session.model.id).is_some()
             || session.selected_backend != 0
             || session
@@ -285,7 +311,7 @@ impl Workspace {
         {
             return;
         }
-        let (controller, receiver) = match subscription_worker::start_login() {
+        let (controller, receiver) = match codex_worker::start_login() {
             Ok(stream) => stream,
             Err(error) => {
                 self.message = format!("ChatGPT ログインを開始できませんでした: {error}");
@@ -293,8 +319,9 @@ impl Workspace {
                 return;
             }
         };
+        let session = self.session_mut();
         session.begin_run(cx);
-        session.model.provider = "ChatGPT ログイン待ち".into();
+        session.exec.provider_hint = Some("ChatGPT ログイン待ち".into());
         session.login = None;
         session.login_only = true;
         session.attach_stream(
@@ -315,17 +342,24 @@ impl Workspace {
         prompt: String,
         cx: &mut Context<Self>,
     ) {
-        let session = &mut self.sessions[index];
-        if session.model.status.is_active() {
+        let backend_index = self
+            .backend_index(&BackendKind::Acp {
+                id: agent.id.clone(),
+            })
+            .unwrap_or(0);
+        // config 組み立てで self.workspace_path を読むため、session の借用前に取り出す。
+        let workspace = PathBuf::from(&self.workspace_path);
+        let session = self.session_at_mut(index);
+        if session.display_status().is_active() {
             return;
         }
-        if let Some(UiController::Acp(controller)) = &session.controller {
+        if let Some(UiController::Acp(controller)) = &session.exec.controller {
             if let Err(error) = controller.prompt(prompt.clone()) {
                 self.start_failed(index, prompt, error.to_string(), cx);
                 return;
             }
         } else {
-            if session.model.turn_id.is_some() {
+            if session.model.turn_id().is_some() {
                 self.start_failed(
                     index,
                     prompt,
@@ -336,10 +370,14 @@ impl Workspace {
             }
             let config = acp_worker::Config {
                 local_session_id: session.model.id.clone(),
-                title: session.model.title.clone(),
-                workspace: PathBuf::from(&self.workspace_path),
+                title: if session.model.last_sequence() == 0 {
+                    task_title(&prompt)
+                } else {
+                    session.model.title().to_owned()
+                },
+                workspace,
                 profile: agent.clone(),
-                start_sequence: session.model.last_sequence,
+                start_sequence: session.model.last_sequence(),
             };
             let (controller, receiver) = match acp_worker::start(config) {
                 Ok(stream) => stream,
@@ -360,27 +398,21 @@ impl Workspace {
             session.attach_stream(UiController::Acp(controller), receiver, UiDelivery::Acp, cx);
         }
         session.begin_run(cx);
-        session.model.provider = format!("ACP / {}", agent.name);
+        session.exec.provider_hint = Some(format!("ACP / {}", agent.name));
         session.assign_backend(
             Backend::Acp(agent.id.clone()),
             BackendKind::Acp {
                 id: agent.id.clone(),
             },
-            1 + self
-                .acp_agents
-                .iter()
-                .position(|profile| profile.id == agent.id)
-                .unwrap_or(0),
+            backend_index,
         );
-        self.message.clear();
-        self.save_session_meta(index, cx);
-        self.sync_controls(cx);
-        cx.notify();
+        self.finish_start(index, cx);
     }
 
     pub(super) fn scenario(&mut self, scenario: Scenario, cx: &mut Context<Self>) {
-        let session = &self.sessions[self.selected];
-        if session.model.status.is_active() || self.queue.position(&session.model.id).is_some() {
+        let session = self.session();
+        if session.display_status().is_active() || self.queue.position(&session.model.id).is_some()
+        {
             return;
         }
         if session.uses_workspace() {
@@ -403,7 +435,7 @@ impl Workspace {
         message: String,
         cx: &mut Context<Self>,
     ) {
-        self.sessions[index].composer.update(cx, |input, cx| {
+        self.session_at_mut(index).composer.update(cx, |input, cx| {
             input.set_value(prompt, cx);
             cx.notify();
         });

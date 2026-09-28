@@ -25,7 +25,7 @@ impl Activity {
             running: workspace
                 .sessions
                 .iter()
-                .filter(|s| s.model.status.is_active())
+                .filter(|s| s.display_status().is_active())
                 .count(),
             queued: workspace.queue.len(),
             attention: workspace
@@ -58,6 +58,8 @@ pub(super) struct ProjectManager {
     smoke: bool,
     collapsed_projects: HashSet<u64>,
     attention_only: bool,
+    /// smoke で隔離した保存先の寿命保持。解放ビルドでは常に None で読まれない。
+    #[cfg_attr(not(debug_assertions), allow(dead_code))]
     pub(super) temporary: Option<tempfile::TempDir>,
 }
 
@@ -116,9 +118,12 @@ impl ProjectManager {
             temporary,
         };
         this.activate(window, cx);
+        #[cfg(debug_assertions)]
         if run_smoke {
             super::projects_smoke::start(window, cx);
         }
+        #[cfg(not(debug_assertions))]
+        let _ = run_smoke;
         this
     }
 
@@ -352,17 +357,18 @@ impl ProjectManager {
                 return;
             }
         };
+        let same_path = |id: u64| {
+            next.get(id)
+                .zip(self.catalog.get(id))
+                .is_some_and(|(a, b)| a.path == b.path)
+        };
         for opened in &self.opened {
-            let same_path = next
-                .get(opened.id)
-                .zip(self.catalog.get(opened.id))
-                .is_some_and(|(a, b)| a.path == b.path);
             let workspace = opened.workspace.read(cx);
-            if !same_path
+            if !same_path(opened.id)
                 && (!workspace.queue.is_empty()
                     || workspace.sessions.iter().any(|session| {
-                        session.model.status.is_active()
-                            || !session.model.chat.is_empty()
+                        session.display_status().is_active()
+                            || !session.model.chat().is_empty()
                             || !session.composer.read(cx).value(cx).is_empty()
                     }))
             {
@@ -376,11 +382,7 @@ impl ProjectManager {
                 return;
             }
         }
-        self.opened.retain(|opened| {
-            next.get(opened.id)
-                .zip(self.catalog.get(opened.id))
-                .is_some_and(|(a, b)| a.path == b.path)
-        });
+        self.opened.retain(|opened| same_path(opened.id));
         self.catalog = next;
         self.error = None;
         self.activate(window, cx);
@@ -395,6 +397,70 @@ impl ProjectManager {
         if let Some(view) = self.catalog.active.and_then(|id| self.workspace(id)) {
             view.update(cx, |workspace, cx| f(workspace, window, cx));
         }
+    }
+
+    /// アクションを active な workspace の操作へ転送するリスナーを作る。
+    fn forward<A: Action>(
+        cx: &Context<Self>,
+        f: fn(&mut Workspace, &mut Window, &mut Context<Workspace>),
+    ) -> impl Fn(&A, &mut Window, &mut App) + 'static {
+        cx.listener(move |this, _: &A, window, cx| this.with_active(window, cx, f))
+    }
+
+    /// プロジェクト未選択時の空状態。ドラッグ領域と追加・一覧ボタンだけを出す。
+    fn no_project_view(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let p = ds::theme(cx);
+        div()
+            .size_full()
+            .flex()
+            .flex_col()
+            .child(
+                div()
+                    .h(px(46.))
+                    .window_control_area(WindowControlArea::Drag),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .justify_center()
+                    .gap_4()
+                    .child(Icon::Folder.view(p.muted).size(px(32.)))
+                    .child(div().text_color(rgb(p.muted)).child("プロジェクトなし"))
+                    .child(
+                        div()
+                            .flex()
+                            .gap_2()
+                            .child(
+                                Button::icon(
+                                    "empty-add-project",
+                                    Icon::Plus,
+                                    "プロジェクトを追加 · ⌘ ⇧ O",
+                                )
+                                .variant(ButtonVariant::Primary)
+                                .disabled(self.choosing_folder)
+                                .on_click(
+                                    cx.listener(|this, _, window, cx| {
+                                        this.choose_folder(window, cx)
+                                    }),
+                                ),
+                            )
+                            .child(
+                                Button::icon(
+                                    "empty-project-list",
+                                    Icon::Folder,
+                                    "プロジェクト一覧 · ⌘ ⇧ P",
+                                )
+                                .on_click(
+                                    cx.listener(|this, _, window, cx| {
+                                        this.show_projects(window, cx)
+                                    }),
+                                ),
+                            ),
+                    ),
+            )
     }
 }
 
@@ -422,44 +488,28 @@ impl Render for ProjectManager {
                 }
                 this.with_active(window, cx, |workspace, window, cx| {
                     workspace.new_session(window, cx);
-                    window.focus(
-                        &workspace.sessions[workspace.selected]
-                            .composer
-                            .focus_handle(cx),
-                        cx,
-                    );
+                    window.focus(&workspace.session().composer.focus_handle(cx), cx);
                 })
             }))
-            .on_action(cx.listener(|this, _: &ShowOverview, window, cx| {
-                this.with_active(window, cx, |workspace, _, cx| {
-                    workspace.show_tab(Tab::Overview, cx)
-                })
+            .on_action(Self::forward::<ShowOverview>(cx, |workspace, _, cx| {
+                workspace.show_tab(Tab::Overview, cx)
             }))
-            .on_action(cx.listener(|this, _: &ShowChat, window, cx| {
-                this.with_active(window, cx, |workspace, _, cx| {
-                    workspace.show_tab(Tab::Chat, cx)
-                })
+            .on_action(Self::forward::<ShowChat>(cx, |workspace, _, cx| {
+                workspace.show_tab(Tab::Chat, cx)
             }))
-            .on_action(cx.listener(|this, _: &ShowThread, window, cx| {
-                this.with_active(window, cx, |workspace, window, cx| {
-                    workspace.toggle_thread(window, cx)
-                })
+            .on_action(Self::forward::<ShowThread>(cx, |workspace, window, cx| {
+                workspace.toggle_thread(window, cx)
             }))
-            .on_action(cx.listener(|this, _: &ShowDiff, window, cx| {
-                this.with_active(window, cx, |workspace, _, cx| {
-                    workspace.show_tab(Tab::Diff, cx)
-                })
+            .on_action(Self::forward::<ShowDiff>(cx, |workspace, _, cx| {
+                workspace.show_tab(Tab::Diff, cx)
             }))
-            .on_action(cx.listener(|this, _: &ShowLogs, window, cx| {
-                this.with_active(window, cx, |workspace, _, cx| {
-                    workspace.show_tab(Tab::Logs, cx)
-                })
+            .on_action(Self::forward::<ShowLogs>(cx, |workspace, _, cx| {
+                workspace.show_tab(Tab::Logs, cx)
             }))
-            .on_action(cx.listener(|this, _: &NextAttention, window, cx| {
-                this.with_active(window, cx, |workspace, window, cx| {
-                    workspace.next_attention(window, cx)
-                })
-            }))
+            .on_action(Self::forward::<NextAttention>(
+                cx,
+                |workspace, window, cx| workspace.next_attention(window, cx),
+            ))
             .child(self.titlebar(cx))
             .child(
                 div()
@@ -482,71 +532,11 @@ impl Render for ProjectManager {
                                         .size_full()
                                         .when_some(view.clone(), |v, view| v.child(view))
                                         .when(view.is_none(), |v| {
-                                            v.child(
-                                                div()
-                                                    .size_full()
-                                                    .flex()
-                                                    .flex_col()
-                                                    .child(
-                                                        div()
-                                                            .h(px(46.))
-                                                            .window_control_area(WindowControlArea::Drag),
-                                                    )
-                                                    .child(
-                                                        div()
-                                                            .flex_1()
-                                                            .flex()
-                                                            .flex_col()
-                                                            .items_center()
-                                                            .justify_center()
-                                                            .gap_4()
-                                                            .child(Icon::Folder.view(p.muted).size(px(32.)))
-                                                            .child(
-                                                                div()
-                                                                    .text_color(rgb(p.muted))
-                                                                    .child("プロジェクトなし"),
-                                                            )
-                                                            .child(
-                                                                div()
-                                                                    .flex()
-                                                                    .gap_2()
-                                                                    .child(
-                                                                        Button::icon(
-                                                                            "empty-add-project",
-                                                                            Icon::Plus,
-                                                                            "プロジェクトを追加 · ⌘ ⇧ O",
-                                                                        )
-                                                                        .variant(ButtonVariant::Primary)
-                                                                        .disabled(self.choosing_folder)
-                                                                        .on_click(cx.listener(
-                                                                            |this, _, window, cx| {
-                                                                                this.choose_folder(
-                                                                                    window, cx,
-                                                                                )
-                                                                            },
-                                                                        )),
-                                                                    )
-                                                                    .child(
-                                                                        Button::icon(
-                                                                            "empty-project-list",
-                                                                            Icon::Folder,
-                                                                            "プロジェクト一覧 · ⌘ ⇧ P",
-                                                                        )
-                                                                        .on_click(cx.listener(
-                                                                            |this, _, window, cx| {
-                                                                                this.show_projects(
-                                                                                    window, cx,
-                                                                                )
-                                                                            },
-                                                                        )),
-                                                                    ),
-                                                            ),
-                                                    ),
-                                            )
+                                            v.child(self.no_project_view(cx))
                                         }),
                                 ),
                             ),
-                        )
+                    ),
             )
             .when_some(self.error.clone(), |v, error| {
                 v.child(

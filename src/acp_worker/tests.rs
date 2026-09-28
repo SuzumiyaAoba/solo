@@ -1,5 +1,6 @@
 use super::*;
-use crate::projection::{Apply, Session, Status};
+use crate::event::TurnId;
+use crate::projection::{Apply, SessionProjection, Speaker, Status};
 #[cfg(unix)]
 use std::{
     fs,
@@ -30,8 +31,14 @@ fn permission_request_inherits_tool_metadata_and_updates_do_not_clear_it() {
 #[test]
 fn completed_tool_updates_preserve_the_outcome_and_accept_later_content() {
     let (sender, receiver) = async_channel::bounded(32);
-    let mut emitter = Emitter::new("local".into(), 0, sender);
-    emitter.begin_turn("inspect");
+    let mut emitter = Emitter::new(
+        Sequencer::new(SessionId::parse("local").unwrap(), 0, String::new()),
+        sender,
+    );
+    emitter.begin_turn(TurnId::from("acp-turn-1".to_owned()));
+    emitter.emit(Event::TurnStarted {
+        prompt: "inspect".into(),
+    });
     let mut bridge = Bridge::default();
     bridge.handle(
         &json!({"sessionUpdate":"tool_call","toolCallId":"one","title":"read","status":"pending","rawInput":{"path":"a"}}),
@@ -57,16 +64,16 @@ fn completed_tool_updates_preserve_the_outcome_and_accept_later_content() {
         usage: Usage::default(),
     });
     drop(emitter);
-    let mut session = Session::new("local".into(), "test".into());
+    let mut session = SessionProjection::new(SessionId::parse("local").unwrap(), "test".into());
     while let Ok(Delivery::Event(event)) = receiver.try_recv() {
         assert_eq!(session.apply(event), Apply::Applied);
     }
-    assert_eq!(session.status, Status::Completed);
-    assert_eq!(session.tool_activity.len(), 1);
-    assert_eq!(session.tool_activity[0].exit_code, Some(0));
+    assert_eq!(session.status(), Status::Completed);
+    assert_eq!(session.tool_activity().len(), 1);
+    assert_eq!(session.tool_activity()[0].exit_code, Some(0));
     assert_eq!(
         session
-            .logs
+            .logs()
             .iter()
             .filter(|log| log.text == "later output")
             .count(),
@@ -95,9 +102,9 @@ IFS= read -r line
 "##,
     );
     controller.prompt("continue after login".into()).unwrap();
-    let mut session = Session::new("local".into(), "test".into());
+    let mut session = SessionProjection::new(SessionId::parse("local").unwrap(), "test".into());
     let deadline = Instant::now() + Duration::from_secs(3);
-    while session.status != Status::Completed && Instant::now() < deadline {
+    while session.status() != Status::Completed && Instant::now() < deadline {
         match receiver.try_recv() {
             Ok(Delivery::Event(event)) => {
                 session.apply(event);
@@ -106,7 +113,7 @@ IFS= read -r line
             _ => thread::sleep(Duration::from_millis(5)),
         }
     }
-    assert_eq!(session.status, Status::Completed);
+    assert_eq!(session.status(), Status::Completed);
 }
 
 #[cfg(unix)]
@@ -152,11 +159,11 @@ echo '{"jsonrpc":"2.0","id":3,"result":{"stopReason":"end_turn"}}'
 IFS= read -r line
 "##,
     );
-    let mut session = Session::new("local".into(), "test".into());
+    let mut session = SessionProjection::new(SessionId::parse("local").unwrap(), "test".into());
     for expected in [Status::Cancelled, Status::Completed] {
         controller.prompt("run".into()).unwrap();
         let deadline = Instant::now() + Duration::from_secs(3);
-        while session.status != expected && Instant::now() < deadline {
+        while session.status() != expected && Instant::now() < deadline {
             match receiver.try_recv() {
                 Ok(Delivery::Event(event)) => {
                     session.apply(event);
@@ -166,7 +173,8 @@ IFS= read -r line
             }
         }
         assert_eq!(
-            session.status, expected,
+            session.status(),
+            expected,
             "a protocol cancellation must allow a following turn"
         );
     }
@@ -196,7 +204,7 @@ echo '{"jsonrpc":"2.0","id":3,"result":{"stopReason":"end_turn"}}'
 IFS= read -r line
 "##,
     );
-    let mut session = Session::new("local".into(), "test".into());
+    let mut session = SessionProjection::new(SessionId::parse("local").unwrap(), "test".into());
     controller.prompt("first".into()).unwrap();
     let mut pending = None;
     let deadline = Instant::now() + Duration::from_secs(3);
@@ -213,13 +221,13 @@ IFS= read -r line
     assert!(
         pending.is_some(),
         "permission request missing: status={:?}, sequence={}, reason={}",
-        session.status,
-        session.last_sequence,
-        session.reason
+        session.status(),
+        session.last_sequence(),
+        session.reason()
     );
     controller.cancel();
     let deadline = Instant::now() + Duration::from_secs(1);
-    while Instant::now() < deadline && session.status != Status::Cancelled {
+    while Instant::now() < deadline && session.status() != Status::Cancelled {
         if let Ok(Delivery::Event(event)) = receiver.try_recv() {
             session.apply(event);
         }
@@ -227,15 +235,17 @@ IFS= read -r line
     }
     drop(pending);
     assert_eq!(
-        session.status,
+        session.status(),
         Status::Cancelled,
         "a UI reply must not be needed to cancel"
     );
     controller.prompt("second".into()).unwrap();
     let deadline = Instant::now() + Duration::from_secs(3);
-    while Instant::now() < deadline && session.status != Status::Completed {
+    while Instant::now() < deadline && session.status() != Status::Completed {
         match receiver.try_recv() {
-            Ok(Delivery::Approval { reply, .. }) => reply.send_blocking(true).unwrap(),
+            Ok(Delivery::Approval { reply, .. }) => {
+                reply.send_blocking(ApprovalReply::user(true)).unwrap()
+            }
             Ok(Delivery::Event(event)) => {
                 session.apply(event);
             }
@@ -244,7 +254,7 @@ IFS= read -r line
         }
     }
     assert_eq!(
-        session.status,
+        session.status(),
         Status::Completed,
         "cancellation must not affect the next turn"
     );
@@ -273,7 +283,7 @@ echo '{"jsonrpc":"2.0","id":3,"result":{"stopReason":"end_turn"}}'
 IFS= read -r line
 "##,
     );
-    let mut session = Session::new("local".into(), "test".into());
+    let mut session = SessionProjection::new(SessionId::parse("local").unwrap(), "test".into());
     for (turn, prompt) in ["first prompt", "second prompt"].into_iter().enumerate() {
         controller.prompt(prompt.into()).unwrap();
         let deadline = Instant::now() + Duration::from_secs(5);
@@ -281,23 +291,24 @@ IFS= read -r line
             match receiver.try_recv() {
                 Ok(Delivery::Event(event)) => {
                     assert_eq!(session.apply(event), Apply::Applied);
-                    if session.status == Status::Completed
-                        && session.accepted > if turn == 0 { 2 } else { 8 }
+                    if session.status() == Status::Completed
+                        && session.accepted() > if turn == 0 { 2 } else { 8 }
                     {
                         break;
                     }
                 }
-                Ok(Delivery::Approval { reply, .. }) => reply.send_blocking(true).unwrap(),
-                Ok(Delivery::SessionId(id)) => assert_eq!(id, "acp-1"),
+                Ok(Delivery::Approval { reply, .. }) => {
+                    reply.send_blocking(ApprovalReply::user(true)).unwrap()
+                }
                 Ok(Delivery::Error(error)) => panic!("{error}"),
                 Err(_) => thread::sleep(Duration::from_millis(10)),
             }
         }
-        assert_eq!(session.status, Status::Completed, "{}", session.reason);
+        assert_eq!(session.status(), Status::Completed, "{}", session.reason());
     }
-    assert!(session.chat.iter().any(|block| block.text == "first"));
-    assert!(session.chat.iter().any(|block| block.text == "second"));
-    assert_eq!(session.diffs.len(), 1);
+    assert!(session.chat().iter().any(|block| block.text == "first"));
+    assert!(session.chat().iter().any(|block| block.text == "second"));
+    assert_eq!(session.diffs().len(), 1);
     drop(controller);
 }
 
@@ -310,7 +321,7 @@ pub(super) fn test_agent(script: &str) -> (tempfile::TempDir, Controller, Receiv
     permissions.set_mode(0o700);
     fs::set_permissions(&agent, permissions).unwrap();
     let (controller, receiver) = start(Config {
-        local_session_id: "local".into(),
+        local_session_id: SessionId::parse("local").unwrap(),
         title: "test".into(),
         workspace: dir.path().to_path_buf(),
         profile: AgentProfile {
@@ -323,4 +334,66 @@ pub(super) fn test_agent(script: &str) -> (tempfile::TempDir, Controller, Receiv
     })
     .unwrap();
     (dir, controller, receiver)
+}
+
+#[test]
+fn tool_calls_split_text_into_separate_message_blocks() {
+    let (sender, receiver) = async_channel::bounded(32);
+    let mut emitter = Emitter::new(
+        Sequencer::new(SessionId::parse("local").unwrap(), 0, String::new()),
+        sender,
+    );
+    emitter.begin_turn(TurnId::from("acp-turn-1".to_owned()));
+    emitter.emit(Event::TurnStarted {
+        prompt: "inspect".into(),
+    });
+    let mut bridge = Bridge::default();
+    // ACP v1 の chunk は messageId を持たないことが多い。
+    bridge.handle(
+        &json!({"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"読みます。"}}),
+        &mut emitter,
+    );
+    bridge.handle(
+        &json!({"sessionUpdate":"tool_call","toolCallId":"one","title":"read","status":"pending"}),
+        &mut emitter,
+    );
+    bridge.handle(
+        &json!({"sessionUpdate":"tool_call_update","toolCallId":"one","status":"completed"}),
+        &mut emitter,
+    );
+    bridge.handle(
+        &json!({"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"完了しました。"}}),
+        &mut emitter,
+    );
+    // 明示された messageId はそのまま使う。
+    bridge.handle(
+        &json!({"sessionUpdate":"agent_message_chunk","messageId":"given-1","content":{"type":"text","text":"以上。"}}),
+        &mut emitter,
+    );
+    emitter.emit(Event::TurnCompleted {
+        reason: "done".into(),
+        usage: Usage::default(),
+    });
+    drop(emitter);
+    let mut session = SessionProjection::new(SessionId::parse("local").unwrap(), "test".into());
+    while let Ok(Delivery::Event(event)) = receiver.try_recv() {
+        assert_eq!(session.apply(event), Apply::Applied);
+    }
+    let blocks: Vec<_> = session
+        .chat()
+        .iter()
+        .filter(|block| block.speaker == Speaker::Assistant)
+        .collect();
+    assert_eq!(
+        blocks
+            .iter()
+            .map(|block| (block.message_id.as_str(), block.text.as_str()))
+            .collect::<Vec<_>>(),
+        [
+            ("acp-message-0", "読みます。"),
+            ("acp-message-1", "完了しました。"),
+            ("given-1", "以上。"),
+        ],
+        "tool call の前後の本文は別ブロックになり、messageId 指定は保持する"
+    );
 }

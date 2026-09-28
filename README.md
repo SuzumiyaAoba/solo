@@ -185,7 +185,9 @@ ACP では agent が `allow_once` を提示する要求だけを許可でき、�
 ### 基本ツール
 
 同じ Sheet の **ツール** タブで、組込みの `read` / `search` / `edit` / `exec` それぞれに
-Allow / Deny / Ask（既定に戻す）を設定できます。既定は read・search が許可、edit・exec が確認です。
+既定 / Allow / Deny / Ask を設定できます。既定は read・search が許可、edit・exec が確認です。
+Allow は確認を省略します（コマンドの Deny ルールに一致する exec は Deny を優先します）。
+Deny は常に拒否、Ask は read・search も含めて承認確認に回します。
 保存先はコマンドルールと同じ `workspaces` エントリの `tool_decisions` です。
   管理画面でエラーを確認し、設定を修正して再読み込みできます。
 
@@ -218,8 +220,12 @@ YAML の設定形式は `version: 1` です。YAML がまだ存在しない場�
 shell の終了を制御しますが、その子プロセスまで停止する保証はありません。
 
 **変更** タブの差分は `edit` の置換だけでなく、`exec` が実行前後で書き換えた
-ファイル(workspace スナップショットの比較)からも生成します。`.git` / `target` /
-`node_modules` などのディレクトリと 256 KiB を超えるファイルは追跡対象外です。
+ファイル(workspace スナップショットの比較)からも生成します。ベースラインは承認の後、
+実行の直前に取るため、確認中の自分の編集は差分に出ません。コマンドが失敗しても
+実行済みの変更を表示し、1回の exec では最大8ファイルまで出します。
+`.git` / `target` / `node_modules` / `.next` / `dist` / `build` / `.venv` / `__pycache__`
+は検索と差分追跡の両方で除外し、256 KiB を超えるファイルは追跡対象外です。
+`search` は走査エントリの上限に達すると、部分結果と注記を返します。
 
 ## デザイン確認アプリ
 
@@ -328,8 +334,11 @@ Slack 型の構成で、左側の **プロジェクト** がチャンネルを�
 会話は最大1,024 byte の表示 block に分け、block 単位でコピーできます。
 セッションは各プロジェクト最大8件。順番待ちとレビュー記録も `~/.solo/sessions/` に保存します。
 全文ログはセッションの `logs/` に書き出され、チャンネルを閉じると履歴ごと削除します。
-アプリを終了しても消えず、次回起動時に復元します。meta が無い・閉じられたセッションの
-残骸は起動時に回収します。再起動中に終了した実行は成功扱いにせず「結果未確認」とします。
+アプリを終了しても消えず、次回起動時に復元します。閉じられたセッションと
+イベントの無い残骸は起動時に回収します。state.json を読めないセッションは復元せず
+エラーとして報告し、ディスク上は削除しません。他のウィンドウが開いているセッションも
+回収しません。下書きは1 MiB まで保存します。
+再起動中に終了した実行は成功扱いにせず「結果未確認」とします。
 ヘッダーの外部リンクアイコンで、会話とイベントを `~/.solo/exports/` に書き出せます。
 
 ## 境界と契約
@@ -340,29 +349,38 @@ GPUI window / Composer
     ← bounded channel (256件)
 Solo ハーネス + Codex モデル / ACP agent / 疑似 worker / 一時ログ I/O
 
-event.rs       共通 envelope の生成と version 付き event の decode
-projection.rs  session ごとの順序・重複・turn 検査、表示状態
+event.rs       共通 envelope・採番(Sequencer/Emitter)と version 付き event の decode
+backend.rs     実行先(Subscription/ACP/Mock)の安定識別子。表示 index とは分離
+projection.rs  session ごとの順序・重複・turn 検査、表示状態(SessionProjection)
 projection/diff.rs 差分の行番号・追加削除数・表示上限
 projection/thread.rs 依頼ごとのツール・サブエージェント履歴と保持上限
-orchestration.rs  workspace の順番待ち、停止・再開と依頼名の生成
+orchestration.rs  workspace の順番待ち(BackendKind で保持)、停止・再開
 projects.rs    フォルダ単位のプロジェクト登録と設定の保存・競合検出
 storage.rs     ファイル読み取りの上限と設定ストアの排他更新・アトミック保存
 session_store.rs  ~/.solo/sessions への追記型イベント保存・復元・掃除・書き出し
+session_store/store.rs  イベント・meta・履歴ファイルの読み書きとストア操作
+session_store/model.rs 保存メタ・順番待ち・復元セッションのデータ型
+session_store/transcript.rs セッションの Markdown 書き出し
 mock.rs        疑似イベント、backpressure、中止、障害注入、ログ退避
 harness.rs     モデル・tool・承認を接続する実行ループと中止・呼出し上限
 harness/workspace.rs ワークスペース内のファイル操作と tool の引数・結果の変換
 harness/workspace/command.rs コマンドの起動・出力制限・中止・終了処理
-codex_subscription.rs  ChatGPT OAuth と Codex モデルを使う Model アダプター
+codex.rs       ChatGPT OAuth と Codex モデルを使う Model アダプター
 config.rs      ~/.config/solo/config.yml の読み込み・検証・保存
-auto_approval.rs  指定モデルによるツール承認の判定と手動確認への復帰
-subscription_worker.rs Solo ハーネスの更新から Solo event への変換
+command_rules.rs 承認ルール(完全一致/ワイルドカード)と workspace 別保存
+auto_approval.rs  指定モデルによるツール承認の判定と手動確認への復帰(AutoReview)
+codex_worker.rs  Solo ハーネスの更新から Solo event への変換
+codex_worker/workspace_diff.rs ワークスペースのスナップショットと差分検出
+diffgen.rs     before/after テキストから unified diff を生成(全 backend 共通)
 acp.rs         ACP v1 の設定・JSON-RPC 契約
 acp_worker.rs  ACP の要求・応答から Solo event への変換
 acp_worker/connection.rs ACP 接続の状態とプロセス・ワーカーの寿命
 acp_worker/stdio.rs 中止可能な非同期の標準入出力
 acp_worker/reader.rs 受信サイズを制限した同期 client への橋渡し
 acp_worker/writer.rs ACP の送信順序を保ち、制御通知で UI を待たせない書込み
-text.rs        UTF-16 / UTF-8、grapheme、IME composition のコア契約（GPUI 非依存）
+approval/mod.rs 承認要求の正規化と worker↔UI の往路(ApprovalReply)
+approval/acp.rs ACP permission 要求から ApprovalRequest への変換
+text/          表示向けユーティリティ(preview/task_title)と IME 用 TextBuffer(buffer.rs)
 ui/mod.rs      GPUI の起動、ワークスペース・セッションの表示状態と寿命
 ui/execution.rs 実行先の選択、ワーカー起動、入力復元とストリーム接続
 ui/stream.rs   イベントの一括受信、表示の更新、承認要求と順番待ちへの反映
@@ -377,6 +395,8 @@ gallery/       デザイン確認用アプリのページと操作例
 が共通 envelope です。既知 event の不正 payload は拒否し、未知 type・新 schema は
 生 payload を保持して decode し、画面には長さを制限した診断を表示します。
 同一 event ID は再適用せず、逆順・別 session・別 turn は拒否します。
+承認の問い合わせと決定は `approval_requested` / `approval_decided` イベントとして
+events.jsonl に残り、復元時に追跡できます(決定の出どころは user/auto/rule/bypass/read-only 等の source)。
 イベント欠落や未完了 tool がある完了通知を成功表示にしません。
 usage/cost は未取得なら `null` /「不明」で、0 に補完しません。
 

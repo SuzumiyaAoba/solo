@@ -1,6 +1,7 @@
 //! 依頼ごとに保持する、件数を制限した実行スレッド。描画や worker に依存しない。
 use super::Status;
-use crate::event::{Event, preview};
+use crate::event::{Event, TurnId};
+use crate::text::preview;
 use std::collections::VecDeque;
 
 pub const MAX_EXECUTION_THREADS: usize = 128;
@@ -48,7 +49,7 @@ pub struct ExecutionActivity {
 pub struct ExecutionThread {
     /// TurnStarted の sequence。同じ turn_id を再利用する旧 producer でも衝突しない。
     pub id: u64,
-    pub turn_id: String,
+    pub turn_id: TurnId,
     pub prompt: String,
     pub status: Status,
     pub reason: String,
@@ -57,7 +58,7 @@ pub struct ExecutionThread {
 }
 
 impl ExecutionThread {
-    pub(super) fn new(id: u64, turn_id: String, prompt: &str) -> Self {
+    pub(super) fn new(id: u64, turn_id: TurnId, prompt: &str) -> Self {
         Self {
             id,
             turn_id,

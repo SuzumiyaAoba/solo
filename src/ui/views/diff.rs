@@ -1,28 +1,52 @@
 use super::*;
+use solo::projection::Diff;
+
+impl SessionView {
+    /// 差分の選択を切り替える。diff_index・diff_hunk・diff_scroll は一体で更新する
+    /// (前ファイルのハンク位置やスクロールが残ると誤表示になる)。
+    pub(in crate::ui) fn select_diff(&mut self, index: usize) {
+        self.view.diff_index = index;
+        self.view.diff_hunk = 0;
+        self.view.diff_scroll = UniformListScrollHandle::new();
+    }
+
+    /// diff_index から末尾→先頭へラップしながら未確認の差分を探す。
+    fn next_unreviewed_diff(&self) -> Option<usize> {
+        let len = self.model.diffs().len();
+        (1..=len)
+            .map(|n| (self.view.diff_index + n) % len)
+            .find(|&index| !self.model.diffs()[index].reviewed)
+    }
+}
 
 impl Workspace {
     pub(super) fn diff(&self, cx: &mut Context<Self>) -> AnyElement {
-        let p = ds::theme(cx);
-        let s = &self.sessions[self.selected];
-        if s.model.diffs.is_empty() {
+        let s = self.session();
+        if s.model.diffs().is_empty() {
             return empty(Icon::FileDiff, "変更なし", cx).into_any_element();
         }
-        let Some(diff) = s.model.diffs.get(s.diff_index) else {
+        let Some(diff) = s.model.diffs().get(s.view.diff_index) else {
             return empty(Icon::FileDiff, "変更なし", cx).into_any_element();
         };
         if diff.rows.is_empty() {
             // ヘッダのみ(メタ情報だけ)の差分は内容なしとして扱う。
             return empty(Icon::FileDiff, "表示できる変更行がありません", cx).into_any_element();
         }
+        div()
+            .size_full()
+            .flex()
+            .child(self.diff_file_rail(diff, cx))
+            .child(self.diff_detail(diff, cx))
+            .into_any_element()
+    }
+
+    /// 左レール: ファイル一覧と合計増減・次の未確認ファイルへの導線。
+    fn diff_file_rail(&self, diff: &Diff, cx: &mut Context<Self>) -> Stateful<Div> {
+        let p = ds::theme(cx);
+        let s = self.session();
         let (added, removed) = diff.line_counts();
         let unreviewed = s.model.unreviewed_count();
-        let running = s.model.status.is_active();
-        let hunk_rows = diff.hunk_rows();
-        let hunk_total = hunk_rows.len();
-        // 表示は 1 始まり。未訪問なら 1 ハンク目に置く。
-        let hunk_index = s.diff_hunk.min(hunk_total.saturating_sub(1)) + 1;
-
-        let file_rail = div()
+        div()
             .id("diff-file-rail")
             .w(px(208.))
             .flex_shrink_0()
@@ -42,20 +66,10 @@ impl Workspace {
                     .gap_2()
                     .child(caption("変更", cx))
                     .child(div().flex_1())
-                    .child(ds::indicator(
+                    .child(review_indicator(
                         "diff-review-count",
-                        Icon::CircleCheck,
-                        format!(
-                            "{} / {}",
-                            s.model.diffs.len() - unreviewed,
-                            s.model.diffs.len()
-                        ),
-                        format!(
-                            "確認済み {} / {} ファイル",
-                            s.model.diffs.len() - unreviewed,
-                            s.model.diffs.len()
-                        ),
-                        Tone::Neutral,
+                        s.model.diffs().len() - unreviewed,
+                        s.model.diffs().len(),
                         cx,
                     )),
             )
@@ -69,8 +83,8 @@ impl Workspace {
                     .flex()
                     .flex_col()
                     .gap_1()
-                    .children(s.model.diffs.iter().enumerate().map(|(index, file)| {
-                        let selected = index == s.diff_index;
+                    .children(s.model.diffs().iter().enumerate().map(|(index, file)| {
+                        let selected = index == s.view.diff_index;
                         let (dir_part, base) = file
                             .path
                             .rsplit_once('/')
@@ -141,10 +155,7 @@ impl Workspace {
                                     .child(dir_part.to_string()),
                             )
                             .on_click(cx.listener(move |this, _, _, cx| {
-                                let session = &mut this.sessions[this.selected];
-                                session.diff_index = index;
-                                session.diff_hunk = 0;
-                                session.diff_scroll = UniformListScrollHandle::new();
+                                this.session_mut().select_diff(index);
                                 cx.notify();
                             }))
                             .tooltip(move |window, cx| {
@@ -171,22 +182,25 @@ impl Workspace {
                             .control_size(ControlSize::Small)
                             .disabled(unreviewed == 0)
                             .on_click(cx.listener(|this, _, _, cx| {
-                                let session = &mut this.sessions[this.selected];
-                                let len = session.model.diffs.len();
-                                if let Some(index) = (1..=len)
-                                    .map(|n| (session.diff_index + n) % len)
-                                    .find(|&index| !session.model.diffs[index].reviewed)
-                                {
-                                    session.diff_index = index;
-                                    session.diff_hunk = 0;
-                                    session.diff_scroll = UniformListScrollHandle::new();
+                                let session = this.session_mut();
+                                if let Some(index) = session.next_unreviewed_diff() {
+                                    session.select_diff(index);
                                     cx.notify();
                                 }
                             })),
                     ),
-            );
+            )
+    }
 
-        let detail = div()
+    /// 右ペイン: パスとハンク移動、レビュー操作、差分行のリスト。
+    fn diff_detail(&self, diff: &Diff, cx: &mut Context<Self>) -> Div {
+        let s = self.session();
+        let running = s.display_status().is_active();
+        let hunk_rows = diff.hunk_rows();
+        let hunk_total = hunk_rows.len();
+        // 表示は 1 始まり。未訪問なら 1 ハンク目に置く。
+        let hunk_index = s.view.diff_hunk.min(hunk_total.saturating_sub(1)) + 1;
+        div()
             .flex_1()
             .min_w_0()
             .flex()
@@ -212,7 +226,7 @@ impl Workspace {
                     .when(hunk_total > 0, |v| {
                         v.child(caption(format!("{hunk_index} / {hunk_total} ハンク"), cx))
                             .child(
-                                Button::icon("prev-hunk", Icon::ChevronRight, "前のハンク")
+                                Button::icon("prev-hunk", Icon::ArrowLeft, "前のハンク")
                                     .control_size(ControlSize::Small)
                                     .on_click(cx.listener(move |this, _, _, cx| {
                                         this.step_hunk(hunk_total, -1, cx)
@@ -230,11 +244,11 @@ impl Workspace {
                         Button::icon("copy-diff-path", Icon::Copy, "パスをコピー")
                             .control_size(ControlSize::Small)
                             .on_click(cx.listener(move |this, _, _, cx| {
-                                let session = &this.sessions[this.selected];
+                                let session = this.session();
                                 let path = session
                                     .model
-                                    .diffs
-                                    .get(session.diff_index)
+                                    .diffs()
+                                    .get(session.view.diff_index)
                                     .map(|diff| diff.path.clone())
                                     .unwrap_or_default();
                                 this.copy(path, "パスをコピーしました", cx)
@@ -276,125 +290,107 @@ impl Workspace {
                     "diff-lines",
                     diff.rows.len(),
                     cx.processor(|this, range: std::ops::Range<usize>, _, cx| {
-                        let p = ds::theme(cx);
-                        let s = &this.sessions[this.selected];
-                        let diff = &s.model.diffs[s.diff_index];
-                        range
-                            .map(|row| {
-                                let line = &diff.lines[diff.rows[row]];
-                                let (background, color, strong) = match line.kind {
-                                    DiffKind::Added => {
-                                        (p.success_soft, p.success, ds::glass(p.success, 0.28))
-                                    }
-                                    DiffKind::Removed => {
-                                        (p.danger_soft, p.danger, ds::glass(p.danger, 0.28))
-                                    }
-                                    DiffKind::Header => {
-                                        (p.accent_soft, p.accent_text, ds::glass(p.accent, 0.))
-                                    }
-                                    DiffKind::Context => (p.canvas, p.text, ds::glass(p.text, 0.)),
-                                };
-                                let sign = match line.kind {
-                                    DiffKind::Added => "+",
-                                    DiffKind::Removed => "−",
-                                    _ => " ",
-                                };
-                                // 行の先頭記号を符号列で表示し、本文からは外す。
-                                let body = if matches!(
-                                    line.kind,
-                                    DiffKind::Added | DiffKind::Removed | DiffKind::Context
-                                ) {
-                                    line.text.get(1..).unwrap_or("").to_string()
-                                } else {
-                                    line.text.clone()
-                                };
-                                // 隣接する削除/追加行の語レベル差分だけを濃くする。
-                                let body_el: AnyElement = match &line.changed {
-                                    Some(range) if !body.is_empty() => {
-                                        StyledText::new(SharedString::from(body.clone()))
-                                            .with_highlights([(
-                                                range.clone(),
-                                                HighlightStyle {
-                                                    color: None,
-                                                    font_weight: Some(FontWeight::SEMIBOLD),
-                                                    font_style: None,
-                                                    background_color: Some(strong.into()),
-                                                    underline: None,
-                                                    strikethrough: None,
-                                                    fade_out: None,
-                                                },
-                                            )])
-                                            .into_any_element()
-                                    }
-                                    _ => body.clone().into_any_element(),
-                                };
-                                let text = line.text.clone();
-                                div()
-                                    .id(row)
-                                    .w_full()
-                                    .h(px(ControlSize::Small.height()))
-                                    .px(px(space::LG))
-                                    .flex()
-                                    .items_center()
-                                    .gap(px(space::MD))
-                                    .font_family(typography::MONO)
-                                    .text_size(px(typography::LABEL))
-                                    .bg(rgb(background))
-                                    .text_color(rgb(color))
-                                    .overflow_hidden()
-                                    .cursor_pointer()
-                                    .child(
-                                        div()
-                                            .w(px(36.))
-                                            .flex_shrink_0()
-                                            .text_right()
-                                            .text_color(rgb(p.secondary))
-                                            .child(
-                                                line.old.map(|n| n.to_string()).unwrap_or_default(),
-                                            ),
-                                    )
-                                    .child(
-                                        div()
-                                            .w(px(36.))
-                                            .flex_shrink_0()
-                                            .text_right()
-                                            .text_color(rgb(p.secondary))
-                                            .child(
-                                                line.new.map(|n| n.to_string()).unwrap_or_default(),
-                                            ),
-                                    )
-                                    .child(
-                                        div()
-                                            .w(px(12.))
-                                            .flex_shrink_0()
-                                            .text_color(rgb(color))
-                                            .child(sign),
-                                    )
-                                    .child(div().flex_1().min_w_0().truncate().child(body_el))
-                                    .on_click(cx.listener(move |this, _, _, cx| {
-                                        this.copy(text.clone(), "差分をコピーしました", cx)
-                                    }))
-                            })
-                            .collect()
+                        range.map(|row| this.diff_row(row, cx)).collect()
                     }),
                 )
-                .track_scroll(&s.diff_scroll)
+                .track_scroll(&s.view.diff_scroll)
                 .flex_1()
                 .min_h_0(),
-            );
+            )
+    }
 
+    /// uniform_list の 1 行。行種別で色と先頭記号を決め、語レベル差分は強調する。
+    fn diff_row(&self, row: usize, cx: &mut Context<Self>) -> Stateful<Div> {
+        let p = ds::theme(cx);
+        let s = self.session();
+        let diff = &s.model.diffs()[s.view.diff_index];
+        let line = &diff.lines[diff.rows[row]];
+        let (background, color, strong) = match line.kind {
+            DiffKind::Added => (p.success_soft, p.success, ds::glass(p.success, 0.28)),
+            DiffKind::Removed => (p.danger_soft, p.danger, ds::glass(p.danger, 0.28)),
+            DiffKind::Header => (p.accent_soft, p.accent_text, ds::glass(p.accent, 0.)),
+            DiffKind::Context => (p.canvas, p.text, ds::glass(p.text, 0.)),
+        };
+        let sign = match line.kind {
+            DiffKind::Added => "+",
+            DiffKind::Removed => "−",
+            _ => " ",
+        };
+        // 行の先頭記号を符号列で表示し、本文からは外す。
+        let body = if matches!(
+            line.kind,
+            DiffKind::Added | DiffKind::Removed | DiffKind::Context
+        ) {
+            line.text.get(1..).unwrap_or("").to_string()
+        } else {
+            line.text.clone()
+        };
+        // 隣接する削除/追加行の語レベル差分だけを濃くする。
+        let body_el: AnyElement = match &line.changed {
+            Some(range) if !body.is_empty() => StyledText::new(SharedString::from(body.clone()))
+                .with_highlights([(
+                    range.clone(),
+                    HighlightStyle {
+                        color: None,
+                        font_weight: Some(FontWeight::SEMIBOLD),
+                        font_style: None,
+                        background_color: Some(strong.into()),
+                        underline: None,
+                        strikethrough: None,
+                        fade_out: None,
+                    },
+                )])
+                .into_any_element(),
+            _ => body.clone().into_any_element(),
+        };
+        let text = line.text.clone();
         div()
-            .size_full()
+            .id(row)
+            .w_full()
+            .h(px(ControlSize::Small.height()))
+            .px(px(space::LG))
             .flex()
-            .child(file_rail)
-            .child(detail)
-            .into_any_element()
+            .items_center()
+            .gap(px(space::MD))
+            .font_family(typography::MONO)
+            .text_size(px(typography::LABEL))
+            .bg(rgb(background))
+            .text_color(rgb(color))
+            .overflow_hidden()
+            .cursor_pointer()
+            .child(
+                div()
+                    .w(px(36.))
+                    .flex_shrink_0()
+                    .text_right()
+                    .text_color(rgb(p.secondary))
+                    .child(line.old.map(|n| n.to_string()).unwrap_or_default()),
+            )
+            .child(
+                div()
+                    .w(px(36.))
+                    .flex_shrink_0()
+                    .text_right()
+                    .text_color(rgb(p.secondary))
+                    .child(line.new.map(|n| n.to_string()).unwrap_or_default()),
+            )
+            .child(
+                div()
+                    .w(px(12.))
+                    .flex_shrink_0()
+                    .text_color(rgb(color))
+                    .child(sign),
+            )
+            .child(div().flex_1().min_w_0().truncate().child(body_el))
+            .on_click(cx.listener(move |this, _, _, cx| {
+                this.copy(text.clone(), "差分をコピーしました", cx)
+            }))
     }
 
     /// ハンク間を `dir` 方向に循環し、ハンク先頭の表示行へスクロールする。
     fn step_hunk(&mut self, _total: usize, dir: i64, cx: &mut Context<Self>) {
-        let session = &mut self.sessions[self.selected];
-        let Some(diff) = session.model.diffs.get(session.diff_index) else {
+        let session = self.session_mut();
+        let Some(diff) = session.model.diffs().get(session.view.diff_index) else {
             return;
         };
         let hunk_rows = diff.hunk_rows();
@@ -402,9 +398,10 @@ impl Workspace {
             return;
         }
         let total = hunk_rows.len();
-        let next = ((session.diff_hunk as i64 + dir).rem_euclid(total as i64)) as usize;
-        session.diff_hunk = next;
+        let next = ((session.view.diff_hunk as i64 + dir).rem_euclid(total as i64)) as usize;
+        session.view.diff_hunk = next;
         session
+            .view
             .diff_scroll
             .scroll_to_item(hunk_rows[next], ScrollStrategy::Top);
         cx.notify();

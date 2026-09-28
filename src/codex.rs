@@ -32,9 +32,7 @@ pub struct Authentication {
 
 impl Authentication {
     pub fn new() -> io::Result<Self> {
-        let home = std::env::var_os("HOME")
-            .ok_or_else(|| io::Error::other("HOME が設定されていません"))?;
-        Self::with_store(PathBuf::from(home).join(".solo").join("auth.json"))
+        Self::with_store(crate::storage::solo_dir("auth.json")?)
     }
 
     pub fn with_store(path: PathBuf) -> io::Result<Self> {

@@ -259,7 +259,7 @@ echo '{"jsonrpc":"2.0","id":1,"result":{"sessionId":"acp-1"}}'
         let deadline = Instant::now() + Duration::from_secs(3);
         loop {
             match receiver.try_recv() {
-                Ok(Delivery::SessionId(_)) => return,
+                Ok(Delivery::Event(_)) => return,
                 Ok(Delivery::Error(error)) => panic!("{error}"),
                 _ if Instant::now() < deadline => thread::sleep(Duration::from_millis(5)),
                 _ => panic!("agent did not initialize"),
@@ -342,14 +342,17 @@ wait
 
     #[test]
     fn final_response_is_delivered_before_transport_eof() {
-        use crate::projection::{Session, Status};
+        use crate::projection::{SessionProjection, Status};
         for _ in 0..8 {
             let body = r#"IFS= read -r line
 echo '{"jsonrpc":"2.0","id":2,"result":{"stopReason":"end_turn"}}'
 "#;
             let (_dir, controller, receiver) = test_agent(&format!("{INITIALIZE}{body}"));
             controller.prompt("finish before exiting".into()).unwrap();
-            let mut session = Session::new("local".into(), "test".into());
+            let mut session = SessionProjection::new(
+                crate::event::SessionId::parse("local").unwrap(),
+                "test".into(),
+            );
             let deadline = Instant::now() + Duration::from_secs(3);
             loop {
                 match receiver.try_recv() {
@@ -363,11 +366,11 @@ echo '{"jsonrpc":"2.0","id":2,"result":{"stopReason":"end_turn"}}'
                 }
             }
             assert_eq!(
-                session.status,
+                session.status(),
                 Status::Completed,
                 "EOF must preserve the last buffered response"
             );
-            assert_eq!(session.rejected, 0);
+            assert_eq!(session.rejected(), 0);
             assert!(controller.prompt("after EOF".into()).is_err());
         }
     }

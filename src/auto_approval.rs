@@ -1,7 +1,7 @@
 //! One tool-free model call to assess a proposal. Errors and uncertainty require manual review.
 use crate::{
     approval::ApprovalRequest,
-    codex_subscription::Authentication,
+    codex::Authentication,
     config::AutoSettings,
     harness::{Message, Model},
 };
@@ -10,6 +10,8 @@ use serde_json::{Value, json};
 use std::{
     panic::{AssertUnwindSafe, catch_unwind},
     path::Path,
+    sync::Arc,
+    thread,
     time::Duration,
 };
 use tokio_util::sync::CancellationToken;
@@ -76,6 +78,52 @@ pub fn review(
         reviewer.review(settings, input, cancel)
     }))
     .unwrap_or_else(|_| Err("Auto 判定のワーカーが終了しました".into()))
+}
+
+/// 判定を別スレッドで 1 回だけ実行する実行中ハンドル。UI は保持するだけで、
+/// 中止は cancel() / Drop でトークンへ届く。結果は返す receiver で受け取る。
+pub struct AutoReview {
+    cancel: CancellationToken,
+    worker: Option<thread::JoinHandle<()>>,
+}
+
+impl AutoReview {
+    /// "solo-auto-approval" スレッドで review を 1 回だけ実行する。
+    /// spawn 失敗時は receiver が閉じたまま返り、recv は即 Err になる。
+    pub fn start(
+        reviewer: Arc<dyn Reviewer>,
+        settings: AutoSettings,
+        input: ReviewInput,
+    ) -> (Self, async_channel::Receiver<Result<Assessment, String>>) {
+        let cancel = CancellationToken::new();
+        let (sender, receiver) = async_channel::bounded(1);
+        let worker = {
+            let cancel = cancel.clone();
+            thread::Builder::new()
+                .name("solo-auto-approval".into())
+                .spawn(move || {
+                    let result = review(reviewer.as_ref(), &settings, &input, &cancel);
+                    let _ = sender.send_blocking(result);
+                })
+                .ok()
+        };
+        (Self { cancel, worker }, receiver)
+    }
+
+    /// 進行中の判定へ中止を伝える。worker の回収は所有側の都合に任せる。
+    pub fn cancel(&self) {
+        self.cancel.cancel();
+    }
+}
+
+impl Drop for AutoReview {
+    fn drop(&mut self) {
+        self.cancel();
+        // worker の join はブロッキングになり得るため Drop では行わない。
+        if let Some(worker) = self.worker.take() {
+            drop(worker);
+        }
+    }
 }
 
 pub struct CodexReviewer;

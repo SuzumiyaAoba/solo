@@ -134,3 +134,65 @@ fn commands_honor_timeout_and_cancellation_before_and_during_execution() {
         assert!(result.content.contains("中止"));
     });
 }
+
+#[test]
+fn search_ignores_vendor_directories() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(dir.path().join("node_modules/dep")).unwrap();
+    std::fs::write(dir.path().join("node_modules/dep/index.js"), "needle\n").unwrap();
+    std::fs::create_dir_all(dir.path().join("src")).unwrap();
+    std::fs::write(dir.path().join("src/lib.rs"), "needle\n").unwrap();
+    let mut tools = WorkspaceTools::new(dir.path()).unwrap();
+    let result = tools.execute(&ToolCall {
+        id: "search".into(),
+        name: "search".into(),
+        arguments: json!({"query":"needle"}),
+    });
+    assert!(!result.is_error);
+    assert_eq!(result.content, "src/lib.rs:1:needle\n");
+}
+
+#[cfg(unix)]
+#[test]
+fn search_skips_unreadable_directories() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let locked = dir.path().join("locked");
+    std::fs::create_dir(&locked).unwrap();
+    std::fs::write(locked.join("secret.txt"), "needle\n").unwrap();
+    std::fs::write(dir.path().join("open.txt"), "needle\n").unwrap();
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+    let mut tools = WorkspaceTools::new(dir.path()).unwrap();
+    let result = tools.execute(&ToolCall {
+        id: "search".into(),
+        name: "search".into(),
+        arguments: json!({"query":"needle"}),
+    });
+    // テスト後に tempdir を消せるよう権限を戻してから検査する。
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+    assert!(!result.is_error);
+    assert_eq!(result.content, "open.txt:1:needle\n");
+}
+
+#[test]
+fn search_reports_partial_results_at_the_entry_cap() {
+    let dir = tempfile::tempdir().unwrap();
+    for i in 0..5 {
+        std::fs::write(dir.path().join(format!("f{i}.txt")), "needle\n").unwrap();
+    }
+    let mut tools = WorkspaceTools::new(dir.path()).unwrap();
+    tools.max_search_entries = 3;
+    let result = tools.execute(&ToolCall {
+        id: "search".into(),
+        name: "search".into(),
+        arguments: json!({"query":"needle"}),
+    });
+    assert!(!result.is_error, "the entry cap must not fail the search");
+    assert!(result.content.contains("検索対象の上限"));
+    let matches = result
+        .content
+        .lines()
+        .filter(|line| !line.starts_with('['))
+        .count();
+    assert!(matches <= 3, "{matches} match lines: {:?}", result.content);
+}

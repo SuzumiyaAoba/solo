@@ -13,22 +13,22 @@ impl SessionView {
         &mut self,
         store: &WorkspaceStore,
     ) -> std::io::Result<&mut SessionFile> {
-        if self.file.is_none() {
-            self.file = Some(match store.open(&self.model.id) {
+        if self.persist.file.is_none() {
+            self.persist.file = Some(match store.open(&self.model.id) {
                 Ok(file) => file,
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                     let file = store.create(&self.model.id)?;
                     let id = file.session_id().to_owned();
                     if id != self.model.id {
                         self.model.id = id.clone();
-                        self.meta.session_id = id;
+                        self.persist.meta.session_id = id;
                     }
                     file
                 }
                 Err(error) => return Err(error),
             });
         }
-        Ok(self.file.as_mut().expect("file just opened"))
+        Ok(self.persist.file.as_mut().expect("file just opened"))
     }
 
     /// 受信イベントを追記する。失敗は persist_error に畳み込み、呼出側で一度だけ通知する。
@@ -41,25 +41,33 @@ impl SessionView {
             .open_or_create(store)
             .and_then(|file| file.append(envelope))
         {
-            self.persist_error
-                .get_or_insert_with(|| format!("セッションを保存できません: {error}"));
+            self.record_persist_error("セッション", error);
         }
     }
 
     /// meta のイベント由来フィールドを現在の model から写す(draft と reviewed 以外)。
     pub(super) fn sync_meta(&mut self) {
-        self.meta.title = self.model.title.clone();
-        self.meta.provider = self.model.provider.clone();
-        self.meta.unread_result = self.unread_result;
-        self.meta.store_capped = self.file.as_ref().is_some_and(|file| file.capped());
+        self.persist.meta.title = self.model.title().to_owned();
+        self.persist.meta.provider = self.provider_display().unwrap_or_default().to_owned();
+        self.persist.meta.unread_result = self.unread_result;
+        self.persist.meta.store_capped =
+            self.persist.file.as_ref().is_some_and(|file| file.capped());
+    }
+
+    /// persist_error へ「{label}を保存できません: {error}」を畳み込む。
+    /// 既にエラーがあれば最初の一件を残す(drain_persist_error で一度だけ通知される)。
+    pub(super) fn record_persist_error(&mut self, label: &str, error: impl std::fmt::Display) {
+        self.persist
+            .persist_error
+            .get_or_insert_with(|| format!("{label}を保存できません: {error}"));
     }
 
     /// meta を保存。file がまだ無ければ作成し、draft を呼出側の現在値に同期して書く。
     pub(super) fn save_meta(&mut self, store: &WorkspaceStore, draft: &str) -> std::io::Result<()> {
-        self.meta.draft = draft.to_owned();
+        self.persist.meta.draft = draft.to_owned();
         self.sync_meta();
         // open_or_create の &mut self と meta の &self が競合しないよう先に複製する。
-        let meta = self.meta.clone();
+        let meta = self.persist.meta.clone();
         self.open_or_create(store)?.save_meta(&meta)
     }
 
@@ -73,8 +81,7 @@ impl SessionView {
             .open_or_create(store)
             .and_then(|file| file.save_history(&history))
         {
-            self.persist_error
-                .get_or_insert_with(|| format!("会話履歴を保存できません: {error}"));
+            self.record_persist_error("会話履歴", error);
         }
     }
 }
@@ -91,15 +98,15 @@ impl Workspace {
             })
         } else {
             SCENARIOS
-                .iter()
-                .enumerate()
-                .nth(index.wrapping_sub(1 + self.acp_agents.len()))
-                .map(|(scenario, _)| BackendKind::Mock { scenario })
+                .get(index.wrapping_sub(1 + self.acp_agents.len()))
+                .map(|scenario| BackendKind::Mock {
+                    key: scenario.key().to_owned(),
+                })
         }
     }
 
     /// 保存した実行先を現在の選択リストの index へ戻す。ACP agent が消えた場合は None。
-    fn backend_index(&self, backend: &BackendKind) -> Option<usize> {
+    pub(super) fn backend_index(&self, backend: &BackendKind) -> Option<usize> {
         match backend {
             BackendKind::Subscription => Some(0),
             BackendKind::Acp { id } => self
@@ -107,11 +114,26 @@ impl Workspace {
                 .iter()
                 .position(|agent| &agent.id == id)
                 .map(|index| index + 1),
-            BackendKind::Mock { scenario } => SCENARIOS
-                .get(*scenario)
-                .map(|_| 1 + self.acp_agents.len() + scenario),
+            BackendKind::Mock { key } => Scenario::from_key(key)
+                .and_then(|scenario| SCENARIOS.iter().position(|item| *item == scenario))
+                .map(|index| 1 + self.acp_agents.len() + index),
         }
     }
+
+    /// picker の index がワークスペースを使う実行先（Subscription/ACP）を指すか。
+    /// Mock シナリオは workspace に触れない。
+    pub(super) fn picker_uses_workspace(&self, index: usize) -> bool {
+        index <= self.acp_agents.len()
+    }
+
+    /// picker の index から Mock シナリオを取る。範囲外は None。
+    pub(super) fn mock_scenario(&self, index: usize) -> Option<Scenario> {
+        index
+            .checked_sub(1 + self.acp_agents.len())
+            .and_then(|index| SCENARIOS.get(index))
+            .copied()
+    }
+
     /// イベント履歴と会話の書き出し。保存先のパスは通知とクリップボードへ。
     pub(super) fn export_session(&mut self, cx: &mut Context<Self>) {
         let Some(store) = self.store.clone() else {
@@ -119,7 +141,7 @@ impl Workspace {
             cx.notify();
             return;
         };
-        let session = &self.sessions[self.selected];
+        let session = self.session();
         match solo::session_store::exports_root()
             .and_then(|root| store.export(&session.model, &root))
         {
@@ -142,21 +164,19 @@ impl Workspace {
         let Some(store) = self.store.clone() else {
             return;
         };
-        let session = &mut self.sessions[index];
+        let session = self.session_at_mut(index);
         let draft = session.composer.read(cx).value(cx).to_string();
         if let Err(error) = session.save_meta(&store, &draft) {
-            session
-                .persist_error
-                .get_or_insert_with(|| format!("セッション状態を保存できません: {error}"));
+            session.record_persist_error("セッション状態", error);
         }
         self.drain_persist_error(index);
     }
 
     /// 入力中の下書きを遅延保存する。連続入力では最後の世代だけが書き込む。
     pub(super) fn schedule_meta_save(&mut self, index: usize, cx: &mut Context<Self>) {
-        let session = &mut self.sessions[index];
-        session.meta_save_gen += 1;
-        let generation = session.meta_save_gen;
+        let session = self.session_at_mut(index);
+        session.persist.meta_save_gen += 1;
+        let generation = session.persist.meta_save_gen;
         let id = session.model.id.clone();
         cx.spawn(async move |this, cx| {
             cx.background_executor().timer(META_SAVE_DELAY).await;
@@ -164,7 +184,7 @@ impl Workspace {
                 let Some(index) = this.session_index(&id) else {
                     return;
                 };
-                if this.sessions[index].meta_save_gen == generation {
+                if this.session_at(index).persist.meta_save_gen == generation {
                     this.save_session_meta(index, cx);
                     cx.notify();
                 }
@@ -183,13 +203,10 @@ impl Workspace {
             .queue
             .entries()
             .filter(|run| self.session_index(&run.session_id).is_some())
-            .filter_map(|run| {
-                self.backend_kind_at(run.backend_index)
-                    .map(|backend| QueueEntry {
-                        session_id: run.session_id.clone(),
-                        backend,
-                        prompt: run.prompt.clone(),
-                    })
+            .map(|run| QueueEntry {
+                session_id: run.session_id.clone(),
+                backend: run.backend.clone(),
+                prompt: run.prompt.clone(),
             })
             .collect();
         let state = WorkspaceState {
@@ -199,7 +216,7 @@ impl Workspace {
                 .get(self.selected)
                 .map(|session| session.model.id.clone()),
             queue: StoredQueue {
-                paused: self.queue.paused,
+                paused: self.queue.paused(),
                 entries,
             },
         };
@@ -262,7 +279,7 @@ impl Workspace {
         self.serial = self
             .sessions
             .iter()
-            .map(|session| session.meta.serial)
+            .map(|session| session.persist.meta.serial)
             .max()
             .unwrap_or(0);
     }
@@ -278,17 +295,12 @@ impl Workspace {
             .iter()
             .filter_map(|entry| {
                 let index = self.session_index(&entry.session_id)?;
-                let backend_index = self.backend_index(&entry.backend)?;
-                let session = &mut self.sessions[index];
+                let session = self.session_at_mut(index);
                 // キュー待ちの見た目を復元: 依頼文を入力欄へ戻し、変更不可にする。
-                session.composer.update(cx, |input, cx| {
-                    input.set_value(entry.prompt.clone(), cx);
-                    input.can_submit = false;
-                    input.read_only = true;
-                });
+                session.lock_composer(entry.prompt.clone(), cx);
                 Some(QueuedRun {
                     session_id: entry.session_id.clone(),
-                    backend_index,
+                    backend: entry.backend.clone(),
                     prompt: entry.prompt.clone(),
                 })
             })
@@ -317,7 +329,7 @@ impl Workspace {
         } = item;
         let meta = meta.unwrap_or_else(|| SessionMeta {
             session_id: model.id.clone(),
-            title: model.title.clone(),
+            title: model.title().to_owned(),
             ..SessionMeta::default()
         });
         // 実行中 backend は表示上の選択から復元する。Mock 番号が範囲外なら実行先なし。
@@ -327,26 +339,34 @@ impl Workspace {
             .as_ref()
             .and_then(|kind| self.backend_index(kind))
             .unwrap_or(0);
-        let mut view = self.build_session_view(model.id.clone(), window, cx);
+        let title = model.title().to_owned();
+        let mut view = self.build_session_view(model.id.clone(), title, window, cx);
         view.model = model;
         // consume の splice 前提に合わせて、復元済み会話の行数を scroller へ登録する。
-        let chat_len = view.model.chat.len();
+        let chat_len = view.model.chat().len();
         view.chat_list.update(cx, |list, cx| {
             list.splice(0..0, chat_len, cx);
         });
-        view.meta = meta;
+        view.persist.meta = meta;
         view.history = history;
         view.backend = backend;
         view.selected_backend = selected_backend;
-        view.unread_result = view.meta.unread_result;
+        view.unread_result = view.persist.meta.unread_result;
         view.artifacts = log_paths.into_iter().map(Arc::new).collect();
-        for path in &view.meta.reviewed {
-            if let Some(diff) = view.model.diffs.iter_mut().find(|diff| &diff.path == path) {
-                diff.reviewed = true;
+        for path in &view.persist.meta.reviewed {
+            // 復元済みの差分は idle なので toggle_reviewed で確認済みへ立てる。
+            // truncated な差分は toggle_reviewed が弾くためそのまま未確認に残る。
+            if let Some(index) = view
+                .model
+                .diffs()
+                .iter()
+                .position(|diff| &diff.path == path && !diff.reviewed)
+            {
+                view.model.toggle_reviewed(index);
             }
         }
-        if !view.meta.draft.is_empty() {
-            let draft = view.meta.draft.clone();
+        if !view.persist.meta.draft.is_empty() {
+            let draft = view.persist.meta.draft.clone();
             view.composer.update(cx, |input, cx| {
                 input.set_value(draft, cx);
             });
@@ -369,8 +389,8 @@ impl Workspace {
     pub(super) fn provision_session(
         &mut self,
         serial: u64,
-    ) -> (String, Option<SessionFile>, SessionMeta) {
-        let preferred = format!("session-{serial}");
+    ) -> (SessionId, Option<SessionFile>, SessionMeta) {
+        let preferred = SessionId::parse(format!("session-{serial}")).expect("generated id");
         let mut meta = SessionMeta {
             serial,
             ..SessionMeta::default()
@@ -381,7 +401,7 @@ impl Workspace {
         };
         match store.create(&preferred) {
             Ok(file) => {
-                let id = file.session_id().to_owned();
+                let id = file.session_id().clone();
                 meta.session_id = id.clone();
                 (id, Some(file), meta)
             }

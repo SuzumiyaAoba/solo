@@ -1,7 +1,8 @@
 //! GUI の描画時間とは分離した、再現可能な疑似ストリーム/投影の計測。
 use solo::{
-    mock::{self, Config, Delivery, FRAME_BATCH, Scenario},
-    projection::{Session, Status},
+    event::SessionId,
+    mock::{self, Config, Delivery, Scenario},
+    projection::{SessionProjection, Status},
     text::TextBuffer,
 };
 use std::time::{Duration, Instant};
@@ -17,14 +18,16 @@ fn main() {
             std::process::exit(2);
         }
     };
-    let mut config = Config::new("benchmark", scenario);
+    let session_id = SessionId::parse("benchmark").unwrap();
+    let mut config = Config::new(session_id.clone(), scenario);
     config.delay = Duration::ZERO;
     let started = Instant::now();
     let (controller, receiver) = mock::start(config).expect("start fixture");
-    let mut session = Session::new("benchmark".into(), "benchmark".into());
+    let mut session = SessionProjection::new(session_id, "benchmark".into());
     let mut paths = Vec::new();
     let mut batch_times = Vec::new();
     let mut input_times = Vec::new();
+    const FRAME_BATCH: usize = 128;
     let mut composer = TextBuffer::default();
     while let Ok(first) = receiver.recv_blocking() {
         let mut batch = vec![first];
@@ -56,7 +59,7 @@ fn main() {
     session.transport_closed();
     controller.shutdown_and_join().expect("worker exits");
     assert_eq!(
-        session.status,
+        session.status(),
         if scenario == Scenario::Faults {
             Status::Disconnected
         } else {
@@ -67,13 +70,13 @@ fn main() {
         .iter()
         .map(|p| std::fs::metadata(&**p).unwrap().len())
         .sum();
-    assert_eq!(disk_bytes, session.log_bytes);
+    assert_eq!(disk_bytes, session.log_bytes());
     println!("{}", serde_json::to_string_pretty(&serde_json::json!({
-        "scenario": scenario.label(), "gui": false, "status": session.status.label(),
-        "elapsed_ms": started.elapsed().as_secs_f64() * 1000., "events": session.accepted,
-        "unknown": session.unknown, "duplicates": session.duplicates, "rejected": session.rejected,
-        "log_disk_bytes": disk_bytes, "log_preview_bytes": session.logs.iter().map(|r| r.text.len()).sum::<usize>(),
-        "log_rows": session.logs.len(), "chat_blocks": session.chat.len(),
+        "scenario": scenario.label(), "gui": false, "status": session.status().label(),
+        "elapsed_ms": started.elapsed().as_secs_f64() * 1000., "events": session.accepted(),
+        "unknown": session.unknown(), "duplicates": session.duplicates(), "rejected": session.rejected(),
+        "log_disk_bytes": disk_bytes, "log_preview_bytes": session.logs().iter().map(|r| r.text.len()).sum::<usize>(),
+        "log_rows": session.logs().len(), "chat_blocks": session.chat().len(),
         "batch_projection_ms": stats(&mut batch_times), "text_buffer_edit_ms": stats(&mut input_times),
         "note": "UI input-to-present / frame / RSS measurements are separate."
     })).unwrap());

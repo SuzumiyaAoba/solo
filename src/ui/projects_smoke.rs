@@ -1,4 +1,5 @@
 use super::projects::ProjectManager;
+use super::smoke::{env_pause_ms, finish_smoke_turn, key_down, preview_cycle, start_smoke_turn};
 use super::*;
 use gpui_kit::component::WindowExt;
 use std::{fs, time::Duration};
@@ -24,7 +25,7 @@ pub(super) fn start(window: &Window, cx: &mut Context<ProjectManager>) {
             alpha.update(cx, |workspace, cx| {
                 assert_eq!(workspace.acp_agents[0].name, "Alpha agent");
                 assert_eq!(workspace.command_rules.as_ref().unwrap().workspace(), path_a.canonicalize().unwrap());
-                workspace.sessions[0].composer.update(cx, |input, cx| input.set_value("Alpha の下書き🙂", cx));
+                workspace.session_at_mut(0).composer.update(cx, |input, cx| input.set_value("Alpha の下書き🙂", cx));
                 workspace.show_tab(Tab::Logs, cx);
                 workspace.start_mock(0, Scenario::Demo, "Alpha のデモ".into(), cx);
             });
@@ -33,7 +34,7 @@ pub(super) fn start(window: &Window, cx: &mut Context<ProjectManager>) {
                 assert_eq!(workspace.acp_agents[0].name, "Beta agent");
                 assert_eq!(workspace.command_rules.as_ref().unwrap().workspace(), path_b.canonicalize().unwrap());
                 workspace.new_session(window, cx);
-                workspace.sessions[1].composer.update(cx, |input, cx| input.set_value("Beta の下書き🧪", cx));
+                workspace.session_at_mut(1).composer.update(cx, |input, cx| input.set_value("Beta の下書き🧪", cx));
                 workspace.start_mock(1, Scenario::Demo, "Beta のデモ".into(), cx);
             });
             assert!(!alpha.read(cx).is_visible);
@@ -49,8 +50,8 @@ pub(super) fn start(window: &Window, cx: &mut Context<ProjectManager>) {
         loop {
             cx.background_executor().timer(Duration::from_millis(100)).await;
             let done = this.update_in(cx, |this, _, cx| {
-                !this.workspace(a).unwrap().read(cx).sessions[0].model.status.is_active()
-                    && !this.workspace(b).unwrap().read(cx).sessions[1].model.status.is_active()
+                !this.workspace(a).unwrap().read(cx).session_at(0).display_status().is_active()
+                    && !this.workspace(b).unwrap().read(cx).session_at(1).display_status().is_active()
             }).unwrap();
             if done { break; }
             assert!(started.elapsed() < Duration::from_secs(10), "project workers timed out");
@@ -58,20 +59,20 @@ pub(super) fn start(window: &Window, cx: &mut Context<ProjectManager>) {
         this.update_in(cx, |this, window, cx| {
             let alpha = this.workspace(a).unwrap();
             let beta = this.workspace(b).unwrap();
-            assert_eq!(alpha.read(cx).sessions[0].model.workspace, path_a.display().to_string());
-            assert_eq!(beta.read(cx).sessions[1].model.workspace, path_b.display().to_string());
-            assert_eq!(alpha.read(cx).sessions[0].model.title, "Alpha のデモ");
-            assert_eq!(beta.read(cx).sessions[1].model.title, "Beta のデモ");
+            assert_eq!(alpha.read(cx).session_at(0).model.workspace(), path_a.display().to_string());
+            assert_eq!(beta.read(cx).session_at(1).model.workspace(), path_b.display().to_string());
+            assert_eq!(alpha.read(cx).session_at(0).model.title(), "Alpha のデモ");
+            assert_eq!(beta.read(cx).session_at(1).model.title(), "Beta のデモ");
             assert!(beta.read(cx).other_project_attention > 0);
             assert!(this.select_project(a, window, cx));
-            assert!(alpha.read(cx).sessions[0].tab == Tab::Logs);
-            assert_eq!(alpha.read(cx).sessions[0].composer.read(cx).value(cx), "Alpha の下書き🙂");
+            assert!(alpha.read(cx).session_at(0).view.tab == Tab::Logs);
+            assert_eq!(alpha.read(cx).session_at(0).composer.read(cx).value(cx), "Alpha の下書き🙂");
             assert!(!beta.read(cx).is_visible);
-            let beta_channel = beta.read(cx).sessions[1].model.id.clone();
+            let beta_channel = beta.read(cx).session_at(1).model.id.clone();
             this.select_channel(b, &beta_channel, window, cx);
             assert_eq!(this.catalog.active, Some(b));
             assert_eq!(beta.read(cx).selected, 1);
-            assert_eq!(beta.read(cx).sessions[1].composer.read(cx).value(cx), "Beta の下書き🧪");
+            assert_eq!(beta.read(cx).session_at(1).composer.read(cx).value(cx), "Beta の下書き🧪");
             // フォルダが移動・削除されても、既に開いたセッションへのアクセスを失わない。
             let missing = path_a.parent().unwrap().join("removed-folder");
             fs::create_dir(&missing).unwrap();
@@ -90,8 +91,8 @@ pub(super) fn start(window: &Window, cx: &mut Context<ProjectManager>) {
             // プロジェクト A の待機状態・下書きを B に混ぜない。実モデルは起動しない。
             alpha.update(cx, |workspace, cx| {
                 workspace.new_session(window, cx);
-                workspace.sessions[1].backend = Some(Backend::Subscription);
-                workspace.sessions[1].model.status = Status::Running;
+                workspace.session_at_mut(1).backend = Some(Backend::Subscription);
+                start_smoke_turn(workspace.session_at_mut(1));
                 workspace.new_session(window, cx);
                 workspace.start_selected(2, "Alpha の順番待ち".into(), cx);
                 assert_eq!(workspace.queue.len(), 1);
@@ -100,9 +101,9 @@ pub(super) fn start(window: &Window, cx: &mut Context<ProjectManager>) {
             assert!(!this.remove_project(a, window, cx));
             alpha.update(cx, |workspace, cx| {
                 workspace.cancel_queued(cx);
-                assert_eq!(workspace.sessions[2].composer.read(cx).value(cx), "Alpha の順番待ち");
+                assert_eq!(workspace.session_at(2).composer.read(cx).value(cx), "Alpha の順番待ち");
                 workspace.close_session(window, cx);
-                workspace.sessions[1].model.status = Status::Idle;
+                finish_smoke_turn(workspace.session_at_mut(1));
                 workspace.close_session(window, cx);
             });
             this.error = None;
@@ -110,23 +111,29 @@ pub(super) fn start(window: &Window, cx: &mut Context<ProjectManager>) {
             assert_eq!(saved.active, Some(a));
             assert_eq!(saved.get(a).unwrap().name, "設計プロジェクト");
         }).unwrap();
-        cx.update(|window, cx| { window.dispatch_keystroke(Keystroke::parse("cmd-shift-p").unwrap(), cx); }).unwrap();
+        key_down(cx, "cmd-shift-p");
         cx.background_executor().timer(Duration::from_millis(100)).await;
         cx.update(|window, cx| assert!(window.has_active_sheet(cx), "project shortcut did not open the picker")).unwrap();
-        for (scheme, width, height) in [(ColorScheme::Dark, 1240., 840.), (ColorScheme::Light, 820., 620.)] {
-            this.update_in(cx, |_, window, cx| { ds::set_theme(scheme, cx); window.resize(size(px(width), px(height))); }).unwrap();
-            println!("Projects UI ready: {} / {}", scheme.label(), width);
-            let pause = std::env::var("SOLO_PROJECT_PREVIEW_MS").ok().and_then(|value| value.parse::<u64>().ok()).unwrap_or(180).min(30_000);
-            cx.background_executor().timer(Duration::from_millis(pause)).await;
-        }
+        preview_cycle(
+            &this,
+            cx,
+            [(ColorScheme::Dark, 1240., 840.), (ColorScheme::Light, 820., 620.)],
+            |_, window, cx, &(scheme, width, height)| {
+                ds::set_theme(scheme, cx);
+                window.resize(size(px(width), px(height)));
+            },
+            |&(scheme, width, _)| Some(format!("Projects UI ready: {} / {}", scheme.label(), width)),
+            Duration::from_millis(env_pause_ms("SOLO_PROJECT_PREVIEW_MS", 180)),
+        )
+        .await;
         let original_path = this.update_in(cx, |this, window, cx| {
             assert!(this.open_project(b, window, cx));
             assert!(!window.has_active_sheet(cx));
             let beta = this.workspace(b).unwrap();
-            assert!(beta.read(cx).sessions[1].composer.focus_handle(cx).is_focused(window), "project switch restored focus into the old project");
+            assert!(beta.read(cx).session_at(1).composer.focus_handle(cx).is_focused(window), "project switch restored focus into the old project");
             assert!(this.remove_project(a, window, cx));
             assert!(path_a.join("keep.txt").is_file(), "removal deleted project files");
-            assert_eq!(this.workspace(b).unwrap().read(cx).sessions[1].composer.read(cx).value(cx), "Beta の下書き🧪");
+            assert_eq!(this.workspace(b).unwrap().read(cx).session_at(1).composer.read(cx).value(cx), "Beta の下書き🧪");
             assert!(this.remove_project(b, window, cx));
             assert!(path_b.join("keep.txt").is_file());
             assert!(this.select_project(original, window, cx));
@@ -137,7 +144,7 @@ pub(super) fn start(window: &Window, cx: &mut Context<ProjectManager>) {
             assert!(this.store.as_ref().unwrap().load().unwrap().projects.is_empty());
             path
         }).unwrap();
-        cx.update(|window, cx| { window.dispatch_keystroke(Keystroke::parse("cmd-n").unwrap(), cx); }).unwrap();
+        key_down(cx, "cmd-n");
         cx.background_executor().timer(Duration::from_millis(180)).await;
         this.update_in(cx, |this, window, cx| {
             assert!(this.catalog.projects.is_empty(), "empty project state created an unscoped session");

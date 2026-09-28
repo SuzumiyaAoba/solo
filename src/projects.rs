@@ -1,5 +1,5 @@
 //! プロジェクトの登録情報。セッションや実行プロセスは UI 側でプロジェクトごとに保持する。
-use crate::storage::{FileTransaction, read_optional};
+use crate::storage::{FileTransaction, invalid, read_optional, solo_dir};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashSet,
@@ -66,7 +66,7 @@ impl Catalog {
         let name = if name.trim().is_empty() {
             "プロジェクト".into()
         } else {
-            crate::orchestration::task_title(&name)
+            crate::text::task_title(&name)
         };
         validate_name(&name)?;
         let id = self.next_id;
@@ -161,10 +161,6 @@ fn validate_name(name: &str) -> io::Result<()> {
     Ok(())
 }
 
-fn invalid(message: &str) -> io::Error {
-    io::Error::new(io::ErrorKind::InvalidData, message)
-}
-
 #[derive(Clone, Debug)]
 pub struct ProjectStore {
     path: PathBuf,
@@ -172,12 +168,7 @@ pub struct ProjectStore {
 
 impl ProjectStore {
     pub fn user() -> io::Result<Self> {
-        let home = std::env::var_os("HOME")
-            .filter(|home| !home.is_empty())
-            .ok_or_else(|| invalid("ユーザーディレクトリを取得できません"))?;
-        Ok(Self::at_path(
-            PathBuf::from(home).join(".solo/projects.json"),
-        ))
+        Ok(Self::at_path(solo_dir("projects.json")?))
     }
 
     pub fn at_path(path: PathBuf) -> Self {
@@ -197,7 +188,7 @@ impl ProjectStore {
             return Ok(Catalog::default());
         };
         let catalog: Catalog =
-            serde_json::from_slice(&bytes).map_err(|error| invalid(&error.to_string()))?;
+            serde_json::from_slice(&bytes).map_err(|error| invalid(error.to_string()))?;
         catalog.validate()?;
         Ok(catalog)
     }
@@ -222,8 +213,7 @@ impl ProjectStore {
             .revision
             .checked_add(1)
             .ok_or_else(|| invalid("設定の更新回数が上限に達しました"))?;
-        let bytes =
-            serde_json::to_vec_pretty(&next).map_err(|error| invalid(&error.to_string()))?;
+        let bytes = serde_json::to_vec_pretty(&next).map_err(|error| invalid(error.to_string()))?;
         if bytes.len() as u64 > MAX_CATALOG_BYTES {
             return Err(invalid("プロジェクト設定が大きすぎます"));
         }

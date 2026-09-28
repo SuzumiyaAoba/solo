@@ -13,6 +13,8 @@ use gpui_kit::component::{
 };
 
 const CHANNEL_HEADER_HEIGHT: f32 = 60.;
+/// ツールバーのタブと `Tab` の対応順。選択位置の復元とクリック先で共有する。
+const TAB_ORDER: [Tab; 4] = [Tab::Chat, Tab::Diff, Tab::Overview, Tab::Logs];
 
 impl SessionView {
     fn uses_openai_icon(&self) -> bool {
@@ -34,7 +36,7 @@ impl SessionView {
 impl Workspace {
     fn header(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let p = ds::theme(cx);
-        let view = &self.sessions[self.selected];
+        let view = self.session();
         let session = &view.model;
         div()
             .h(px(CHANNEL_HEADER_HEIGHT))
@@ -60,7 +62,7 @@ impl Workspace {
                             .min_w_0()
                             .truncate()
                             .font_weight(FontWeight::MEDIUM)
-                            .child(session.title.clone()),
+                            .child(session.title().to_owned()),
                     ),
             )
             .child(
@@ -73,8 +75,10 @@ impl Workspace {
                     .child(
                         Button::icon("open-thread", Icon::MessageSquare, "実行スレッド · ⌘ ⇧ T")
                             .control_size(ControlSize::Small)
-                            .toggled(view.selected_thread.is_some() && view.tab == Tab::Chat)
-                            .disabled(view.model.threads.is_empty())
+                            .toggled(
+                                view.view.selected_thread.is_some() && view.view.tab == Tab::Chat,
+                            )
+                            .disabled(view.model.threads().is_empty())
                             .on_click(
                                 cx.listener(|this, _, window, cx| this.toggle_thread(window, cx)),
                             ),
@@ -87,7 +91,7 @@ impl Workspace {
                             "会話とイベントを書き出す",
                         )
                         .control_size(ControlSize::Small)
-                        .disabled(view.model.accepted == 0)
+                        .disabled(view.model.accepted() == 0)
                         .on_click(cx.listener(|this, _, _, cx| this.export_session(cx))),
                     )
                     .child(
@@ -122,8 +126,8 @@ impl Workspace {
 
     fn toolbar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let p = ds::theme(cx);
-        let session = &self.sessions[self.selected];
-        let demo = session.selected_backend > self.acp_agents.len();
+        let session = self.session();
+        let demo = !self.picker_uses_workspace(session.selected_backend);
         div()
             .flex_shrink_0()
             .px(px(space::LG))
@@ -140,17 +144,22 @@ impl Workspace {
                     .underline()
                     .small()
                     .selected_index(
-                        [Tab::Chat, Tab::Diff, Tab::Overview, Tab::Logs]
+                        TAB_ORDER
                             .iter()
-                            .position(|tab| *tab == session.tab)
+                            .position(|tab| *tab == session.view.tab)
                             .unwrap_or(0),
                     )
-                    .child(KitTab::new().label("会話"))
-                    .child(KitTab::new().label(format!("変更 {}", session.model.diffs.len())))
-                    .child(KitTab::new().label("概要"))
-                    .child(KitTab::new().label("ログ"))
+                    // ラベルは TAB_ORDER から生成し、表示とクリック先の対応がずれないようにする。
+                    .children(TAB_ORDER.iter().map(|tab| {
+                        KitTab::new().label(match tab {
+                            Tab::Chat => "会話".into(),
+                            Tab::Diff => format!("変更 {}", session.model.diffs().len()),
+                            Tab::Overview => "概要".into(),
+                            Tab::Logs => "ログ".into(),
+                        })
+                    }))
                     .on_click(cx.listener(|this, index: &usize, _, cx| {
-                        this.show_tab([Tab::Chat, Tab::Diff, Tab::Overview, Tab::Logs][*index], cx);
+                        this.show_tab(TAB_ORDER[*index], cx);
                     })),
             )
             .child(
@@ -167,13 +176,11 @@ impl Workspace {
                     Button::icon("replay", Icon::Play, "デモを再生")
                         .variant(ButtonVariant::Ghost)
                         .control_size(ControlSize::Small)
-                        .disabled(session.model.status.is_active())
+                        .disabled(session.display_status().is_active())
                         .on_click(cx.listener(|this, _, _, cx| {
-                            let selected = this.sessions[this.selected].selected_backend;
-                            if let Some(scenario) =
-                                SCENARIOS.get(selected.saturating_sub(1 + this.acp_agents.len()))
-                            {
-                                this.scenario(*scenario, cx);
+                            let selected = this.session().selected_backend;
+                            if let Some(scenario) = this.mock_scenario(selected) {
+                                this.scenario(scenario, cx);
                             }
                         })),
                 )
@@ -181,15 +188,15 @@ impl Workspace {
     }
 
     fn notices(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let session = &self.sessions[self.selected];
+        let session = self.session();
         let model = &session.model;
-        let issue = matches!(model.status, Status::Failed | Status::Disconnected);
+        let issue = matches!(model.status(), Status::Failed | Status::Disconnected);
         div()
             .flex_shrink_0()
             .flex()
             .flex_col()
             .gap_2()
-            .when(self.queue.paused, |v| {
+            .when(self.queue.paused(), |v| {
                 v.child(
                     notice(
                         Icon::Pause,
@@ -201,7 +208,7 @@ impl Workspace {
                         Button::icon("resume-queue", Icon::Play, "順番待ちの自動実行を再開")
                             .control_size(ControlSize::Small)
                             .on_click(cx.listener(|this, _, _, cx| {
-                                this.queue.paused = false;
+                                this.queue.set_paused(false);
                                 this.save_workspace_state(cx);
                                 this.dispatch_queue(cx);
                                 cx.notify();
@@ -211,7 +218,7 @@ impl Workspace {
             })
             .when(
                 (session.approval.is_some() || session.login.is_some())
-                    && session.tab != Tab::Overview,
+                    && session.view.tab != Tab::Overview,
                 |v| {
                     v.child(
                         notice(Icon::Bell, session.state_label(), Tone::Warning, cx).child(
@@ -236,11 +243,11 @@ impl Workspace {
                     ),
                 )
             })
-            .when(model.unknown > 0 || model.rejected > 0, |v| {
+            .when(model.unknown() > 0 || model.rejected() > 0, |v| {
                 v.child(
                     notice(
                         Icon::Warning,
-                        format!("未対応 {} · 不正 {}", model.unknown, model.rejected),
+                        format!("未対応 {} · 不正 {}", model.unknown(), model.rejected()),
                         Tone::Warning,
                         cx,
                     )
@@ -251,11 +258,11 @@ impl Workspace {
                     ),
                 )
             })
-            .when(issue && !model.reason.is_empty(), |v| {
+            .when(issue && !model.reason().is_empty(), |v| {
                 v.child(notice(
                     Icon::Warning,
-                    model.reason.clone(),
-                    status_tone(model.status),
+                    model.reason(),
+                    status_tone(session.display_status()),
                     cx,
                 ))
             })
@@ -263,7 +270,7 @@ impl Workspace {
 
     fn footer(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let p = ds::theme(cx);
-        let s = &self.sessions[self.selected];
+        let s = self.session();
         div()
             .flex_shrink_0()
             .px(px(space::LG))
@@ -276,18 +283,18 @@ impl Workspace {
                 v.child(ds::card(cx).p(px(space::MD)).child(caption(
                     format!(
                         "表示更新 {} 回 · 最大 {:.2} ms · 重複 {} 件 · 未対応 {} 件 · 不正 {} 件",
-                        s.batches,
-                        s.max_batch_ms,
-                        s.model.duplicates,
-                        s.model.unknown,
-                        s.model.rejected
+                        s.metrics.batches,
+                        s.metrics.max_batch_ms,
+                        s.model.duplicates(),
+                        s.model.unknown(),
+                        s.model.rejected()
                     ),
                     cx,
                 )))
             })
             .child(
                 StatusBar::new()
-                    .left(caption(format!("受信 {} 件", s.model.accepted), cx))
+                    .left(caption(format!("受信 {} 件", s.model.accepted()), cx))
                     .right(
                         div()
                             .flex()
@@ -296,10 +303,10 @@ impl Workspace {
                             .child(caption(
                                 format!(
                                     "トークン {} / {} · コスト {}",
-                                    number(s.model.usage.input_tokens),
-                                    number(s.model.usage.output_tokens),
+                                    number(s.model.usage().input_tokens),
+                                    number(s.model.usage().output_tokens),
                                     s.model
-                                        .usage
+                                        .usage()
                                         .cost_usd
                                         .map(|n| format!("${n:.4}"))
                                         .unwrap_or_else(|| "不明".into())
@@ -324,13 +331,13 @@ impl Workspace {
 impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.rendered += 1;
-        let session = &self.sessions[self.selected];
-        let thread_open = session.tab == Tab::Chat && session.selected_thread.is_some();
+        let session = self.session();
+        let thread_open = session.view.tab == Tab::Chat && session.view.selected_thread.is_some();
         let compact_thread = thread_open && window.viewport_size().width < px(1120.);
         if compact_thread && session.composer.focus_handle(cx).is_focused(window) {
             window.focus(&self.focus, cx);
         }
-        let pane = match session.tab {
+        let pane = match session.view.tab {
             Tab::Overview => self.overview(cx),
             Tab::Chat => self.conversation(cx),
             Tab::Diff => self.diff(cx),
@@ -341,9 +348,9 @@ impl Render for Workspace {
             .flex()
             .flex_col()
             .child(div().flex_1().min_h_0().overflow_hidden().child(pane))
-            .when(session.model.chat_discarded > 0, |v| {
+            .when(session.model.chat_discarded() > 0, |v| {
                 v.child(div().px(px(space::XL)).child(caption(
-                    format!("会話 {} 件省略", session.model.chat_discarded),
+                    format!("会話 {} 件省略", session.model.chat_discarded()),
                     cx,
                 )))
             })
@@ -442,7 +449,7 @@ pub(super) fn status_tone(status: Status) -> Tone {
     match status {
         Status::Failed | Status::Disconnected => Tone::Danger,
         Status::Cancelling => Tone::Warning,
-        Status::Connecting | Status::Running => Tone::Accent,
+        Status::Running => Tone::Accent,
         Status::Completed => Tone::Success,
         _ => Tone::Neutral,
     }
@@ -451,7 +458,6 @@ pub(super) fn status_tone(status: Status) -> Tone {
 pub(super) fn status_icon(status: Status) -> Icon {
     match status {
         Status::Idle => Icon::Layers,
-        Status::Connecting => Icon::Unplug,
         Status::Running => Icon::Spinner,
         Status::Cancelling => Icon::Pause,
         Status::Completed => Icon::CircleCheck,

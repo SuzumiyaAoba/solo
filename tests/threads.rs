@@ -1,18 +1,22 @@
 mod common;
 
 use solo::{
-    event::{Event, Usage},
+    event::{Event, SessionId, Usage},
     projection::{
-        ActivityKind, ActivityState, Apply, MAX_EXECUTION_THREADS, MAX_THREAD_ACTIVITIES, Session,
-        Status,
+        ActivityKind, ActivityState, Apply, MAX_EXECUTION_THREADS, MAX_THREAD_ACTIVITIES,
+        SessionProjection, Status,
     },
 };
 
-fn apply(session: &mut Session, turn: &str, event: Event) -> Apply {
-    let sequence = session.last_sequence + 1;
+fn sid(s: &str) -> SessionId {
+    SessionId::parse(s).unwrap()
+}
+
+fn apply(session: &mut SessionProjection, turn: &str, event: Event) -> Apply {
+    let sequence = session.last_sequence() + 1;
     session.apply(common::envelope(&session.id, turn, sequence, event))
 }
-fn start(session: &mut Session, turn: &str) {
+fn start(session: &mut SessionProjection, turn: &str) {
     assert_eq!(
         apply(
             session,
@@ -24,7 +28,7 @@ fn start(session: &mut Session, turn: &str) {
         Apply::Applied
     );
 }
-fn complete(session: &mut Session, turn: &str) {
+fn complete(session: &mut SessionProjection, turn: &str) {
     apply(
         session,
         turn,
@@ -53,7 +57,7 @@ fn tool(id: &str, owner: Option<&str>) -> Event {
 
 #[test]
 fn previous_request_keeps_its_activities_when_identifiers_are_reused() {
-    let mut session = Session::new("s1".into(), "channel".into());
+    let mut session = SessionProjection::new(sid("s1"), "channel".into());
     for turn in ["first", "second"] {
         start(&mut session, turn);
         assert_eq!(
@@ -83,11 +87,11 @@ fn previous_request_keeps_its_activities_when_identifiers_are_reused() {
         );
         complete(&mut session, turn);
     }
-    assert_eq!(session.threads.len(), 2);
-    assert_ne!(session.threads[0].id, session.threads[1].id);
+    assert_eq!(session.threads().len(), 2);
+    assert_ne!(session.threads()[0].id, session.threads()[1].id);
     for (i, turn) in ["first", "second"].iter().enumerate() {
-        let thread = &session.threads[i];
-        assert_eq!(thread.turn_id, *turn);
+        let thread = &session.threads()[i];
+        assert_eq!(&*thread.turn_id, *turn);
         assert_eq!(thread.status, Status::Completed);
         assert_eq!(thread.activities[0].result, format!("{turn} の結果"));
         assert_eq!(
@@ -102,7 +106,7 @@ fn previous_request_keeps_its_activities_when_identifiers_are_reused() {
         );
         assert!(
             session
-                .chat
+                .chat()
                 .iter()
                 .any(|block| block.thread_id == Some(thread.id) && block.text.contains(turn))
         );
@@ -117,7 +121,7 @@ fn old_tool_payloads_remain_compatible() {
 
 #[test]
 fn agent_and_tool_lifecycles_are_validated_before_recording() {
-    let mut session = Session::new("s".into(), "".into());
+    let mut session = SessionProjection::new(sid("s"), "".into());
     start(&mut session, "turn");
     assert_eq!(
         apply(&mut session, "turn", tool("orphan", Some("unknown"))),
@@ -151,9 +155,9 @@ fn agent_and_tool_lifecycles_are_validated_before_recording() {
         ),
         Apply::Rejected
     );
-    assert_eq!(session.threads[0].activities.len(), 2);
+    assert_eq!(session.threads()[0].activities.len(), 2);
     assert_eq!(
-        session.threads[0].activities[1].state,
+        session.threads()[0].activities[1].state,
         ActivityState::Running
     );
     assert_eq!(
@@ -181,7 +185,7 @@ fn agent_and_tool_lifecycles_are_validated_before_recording() {
         Apply::Rejected
     );
     assert_eq!(
-        session.threads[0].activities[1].state,
+        session.threads()[0].activities[1].state,
         ActivityState::Failed
     );
 }
@@ -194,7 +198,7 @@ fn unfinished_agents_prevent_success_and_terminal_states_clear_running_rows() {
         Status::Failed,
         Status::Disconnected,
     ] {
-        let mut session = Session::new("s".into(), "".into());
+        let mut session = SessionProjection::new(sid("s"), "".into());
         start(&mut session, "turn");
         apply(&mut session, "turn", agent("running", None));
         apply(&mut session, "turn", tool("done", None));
@@ -220,7 +224,7 @@ fn unfinished_agents_prevent_success_and_terminal_states_clear_running_rows() {
             Status::Failed => session.transport_failed("worker failed".into()),
             _ => session.transport_closed(),
         }
-        let thread = &session.threads[0];
+        let thread = &session.threads()[0];
         assert_eq!(
             thread.status,
             if outcome == Status::Completed {
@@ -244,25 +248,24 @@ fn unfinished_agents_prevent_success_and_terminal_states_clear_running_rows() {
 
 #[test]
 fn connecting_failure_does_not_rewrite_a_completed_thread() {
-    let mut session = Session::new("s".into(), "".into());
+    let mut session = SessionProjection::new(sid("s"), "".into());
     start(&mut session, "turn");
     complete(&mut session, "turn");
-    session.status = Status::Connecting;
     session.transport_failed("next connection failed".into());
-    assert_eq!(session.threads[0].status, Status::Completed);
-    assert_eq!(session.threads[0].reason, "done");
+    assert_eq!(session.threads()[0].status, Status::Completed);
+    assert_eq!(session.threads()[0].reason, "done");
 }
 
 #[test]
 fn bounded_history_keeps_identity_and_validates_evicted_activities() {
-    let mut session = Session::new("s".into(), "".into());
+    let mut session = SessionProjection::new(sid("s"), "".into());
     for n in 0..=MAX_EXECUTION_THREADS {
         start(&mut session, &format!("turn-{n}"));
         complete(&mut session, &format!("turn-{n}"));
     }
-    assert_eq!(session.threads.len(), MAX_EXECUTION_THREADS);
-    assert_eq!(session.threads_discarded, 1);
-    assert_eq!(session.threads[0].turn_id, "turn-1");
+    assert_eq!(session.threads().len(), MAX_EXECUTION_THREADS);
+    assert_eq!(session.threads_discarded(), 1);
+    assert_eq!(&*session.threads()[0].turn_id, "turn-1");
     start(&mut session, "tools");
     for n in 0..=MAX_THREAD_ACTIVITIES {
         apply(&mut session, "tools", tool(&n.to_string(), None));
@@ -281,7 +284,7 @@ fn bounded_history_keeps_identity_and_validates_evicted_activities() {
         );
     }
     complete(&mut session, "tools");
-    let thread = session.threads.back().unwrap();
+    let thread = session.threads().back().unwrap();
     assert_eq!(thread.activities.len(), MAX_THREAD_ACTIVITIES);
     assert_eq!(thread.discarded, 1);
     assert_eq!(thread.activity_count(), MAX_THREAD_ACTIVITIES + 1);

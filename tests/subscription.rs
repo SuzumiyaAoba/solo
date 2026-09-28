@@ -1,6 +1,6 @@
 use serde_json::json;
 use solo::{
-    codex_subscription::{Authentication, to_chat_messages},
+    codex::{Authentication, to_chat_messages},
     harness::{Message, ToolCall, ToolResult},
 };
 

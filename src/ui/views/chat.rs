@@ -6,8 +6,8 @@ use gpui_kit::component::{
 
 impl Workspace {
     pub(super) fn conversation(&self, cx: &mut Context<Self>) -> AnyElement {
-        let session = &self.sessions[self.selected];
-        if session.model.chat.is_empty() {
+        let session = self.session();
+        if session.model.chat().is_empty() {
             let p = ds::theme(cx);
             return div().size_full().flex().flex_col().justify_end().p(px(space::XL)).gap_4()
                 .child(div().size(px(52.)).rounded(px(12.)).bg(rgb(p.accent_soft)).text_color(rgb(p.accent_text))
@@ -24,7 +24,7 @@ impl Workspace {
                     Button::icon("empty-run", Icon::Pencil, "依頼を入力").on_click(cx.listener(
                         |this, _, window, cx| {
                             window
-                                .focus(&this.sessions[this.selected].composer.focus_handle(cx), cx);
+                                .focus(&this.session().composer.focus_handle(cx), cx);
                         },
                     )),
                 )
@@ -44,18 +44,22 @@ impl Workspace {
                 else {
                     return div().into_any_element();
                 };
-                let Some(block) = session.model.chat.get(row) else {
+                let Some(block) = session.model.chat().get(row) else {
                     return div().into_any_element();
                 };
                 let p = ds::theme(cx);
                 let is_thread_root = block.speaker == Speaker::User
                     && row
                         .checked_sub(1)
-                        .and_then(|i| session.model.chat.get(i))
+                        .and_then(|i| session.model.chat().get(i))
                         .is_none_or(|previous| previous.message_id != block.message_id);
-                let thread = block
-                    .thread_id
-                    .and_then(|id| session.model.threads.iter().find(|thread| thread.id == id));
+                let thread = block.thread_id.and_then(|id| {
+                    session
+                        .model
+                        .threads()
+                        .iter()
+                        .find(|thread| thread.id == id)
+                });
                 let copy = block.text.clone();
                 let callback_view = weak.clone();
                 let copy_button = Button::icon(("copy-chat", row), Icon::Copy, "この部分をコピー")
