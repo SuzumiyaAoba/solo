@@ -7,6 +7,8 @@ mod command_rules;
 #[cfg(debug_assertions)]
 mod command_rules_smoke;
 mod execution;
+#[cfg(debug_assertions)]
+mod logs_smoke;
 mod overview;
 mod persistence;
 mod projects;
@@ -200,6 +202,13 @@ struct ViewState {
     /// 「すべて表示」で全文を開いた長い応答の message_id。
     expanded_messages: HashSet<String>,
     follow_logs: bool,
+    /// ログタブの検索語。log_search 入力の InputChanged が書き込む。永続化はしない。
+    log_filter: String,
+    /// 選択中のレベルチップ。None はすべて表示。
+    log_level: Option<String>,
+    /// 詳細パネルに出している行。`logs_discarded + 表示 index` のグローバル番号で保持し、
+    /// 先頭の破棄で表示 index がずれても同じ行を指し続ける。
+    log_selected: Option<usize>,
     log_scroll: UniformListScrollHandle,
     diff_scroll: UniformListScrollHandle,
     thread_scroll: ScrollHandle,
@@ -240,6 +249,8 @@ struct Metrics {
 struct SessionView {
     model: SessionProjection,
     composer: Entity<Composer>,
+    /// ログタブの検索ボックス。InputChanged で view.log_filter を更新する。
+    log_search: Entity<Composer>,
     chat_list: Entity<MessageScrollerState>,
     /// 全文ログのパス。ストアありの実行ではセッションの logs/ を指し、再起動後も残る。
     artifacts: Vec<Arc<PathBuf>>,
@@ -250,6 +261,7 @@ struct SessionView {
     backend: Option<Backend>,
     selected_backend: usize,
     _input_subscription: Subscription,
+    _log_search_subscription: Subscription,
     unread_result: bool,
     input_composing: bool,
     last_prompt: String,
@@ -454,9 +466,11 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) -> SessionView {
         let (composer, subscription, change_subscription) = self.build_composer(&id, window, cx);
+        let (log_search, log_search_subscription) = self.build_log_search(&id, window, cx);
         SessionView {
             model: SessionProjection::new(id, title),
             composer,
+            log_search,
             chat_list: cx.new(|cx| MessageScrollerState::new(0, cx)),
             artifacts: Vec::new(),
             history: Vec::new(),
@@ -466,6 +480,7 @@ impl Workspace {
             backend: None,
             selected_backend: 0,
             _input_subscription: subscription,
+            _log_search_subscription: log_search_subscription,
             unread_result: false,
             input_composing: false,
             last_prompt: String::new(),
@@ -479,6 +494,9 @@ impl Workspace {
                 expanded_activity: None,
                 expanded_messages: HashSet::new(),
                 follow_logs: true,
+                log_filter: String::new(),
+                log_level: None,
+                log_selected: None,
                 log_scroll: UniformListScrollHandle::new(),
                 diff_scroll: UniformListScrollHandle::new(),
                 thread_scroll: ScrollHandle::new(),
@@ -536,6 +554,29 @@ impl Workspace {
                 cx.notify();
             });
         (composer, subscription, change_subscription)
+    }
+
+    /// ログタブの検索ボックスと view.log_filter への反映購読を組み立てる。
+    /// composer と別系統にし、下書き保存や送信には繋げない。
+    fn build_log_search(
+        &mut self,
+        id: &SessionId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> (Entity<Composer>, Subscription) {
+        let input = cx.new(|cx| {
+            Composer::new(window, cx)
+                .placeholder("ログを検索…")
+                .control_size(ControlSize::Small)
+        });
+        let changed_id = id.clone();
+        let subscription = cx.subscribe(&input, move |this, _, change: &ds::InputChanged, cx| {
+            if let Some(index) = this.session_index(&changed_id) {
+                this.session_at_mut(index).view.log_filter = change.text.clone();
+            }
+            cx.notify();
+        });
+        (input, subscription)
     }
 
     fn new_session(&mut self, window: &mut Window, cx: &mut Context<Self>) {

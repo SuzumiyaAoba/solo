@@ -13,6 +13,8 @@ impl Workspace {
         let composer = session.composer.clone();
         let empty = composer.read(cx).value(cx).trim().is_empty();
         let focused = composer.focus_handle(cx).is_focused(window);
+        // User メッセージがあれば「↑で直前の依頼」ヒントを出す。
+        let can_recall = super::chat::last_user_prompt(session.model.chat()).is_some();
         // Subscription の初回ログインだけ促す。実行中・順番待ち・別 backend では出さない。
         let login = session.selected_backend == 0
             && !active
@@ -74,6 +76,30 @@ impl Workspace {
                             .flex_col()
                             .rounded(px(ds::radius::CARD))
                             .border_1()
+                            // 「↑」は Input context の MoveUp action として処理されるため、
+                            // bubble 段の on_key_down には届かない。capture 段で先に拾い、
+                            // フォーカス中かつ入力が空のときだけ直前の依頼を呼び出す。
+                            // それ以外では伝播を止めず、入力側の通常の ↑ 移動を通す。
+                            .capture_action(cx.listener(
+                                |this, _: &gpui_kit::component::input::MoveUp, window, cx| {
+                                    let session = this.session();
+                                    let composer = session.composer.clone();
+                                    if !composer.focus_handle(cx).is_focused(window)
+                                        || !composer.read(cx).value(cx).trim().is_empty()
+                                        || composer.read(cx).read_only
+                                    {
+                                        return;
+                                    }
+                                    if let Some(prompt) =
+                                        super::chat::last_user_prompt(session.model.chat())
+                                    {
+                                        composer
+                                            .update(cx, |input, cx| input.set_value(prompt, cx));
+                                        cx.stop_propagation();
+                                        cx.notify();
+                                    }
+                                },
+                            ))
                             .border_color(if focused {
                                 Hsla::from(glass(p.accent, 0.9))
                             } else {
@@ -96,6 +122,19 @@ impl Workspace {
                                     .child(session.agent_avatar(cx))
                                     .child(div().w(px(200.)).child(self.scenario_picker.clone()))
                                     .child(div().flex_1())
+                                    .when(can_recall, |v| {
+                                        v.child(
+                                            div()
+                                                .flex()
+                                                .items_center()
+                                                .gap_1()
+                                                .child(ds::keycap("↑", cx))
+                                                .child(caption("前の依頼", cx)),
+                                        )
+                                    })
+                                    .when(session.input_composing, |v| {
+                                        v.child(ds::badge("変換中", Tone::Warning, cx))
+                                    })
                                     .child(ds::keycap("⌘ ↵", cx))
                                     .child(
                                         div()

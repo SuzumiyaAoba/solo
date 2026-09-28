@@ -140,13 +140,28 @@ impl SessionView {
             self.chat_list
                 .update(cx, |list, cx| list.splice(row..row + 1, 1, cx));
         }
-        if self.view.follow_logs
-            && !self.model.logs().is_empty()
-            && old_logs != (self.model.logs().len(), self.model.logs_discarded())
-        {
-            self.view
-                .log_scroll
-                .scroll_to_item(self.model.logs().len() - 1, ScrollStrategy::Bottom);
+        if old_logs != (self.model.logs().len(), self.model.logs_discarded()) {
+            // 先頭の破棄で選択中の行が範囲外へ出たら詳細パネルを畳む。
+            if let Some(global) = self.view.log_selected {
+                let index = global.checked_sub(self.model.logs_discarded());
+                if index.is_none_or(|index| index >= self.model.logs().len()) {
+                    self.view.log_selected = None;
+                }
+            }
+            // 追従中はフィルタ適用後の末尾へ進める(フィルタ外の追記では見た目上動かない)。
+            if self.view.follow_logs && !self.model.logs().is_empty() {
+                let tail = views::logs::filtered_indices(
+                    self.model.logs(),
+                    &self.view.log_filter,
+                    self.view.log_level.as_deref(),
+                )
+                .len();
+                if tail > 0 {
+                    self.view
+                        .log_scroll
+                        .scroll_to_item(tail - 1, ScrollStrategy::Bottom);
+                }
+            }
         }
     }
 }

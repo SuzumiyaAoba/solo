@@ -69,6 +69,17 @@ pub(in crate::ui) fn message_text(chat: &VecDeque<ChatBlock>, row: usize) -> (St
     (text, count)
 }
 
+/// 末尾から遡って最初に見つかった User メッセージの全文。composer の
+/// 「↑で直前の依頼を呼び出す」用。ラン先頭から連結するため、ブロック分割
+/// された依頼でも本文全体が戻る。User メッセージが無ければ None。
+pub(in crate::ui) fn last_user_prompt(chat: &VecDeque<ChatBlock>) -> Option<String> {
+    let row = chat
+        .iter()
+        .rposition(|block| block.speaker == Speaker::User)?;
+    let head = run_bounds(chat, row).map_or(row, |bounds| bounds.start);
+    Some(message_text(chat, head).0)
+}
+
 /// ラン先頭 `row` の表示用テキストを `max` byte まで連結する。
 /// ランが `max` を超えた場合は `truncated = true` を返し、文字境界で切る。
 /// 巨大メッセージでもラン先頭行ごとのコストが `max` に収まる。

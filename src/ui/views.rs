@@ -3,7 +3,7 @@
 pub(in crate::ui) mod chat;
 mod composer;
 mod diff;
-mod logs;
+pub(in crate::ui) mod logs;
 mod thread;
 
 use super::*;
