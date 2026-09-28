@@ -1,6 +1,8 @@
 #[cfg(debug_assertions)]
 mod approval_modes_smoke;
 mod approvals;
+#[cfg(debug_assertions)]
+mod chat_smoke;
 mod command_rules;
 #[cfg(debug_assertions)]
 mod command_rules_smoke;
@@ -50,6 +52,7 @@ use solo::{
     text::task_title,
 };
 use std::{
+    collections::HashSet,
     path::PathBuf,
     sync::Arc,
     time::{Duration, Instant},
@@ -194,6 +197,8 @@ struct ViewState {
     diff_hunk: usize,
     selected_thread: Option<u64>,
     expanded_activity: Option<String>,
+    /// 「すべて表示」で全文を開いた長い応答の message_id。
+    expanded_messages: HashSet<String>,
     follow_logs: bool,
     log_scroll: UniformListScrollHandle,
     diff_scroll: UniformListScrollHandle,
@@ -472,6 +477,7 @@ impl Workspace {
                 diff_hunk: 0,
                 selected_thread: None,
                 expanded_activity: None,
+                expanded_messages: HashSet::new(),
                 follow_logs: true,
                 log_scroll: UniformListScrollHandle::new(),
                 diff_scroll: UniformListScrollHandle::new(),

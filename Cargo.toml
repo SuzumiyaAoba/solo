@@ -30,7 +30,24 @@ globset = "=0.4.20"
 regex = "=1.13.1"
 
 [target.'cfg(target_os = "macos")'.dependencies]
-gpui-kit = { version = "=0.6.6", optional = true }
+# tree-sitter は会話の Markdown コードブロック用。言語ごとに個別指定し、
+# 集約 feature の tree-sitter-languages は入れない。
+# JSON の grammar は gpui-component の tree-sitter ベース feature に含まれるため個別指定はない。
+gpui-kit = { version = "=0.6.6", optional = true, features = [
+    "tree-sitter-bash",
+    "tree-sitter-diff",
+    "tree-sitter-go",
+    "tree-sitter-javascript",
+    "tree-sitter-kotlin",
+    "tree-sitter-markdown",
+    "tree-sitter-python",
+    "tree-sitter-rust",
+    "tree-sitter-swift",
+    "tree-sitter-toml",
+    "tree-sitter-tsx",
+    "tree-sitter-typescript",
+    "tree-sitter-yaml",
+] }
 
 
 [[bin]]

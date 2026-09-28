@@ -147,6 +147,7 @@ pub(super) fn start(window: &Window, cx: &mut Context<Workspace>) {
         approval_modes_smoke::check(&this, cx).await;
         workflow_smoke::run(&this, cx).await;
         threads_smoke::run(&this, cx).await;
+        chat_smoke::run(&this, cx).await;
         // 永続化: 同じストアから読み直し、会話・状態・下書き・全文ログが復元されることを確認する。
         this.update_in(cx, |this, _, cx| {
             let store = this.store.clone().expect("smoke store must exist");

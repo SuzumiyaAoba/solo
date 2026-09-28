@@ -1,5 +1,6 @@
 //! ワークスペースの共通レイアウトとナビゲーション。各ペインは子モジュールで描画する。
-mod chat;
+/// メッセージ連結の判定は stream の再測定と smoke 検証でも使う。
+pub(in crate::ui) mod chat;
 mod composer;
 mod diff;
 mod logs;

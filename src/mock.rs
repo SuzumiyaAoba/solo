@@ -463,6 +463,29 @@ impl Producer {
         }, true) {
             return Ok(());
         }
+        if self.config.scenario == Scenario::Demo {
+            // 分割ブロックの連結・Markdown・折りたたみの表示確認用。
+            // 1,024 byte を超える応答を 1 メッセージとして送る。
+            let mut markdown = String::from(
+                "## 応答の確認\n\n\
+                 - 見出し・リスト・コードフェンス・リンクをそのまま描画します\n\
+                 - 手順の詳細は [ドキュメント](https://example.com/solo) を参照してください\n\n\
+                 ```rust\n",
+            );
+            for index in 0..56 {
+                markdown.push_str(&format!("fn step_{index:02}() -> usize {{ {index} }}\n"));
+            }
+            markdown.push_str("```\n\n`cargo test` と `cargo clippy` で確認します。\n");
+            if !self.emit_or_quit(
+                Event::MessageDelta {
+                    message_id: format!("assistant-md-{}", self.config.start_sequence),
+                    text: markdown,
+                },
+                true,
+            ) {
+                return Ok(());
+            }
+        }
         self.emit_or_quit(
             Event::TurnCompleted {
                 reason: "疑似イベントの再生が完了しました。差分とログを確認できます。".into(),

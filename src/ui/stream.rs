@@ -117,7 +117,16 @@ impl SessionView {
                     .update(cx, |list, cx| list.splice(0..discarded.min(old_len), 0, cx));
             }
             let old_len = old_len.saturating_sub(discarded);
-            let from = old_len.saturating_sub(1);
+            let mut from = old_len.saturating_sub(1);
+            // 追記で伸びたブロックがランの途中なら、全文を描くラン先頭の行から測り直す。
+            // 数十万行の 1 ランでは走査も再測定も嵩むため、先頭の探索は直近の行に限る。
+            // 遠い先頭行のキャッシュ高は、次に描画されるタイミングで直る。
+            for _ in 0..16 {
+                if from == 0 || views::chat::is_run_head(self.model.chat(), from) {
+                    break;
+                }
+                from -= 1;
+            }
             self.chat_list.update(cx, |list, cx| {
                 list.splice(from..old_len, self.model.chat().len() - from, cx)
             });

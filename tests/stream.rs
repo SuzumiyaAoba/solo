@@ -124,7 +124,8 @@ fn another_turn_continues_sequence_and_preserves_history() {
     }
     assert_eq!(session.rejected(), 0);
     assert_eq!(session.duplicates(), 0);
-    assert_eq!(session.last_sequence(), 253);
+    // Demo はターンごとに末尾の Markdown 表示確認メッセージを 1 件含む。
+    assert_eq!(session.last_sequence(), 255);
 }
 
 #[test]
