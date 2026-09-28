@@ -87,9 +87,15 @@ impl WorkspaceTools {
             excerpt(stdout, out_len, out_share)?,
             excerpt(stderr, err_len, err_share)?,
         );
+        let code = status
+            .code()
+            .map_or_else(|| "シグナル".to_owned(), |code| code.to_string());
         Ok(ToolResult {
             content: format!("exit: {status}\n{output}"),
             is_error: !status.success(),
+            summary: Some(format!(
+                "終了コード {code} · stdout {out_len} バイト / stderr {err_len} バイト"
+            )),
         })
     }
 }

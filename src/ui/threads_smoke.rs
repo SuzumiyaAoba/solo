@@ -2,6 +2,7 @@
 use super::smoke::{env_pause_ms, key_down, preview_cycle, until};
 use super::*;
 use gpui_kit::component::WindowExt;
+use solo::projection::ActivityApproval;
 use std::time::Duration;
 
 pub(super) async fn run(this: &WeakEntity<Workspace>, cx: &mut AsyncWindowContext) {
@@ -23,8 +24,22 @@ pub(super) async fn run(this: &WeakEntity<Workspace>, cx: &mut AsyncWindowContex
         .update_in(cx, |this, window, cx| {
             let session = this.session();
             assert_eq!(session.model.threads().len(), 1);
-            assert_eq!(session.model.threads()[0].activities.len(), 5);
-            let id = session.model.threads()[0].id;
+            let thread = &session.model.threads()[0];
+            assert_eq!(thread.activities.len(), 5);
+            // 最後の実行("test")にツール名・承認・変更ファイル・所要時間が載る。
+            let test = &thread.activities[4];
+            assert_eq!(test.id, "test");
+            assert_eq!(test.tool.as_deref(), Some("exec"));
+            assert_eq!(
+                test.approval,
+                Some(ActivityApproval::Allowed("ユーザー".into()))
+            );
+            assert_eq!(test.changed_paths, ["src/ui/views.rs (fixture)"]);
+            assert!(test.duration_ms().is_some());
+            assert!(thread.duration_ms().is_some());
+            assert_eq!(thread.changed_files(), ["src/ui/views.rs (fixture)"]);
+            assert_eq!(session.model.diffs().len(), 1);
+            let id = thread.id;
             this.open_thread(id, window, cx);
             this.show_metrics = false;
             this.session_mut().chat_list.update(cx, |list, cx| {
@@ -52,6 +67,19 @@ pub(super) async fn run(this: &WeakEntity<Workspace>, cx: &mut AsyncWindowContex
         Duration::from_millis(env_pause_ms("SOLO_THREAD_PREVIEW_MS", 180)),
     )
     .await;
+    // 実行の変更ファイル → 差分 → 変更元の実行、と往復できることを確認する。
+    this.update_in(cx, |this, window, cx| {
+        this.open_diff("src/ui/views.rs (fixture)", cx);
+        let session = this.session();
+        assert!(session.view.tab == Tab::Diff);
+        assert_eq!(session.view.diff_index, 0);
+        this.open_diff_origin(0, window, cx);
+        let session = this.session();
+        assert!(session.view.tab == Tab::Chat);
+        assert_eq!(session.view.selected_thread, Some(first));
+        assert_eq!(session.view.expanded_activity.as_deref(), Some("Tool:test"));
+    })
+    .unwrap();
     this.update_in(cx, |this, window, cx| {
         this.session_mut().composer.update(cx, |input, cx| {
             input.set_value("スレッドを見ながら保持する下書き", cx)

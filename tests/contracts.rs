@@ -160,6 +160,7 @@ fn completion_with_unfinished_tool_remains_uncertain() {
         2,
         Event::ToolStarted {
             agent_id: None,
+            tool: None,
             invocation_id: "tool-1".into(),
             command: "fixture".into(),
             cwd: "/fixture".into(),
@@ -269,6 +270,7 @@ fn overlapping_turn_does_not_clear_unfinished_tool() {
         2,
         Event::ToolStarted {
             agent_id: None,
+            tool: None,
             invocation_id: "tool-1".into(),
             command: "fixture".into(),
             cwd: "fixture".into(),
@@ -297,7 +299,8 @@ fn unmatched_tool_completion_cannot_be_success() {
             2,
             Event::ToolFinished {
                 invocation_id: "not-started".into(),
-                exit_code: 0
+                exit_code: 0,
+                summary: None,
             }
         )),
         Apply::Rejected
@@ -313,6 +316,7 @@ fn tool_completion_cannot_be_rewritten_with_new_id() {
         2,
         Event::ToolStarted {
             agent_id: None,
+            tool: None,
             invocation_id: "tool-1".into(),
             command: "fixture".into(),
             cwd: "fixture".into(),
@@ -323,6 +327,7 @@ fn tool_completion_cannot_be_rewritten_with_new_id() {
         Event::ToolFinished {
             invocation_id: "tool-1".into(),
             exit_code: 1,
+            summary: None,
         },
     ));
     assert_eq!(
@@ -330,7 +335,8 @@ fn tool_completion_cannot_be_rewritten_with_new_id() {
             4,
             Event::ToolFinished {
                 invocation_id: "tool-1".into(),
-                exit_code: 0
+                exit_code: 0,
+                summary: None,
             }
         )),
         Apply::Rejected

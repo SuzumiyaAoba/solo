@@ -345,6 +345,7 @@ impl Producer {
         if !self.emit_or_quit(
             Event::ToolStarted {
                 agent_id: None,
+                tool: Some("exec".into()),
                 invocation_id: invocation.clone(),
                 command: "fixture::validate (simulation)".into(),
                 cwd: self.config.workspace.clone(),
@@ -452,9 +453,14 @@ impl Producer {
             return Ok(());
         }
         if !self.emit_or_quit(Event::DiffUpdated {
+            invocation_id: Some(invocation.clone()),
             path: "src/example.rs (fixture)".into(),
             unified_diff: "--- a/src/example.rs\n+++ b/src/example.rs\n@@ -1,4 +1,5 @@\n fn greeting() -> &'static str {\n-    \"Hello\"\n+    // 日本語の表示を確認\n+    \"こんにちは、Solo 🙂\"\n }\n \n".into(),
-        }, true) || !self.emit_or_quit(Event::ToolFinished { invocation_id: invocation, exit_code: 0 }, true) {
+        }, true) || !self.emit_or_quit(Event::ToolFinished {
+            invocation_id: invocation,
+            exit_code: 0,
+            summary: Some("終了コード 0 · stdout 32 バイト / stderr 0 バイト".into()),
+        }, true) {
             return Ok(());
         }
         self.emit_or_quit(
@@ -470,15 +476,18 @@ impl Producer {
     fn run_thread_demo(&mut self) {
         let events = vec![
             Event::MessageDelta { message_id: "thread-plan".into(), text: "画面構成と操作の流れを確認します。調査と検証の進み具合は、この依頼の実行スレッドで確認できます。\n\nこれは表示確認用の疑似シナリオです。".into() },
-            Event::ToolStarted { invocation_id: "read".into(), command: "read src/ui/views.rs".into(), cwd: self.config.workspace.clone(), agent_id: None },
-            Event::ToolFinished { invocation_id: "read".into(), exit_code: 0 },
+            Event::ToolStarted { invocation_id: "read".into(), command: "read src/ui/views.rs".into(), cwd: self.config.workspace.clone(), agent_id: None, tool: Some("read".into()) },
+            Event::ToolFinished { invocation_id: "read".into(), exit_code: 0, summary: Some("210 行".into()) },
             Event::AgentStarted { agent_id: "research".into(), name: "UI リサーチ".into(), task: "チャンネルの構成とスレッドへの導線を調べる".into(), parent_agent_id: None },
-            Event::ToolStarted { invocation_id: "search".into(), command: "search チャンネル src/ui".into(), cwd: self.config.workspace.clone(), agent_id: Some("research".into()) },
-            Event::ToolFinished { invocation_id: "search".into(), exit_code: 0 },
+            Event::ToolStarted { invocation_id: "search".into(), command: "search チャンネル src/ui".into(), cwd: self.config.workspace.clone(), agent_id: Some("research".into()), tool: Some("search".into()) },
+            Event::ToolFinished { invocation_id: "search".into(), exit_code: 0, summary: Some("8 件の一致".into()) },
             Event::AgentFinished { agent_id: "research".into(), success: true, summary: "プロジェクト別の一覧と、依頼ごとのスレッドを確認しました。".into() },
             Event::AgentStarted { agent_id: "validation".into(), name: "表示の検証".into(), task: "テーマと小さいウィンドウでの表示を確認する".into(), parent_agent_id: None },
-            Event::ToolStarted { invocation_id: "test".into(), command: "fixture::check_channel_layout (simulation)".into(), cwd: self.config.workspace.clone(), agent_id: Some("validation".into()) },
-            Event::ToolFinished { invocation_id: "test".into(), exit_code: 0 },
+            Event::ToolStarted { invocation_id: "test".into(), command: "fixture::check_channel_layout (simulation)".into(), cwd: self.config.workspace.clone(), agent_id: Some("validation".into()), tool: Some("exec".into()) },
+            Event::ApprovalRequested { request_id: "approve-test".into(), title: "fixture::check_channel_layout (simulation)".into(), executor: "shell".into(), command: None, details: serde_json::json!({}), invocation_id: Some("test".into()) },
+            Event::ApprovalDecided { request_id: "approve-test".into(), accepted: true, source: "ユーザー".into(), invocation_id: Some("test".into()) },
+            Event::DiffUpdated { path: "src/ui/views.rs (fixture)".into(), unified_diff: "--- a/src/ui/views.rs\n+++ b/src/ui/views.rs\n@@ -1,3 +1,4 @@\n mod chat;\n+mod thread;\n mod diff;\n".into(), invocation_id: Some("test".into()) },
+            Event::ToolFinished { invocation_id: "test".into(), exit_code: 0, summary: Some("終了コード 0 · stdout 64 バイト / stderr 0 バイト".into()) },
             Event::AgentFinished { agent_id: "validation".into(), success: true, summary: "ライト・ダークとコンパクト表示の疑似検証が完了しました。".into() },
             Event::MessageDelta { message_id: "thread-result".into(), text: "チャンネルの会話と実行スレッドの表示を確認しました。\n\n次の依頼を送った後も、以前の依頼にある「スレッドを開く」から実行履歴を参照できます。".into() },
             Event::TurnCompleted { reason: "スレッド表示の疑似シナリオが完了しました。".into(), usage: Usage::default() },

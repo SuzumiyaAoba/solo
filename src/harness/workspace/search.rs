@@ -1,6 +1,6 @@
 //! search/list の走査。除外ディレクトリと上限は両ツールで共有する。
 use super::{WorkspaceTools, invalid, is_ignored_dir};
-use crate::{storage::read_text, text::preview};
+use crate::{harness::ToolResult, storage::read_text, text::preview};
 use std::{
     fs, io,
     path::{Path, PathBuf},
@@ -13,7 +13,7 @@ const MAX_SEARCH_FILE_BYTES: u64 = 1024 * 1024;
 
 impl WorkspaceTools {
     /// pattern 無しは直下の一覧、有りは glob に一致するファイルを再帰的に返す。
-    pub(super) fn list(&self, raw: Option<&str>, pattern: Option<&str>) -> io::Result<String> {
+    pub(super) fn list(&self, raw: Option<&str>, pattern: Option<&str>) -> io::Result<ToolResult> {
         let dir = resolve_dir(&self.root, raw.unwrap_or(""))?;
         match pattern {
             None => {
@@ -32,13 +32,18 @@ impl WorkspaceTools {
                     })
                     .collect();
                 if entries.is_empty() {
-                    return Ok("(空のディレクトリです)".into());
+                    return Ok(ToolResult::ok("(空のディレクトリです)").with_summary("0 件"));
                 }
                 let mut output = entries.join("\n") + "\n";
                 if overflow {
                     output.push_str("[一覧の上限に達したため一部のみ表示しました]\n");
                 }
-                Ok(output)
+                let summary = if overflow {
+                    format!("{} 件（{} 件中・上限で省略）", entries.len(), all.len())
+                } else {
+                    format!("{} 件", entries.len())
+                };
+                Ok(ToolResult::ok(output).with_summary(summary))
             }
             Some(pattern) => {
                 let matcher = glob(pattern)?;
@@ -55,17 +60,23 @@ impl WorkspaceTools {
                 );
                 found.sort();
                 if found.is_empty() {
-                    return Ok("(一致するファイルはありません)".into());
+                    return Ok(
+                        ToolResult::ok("(一致するファイルはありません)").with_summary("0 件")
+                    );
                 }
+                let shown = found.len().min(MAX_LIST_ENTRIES);
                 let mut output = String::new();
                 for path in found.iter().take(MAX_LIST_ENTRIES) {
                     output.push_str(path);
                     output.push('\n');
                 }
-                if found.len() > MAX_LIST_ENTRIES {
+                let summary = if found.len() > MAX_LIST_ENTRIES {
                     output.push_str("[一覧の上限に達したため一部のみ表示しました]\n");
-                }
-                Ok(output)
+                    format!("{shown} 件（{} 件中・上限で省略）", found.len())
+                } else {
+                    format!("{shown} 件")
+                };
+                Ok(ToolResult::ok(output).with_summary(summary))
             }
         }
     }
@@ -77,7 +88,7 @@ impl WorkspaceTools {
         raw: Option<&str>,
         glob_pattern: Option<&str>,
         regex: Option<bool>,
-    ) -> io::Result<String> {
+    ) -> io::Result<ToolResult> {
         if query.is_empty() {
             return Err(invalid("query は空にできません".into()));
         }
@@ -100,8 +111,9 @@ impl WorkspaceTools {
                 if path.is_file() {
                     let mut output = String::new();
                     let mut truncated = false;
-                    self.search_file(&path, &pattern, &mut output, &mut truncated);
-                    return Ok(finish_search(output, false));
+                    let mut matches = 0usize;
+                    self.search_file(&path, &pattern, &mut output, &mut truncated, &mut matches);
+                    return Ok(finish_search(output, false, matches));
                 }
                 if !path.is_dir() {
                     return Err(io::Error::other(
@@ -118,6 +130,7 @@ impl WorkspaceTools {
         let mut output = String::new();
         let mut truncated = false;
         let mut capped = false;
+        let mut matches = 0usize;
         // 検索の起点の読み取り失敗だけはエラーとして返し、途中の失敗はスキップする。
         'dirs: while let Some(dir) = dirs.pop() {
             let entries = match sorted_entries(&dir) {
@@ -153,14 +166,20 @@ impl WorkspaceTools {
                     if metadata.len() > MAX_SEARCH_FILE_BYTES {
                         continue;
                     }
-                    self.search_file(&entry.path(), &pattern, &mut output, &mut truncated);
+                    self.search_file(
+                        &entry.path(),
+                        &pattern,
+                        &mut output,
+                        &mut truncated,
+                        &mut matches,
+                    );
                     if truncated {
                         break 'dirs;
                     }
                 }
             }
         }
-        Ok(finish_search(output, capped))
+        Ok(finish_search(output, capped, matches))
     }
 
     /// 1 ファイルを検索して一致行を追記する。出力上限に達したら省略注記を付けて打ち切る。
@@ -170,6 +189,7 @@ impl WorkspaceTools {
         pattern: &Matcher,
         output: &mut String,
         truncated: &mut bool,
+        matches: &mut usize,
     ) {
         let Ok(text) = read_text(path, MAX_SEARCH_FILE_BYTES, "検索対象の読み取り上限です")
         else {
@@ -192,6 +212,7 @@ impl WorkspaceTools {
                     return;
                 }
                 output.push_str(&row);
+                *matches += 1;
             }
         }
     }
@@ -212,14 +233,15 @@ impl Matcher {
 }
 
 /// 結果の終端処理。一致が無ければ文言を返し、上限注記だけは残す。
-fn finish_search(mut output: String, capped: bool) -> String {
+fn finish_search(mut output: String, capped: bool, matches: usize) -> ToolResult {
     if capped {
         output.push_str("[検索対象の上限に達したため、一部のファイルのみ検索しました]\n");
     }
     if output.is_empty() {
-        return "(一致する行はありません)".into();
+        return ToolResult::ok("(一致する行はありません)")
+            .with_summary(format!("{matches} 件の一致"));
     }
-    output
+    ToolResult::ok(output).with_summary(format!("{matches} 件の一致"))
 }
 
 /// ディレクトリの項目を名前順に並べる。探索順を決定的にするため。

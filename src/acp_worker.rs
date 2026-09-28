@@ -252,6 +252,7 @@ impl Bridge {
         };
         let (allow, reject) = (option_id("allow_once"), option_id("reject_once"));
         let request_id = format!("approval-{}", out.sequence() + 1);
+        let invocation_id = params["toolCall"]["toolCallId"].as_str().map(str::to_owned);
         let request = ApprovalRequest::acp(params, profile, workspace);
         out.emit(Event::ApprovalRequested {
             request_id: request_id.clone(),
@@ -259,6 +260,7 @@ impl Bridge {
             executor: request.executor.clone(),
             command: request.display_command.clone(),
             details: request.details.clone(),
+            invocation_id: invocation_id.clone(),
         });
         let reply = approval::ask(
             sender,
@@ -275,6 +277,7 @@ impl Bridge {
             request_id,
             accepted,
             source: source.into(),
+            invocation_id,
         });
         if cancellation.is_cancelled() {
             return json!({"outcome":{"outcome":"cancelled"}});
@@ -315,8 +318,16 @@ impl Bridge {
                             self.segment += 1;
                             self.segment_has_text = false;
                         }
+                        // ツール名が届いていればバッジ表示に回す。kind は分類名のため name を優先する。
+                        let tool_name = tool
+                            .metadata
+                            .get("name")
+                            .or_else(|| tool.metadata.get("kind"))
+                            .and_then(Value::as_str)
+                            .map(str::to_owned);
                         out.emit(Event::ToolStarted {
                             agent_id: None,
+                            tool: tool_name,
                             invocation_id: id.into(),
                             command: update["title"].as_str().unwrap_or("ACP tool").into(),
                             cwd: String::new(),
@@ -341,6 +352,7 @@ impl Bridge {
                                 let old = item["oldText"].as_str().unwrap_or("");
                                 if let Some(diff) = unified_diff(path, old, new) {
                                     out.emit(Event::DiffUpdated {
+                                        invocation_id: Some(id.into()),
                                         path: path.into(),
                                         unified_diff: diff,
                                     });
@@ -358,6 +370,8 @@ impl Bridge {
                                 } else {
                                     -1
                                 },
+                                // ACP の tool_call_update には要約フィールドが無い。
+                                summary: None,
                             });
                         }
                         // 完了済みという記録は残し、承認用の入力は次の要求へ引き継がない。

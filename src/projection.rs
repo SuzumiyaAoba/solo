@@ -1,12 +1,12 @@
 mod diff;
 mod thread;
-pub use diff::{Diff, DiffKind, DiffLine, MAX_DIFF_LINES};
+pub use diff::{Diff, DiffKind, DiffLine, DiffOrigin, MAX_DIFF_LINES};
 pub use thread::{
-    ActivityKind, ActivityState, ExecutionActivity, ExecutionThread, MAX_EXECUTION_THREADS,
-    MAX_THREAD_ACTIVITIES,
+    ActivityApproval, ActivityKind, ActivityState, ExecutionActivity, ExecutionThread,
+    MAX_EXECUTION_THREADS, MAX_THREAD_ACTIVITIES,
 };
 
-use crate::event::{Decoded, Envelope, Event, SessionId, TurnId, Usage};
+use crate::event::{Decoded, Envelope, Event, SessionId, TurnId, Usage, now_ms};
 use crate::text::preview;
 use std::collections::{HashMap, HashSet, VecDeque};
 
@@ -243,18 +243,19 @@ impl SessionProjection {
     pub fn apply(&mut self, envelope: Envelope) -> Apply {
         let sequence = envelope.sequence;
         let turn_id = envelope.turn_id.clone();
+        let timestamp_ms = envelope.timestamp_ms;
         let gap = envelope.sequence != self.last_sequence + 1;
         let event = match self.validate_envelope(envelope) {
             Ok(event) => event,
             Err(result) => return result,
         };
         if let Some(thread) = self.threads.back_mut()
-            && thread.record(&event)
+            && thread.record(&event, timestamp_ms)
         {
             self.thread_revision += 1;
         }
         self.accepted += 1;
-        self.apply_event(event, sequence, turn_id, gap);
+        self.apply_event(event, sequence, turn_id, gap, timestamp_ms);
         Apply::Applied
     }
 
@@ -381,7 +382,14 @@ impl SessionProjection {
     }
 
     /// 受理済みイベントを表示モデルへ反映する。
-    fn apply_event(&mut self, event: Event, sequence: u64, turn_id: Option<TurnId>, gap: bool) {
+    fn apply_event(
+        &mut self,
+        event: Event,
+        sequence: u64,
+        turn_id: Option<TurnId>,
+        gap: bool,
+        timestamp_ms: u64,
+    ) {
         match event {
             Event::SessionCreated {
                 title,
@@ -411,6 +419,7 @@ impl SessionProjection {
                     sequence,
                     self.turn_id.clone().expect("validated turn id"),
                     &prompt,
+                    timestamp_ms,
                 ));
                 self.thread_revision += 1;
                 self.append(Speaker::User, &format!("prompt-{sequence}"), &prompt);
@@ -467,6 +476,7 @@ impl SessionProjection {
             Event::ToolFinished {
                 invocation_id,
                 exit_code,
+                ..
             } => {
                 self.tools.insert(invocation_id.clone(), Some(exit_code));
                 if let Some(activity) = self
@@ -493,8 +503,16 @@ impl SessionProjection {
                     if success { "完了" } else { "失敗" }
                 ));
             }
-            Event::DiffUpdated { path, unified_diff } => {
-                let diff = Diff::parse(path.clone(), &unified_diff);
+            Event::DiffUpdated {
+                path,
+                unified_diff,
+                invocation_id,
+            } => {
+                let mut diff = Diff::parse(path.clone(), &unified_diff);
+                diff.origin = turn_id.map(|turn_id| DiffOrigin {
+                    turn_id,
+                    invocation_id,
+                });
                 if let Some(existing) = self.diffs.iter_mut().find(|diff| diff.path == path) {
                     *existing = diff;
                 } else {
@@ -511,14 +529,17 @@ impl SessionProjection {
                         Status::Disconnected,
                         "完了通知を受信しましたが、未完了の実行またはイベントの欠落があります"
                             .into(),
+                        timestamp_ms,
                     );
                 } else {
-                    self.finish(Status::Completed, reason);
+                    self.finish(Status::Completed, reason, timestamp_ms);
                 }
             }
-            Event::TurnCancelled { reason } => self.finish(Status::Cancelled, reason),
-            Event::TurnFailed { reason } => self.finish(Status::Failed, reason),
-            Event::Disconnected { reason } => self.finish(Status::Disconnected, reason),
+            Event::TurnCancelled { reason } => self.finish(Status::Cancelled, reason, timestamp_ms),
+            Event::TurnFailed { reason } => self.finish(Status::Failed, reason, timestamp_ms),
+            Event::Disconnected { reason } => {
+                self.finish(Status::Disconnected, reason, timestamp_ms)
+            }
         }
     }
 
@@ -527,6 +548,7 @@ impl SessionProjection {
             self.finish(
                 Status::Disconnected,
                 "完了イベントを受信する前に接続が閉じました".into(),
+                now_ms(),
             );
         }
     }
@@ -536,7 +558,7 @@ impl SessionProjection {
     pub fn disconnect_pending(&mut self, reason: impl Into<String>) {
         if !self.turn_open && self.status == Status::Idle {
             self.incomplete = true;
-            self.finish(Status::Disconnected, reason.into());
+            self.finish(Status::Disconnected, reason.into(), now_ms());
         }
     }
 
@@ -553,7 +575,7 @@ impl SessionProjection {
     pub fn mark_recovered(&mut self, reason: impl Into<String>) {
         if self.status.is_active() || self.turn_open {
             self.incomplete = true;
-            self.finish(Status::Disconnected, reason.into());
+            self.finish(Status::Disconnected, reason.into(), now_ms());
         }
     }
 
@@ -569,7 +591,7 @@ impl SessionProjection {
         } else {
             Status::Failed
         };
-        self.finish(status, reason);
+        self.finish(status, reason, now_ms());
     }
 
     pub fn unreviewed_count(&self) -> usize {
@@ -588,7 +610,7 @@ impl SessionProjection {
         true
     }
 
-    fn finish(&mut self, status: Status, reason: String) {
+    fn finish(&mut self, status: Status, reason: String, timestamp_ms: u64) {
         self.turn_open = false;
         self.status = status;
         self.reason = reason.clone();
@@ -597,7 +619,7 @@ impl SessionProjection {
             .back_mut()
             .filter(|thread| thread.status.is_active())
         {
-            thread.finish(status, &reason);
+            thread.finish(status, &reason, timestamp_ms);
             self.thread_revision += 1;
         }
         self.append(

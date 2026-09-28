@@ -1,4 +1,9 @@
-use solo::projection::{Diff, DiffKind};
+mod common;
+
+use solo::{
+    event::{Event, SessionId, Usage},
+    projection::{Apply, Diff, DiffKind, SessionProjection},
+};
 
 #[test]
 fn hunk_content_that_looks_like_file_headers_keeps_its_line_numbers() {
@@ -74,4 +79,64 @@ fn no_newline_markers_do_not_break_pairing() {
     );
     assert_eq!(diff.lines[1].changed, Some(0..3));
     assert_eq!(diff.lines[3].changed, Some(0..3));
+}
+
+#[test]
+fn diff_origin_tracks_the_reporting_turn_and_invocation() {
+    let mut session = SessionProjection::new(SessionId::parse("s1").unwrap(), "test".into());
+    assert!(Diff::parse("a".into(), "+x").origin.is_none());
+    assert_eq!(
+        session.apply(common::envelope(
+            "s1",
+            "first",
+            1,
+            Event::TurnStarted { prompt: "p".into() }
+        )),
+        Apply::Applied
+    );
+    session.apply(common::envelope(
+        "s1",
+        "first",
+        2,
+        Event::DiffUpdated {
+            path: "src/a.rs".into(),
+            unified_diff: "@@ -0,0 +1 @@\n+x".into(),
+            invocation_id: Some("write-1".into()),
+        },
+    ));
+    let origin = session.diffs()[0].origin.as_ref().unwrap().clone();
+    assert_eq!(&*origin.turn_id, "first");
+    assert_eq!(origin.invocation_id.as_deref(), Some("write-1"));
+    // 次の turn で同じファイルが上書きされたら、origin も新しい実行に付け替わる。
+    session.apply(common::envelope(
+        "s1",
+        "first",
+        3,
+        Event::TurnCompleted {
+            reason: "done".into(),
+            usage: Usage::default(),
+        },
+    ));
+    session.apply(common::envelope(
+        "s1",
+        "second",
+        4,
+        Event::TurnStarted {
+            prompt: "again".into(),
+        },
+    ));
+    session.apply(common::envelope(
+        "s1",
+        "second",
+        5,
+        Event::DiffUpdated {
+            path: "src/a.rs".into(),
+            unified_diff: "@@ -0,0 +1 @@\n+y".into(),
+            invocation_id: None,
+        },
+    ));
+    assert_eq!(session.diffs().len(), 1);
+    let origin = session.diffs()[0].origin.as_ref().unwrap();
+    assert_eq!(&*origin.turn_id, "second");
+    assert_eq!(origin.invocation_id, None);
 }

@@ -116,6 +116,7 @@ fn review_cannot_confirm_inflight_or_truncated_changes_and_new_diff_invalidates_
         Event::DiffUpdated {
             path: "src/app.rs".into(),
             unified_diff: "--- a\n+++ b\n@@ -1 +1 @@\n-old\n+new".into(),
+            invocation_id: None,
         },
     );
     session.apply(change.clone());
@@ -147,6 +148,7 @@ fn review_cannot_confirm_inflight_or_truncated_changes_and_new_diff_invalidates_
         Event::DiffUpdated {
             path: "src/app.rs".into(),
             unified_diff: "+updated".into(),
+            invocation_id: None,
         },
     ));
     assert_eq!(session.unreviewed_count(), 1);
@@ -155,6 +157,7 @@ fn review_cannot_confirm_inflight_or_truncated_changes_and_new_diff_invalidates_
         Event::DiffUpdated {
             path: "long".into(),
             unified_diff: format!("+{}", "x".repeat(3000)),
+            invocation_id: None,
         },
     ));
     session.apply(event(
@@ -176,6 +179,7 @@ fn activity_tracks_tool_outcomes_and_resets_for_the_next_turn() {
         2,
         Event::ToolStarted {
             agent_id: None,
+            tool: None,
             invocation_id: "build".into(),
             command: "cargo test".into(),
             cwd: "/workspace".into(),
@@ -186,6 +190,7 @@ fn activity_tracks_tool_outcomes_and_resets_for_the_next_turn() {
         Event::ToolFinished {
             invocation_id: "build".into(),
             exit_code: 1,
+            summary: None,
         },
     ));
     assert_eq!(session.tool_activity()[0].command, "cargo test");
@@ -216,6 +221,7 @@ fn activity_is_bounded_without_losing_tool_completion_validation() {
             2 + n as u64,
             Event::ToolStarted {
                 agent_id: None,
+                tool: None,
                 invocation_id: n.to_string(),
                 command: "read".into(),
                 cwd: ".".into(),
@@ -229,7 +235,8 @@ fn activity_is_bounded_without_losing_tool_completion_validation() {
             3 + MAX_TOOL_ACTIVITIES as u64,
             Event::ToolFinished {
                 invocation_id: "0".into(),
-                exit_code: 0
+                exit_code: 0,
+                summary: None,
             }
         )),
         Apply::Applied

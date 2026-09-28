@@ -1,6 +1,6 @@
 use super::*;
 use crate::event::TurnId;
-use crate::projection::{Apply, SessionProjection, Speaker, Status};
+use crate::projection::{ActivityApproval, Apply, SessionProjection, Speaker, Status};
 #[cfg(unix)]
 use std::{
     fs,
@@ -270,7 +270,7 @@ echo '{"jsonrpc":"2.0","id":0,"result":{"protocolVersion":1,"agentCapabilities":
 IFS= read -r line
 echo '{"jsonrpc":"2.0","id":1,"result":{"sessionId":"acp-1"}}'
 IFS= read -r line
-echo '{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"acp-1","update":{"sessionUpdate":"tool_call","toolCallId":"tool-1","title":"read","status":"pending"}}}'
+echo '{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"acp-1","update":{"sessionUpdate":"tool_call","toolCallId":"tool-1","title":"read","status":"pending","kind":"execute","name":"shell","rawInput":{"command":"cat a","cwd":"/tmp"}}}}'
 echo '{"jsonrpc":"2.0","id":77,"method":"session/request_permission","params":{"sessionId":"acp-1","toolCall":{"toolCallId":"tool-1"},"options":[{"optionId":"a","kind":"allow_once","name":"Allow"},{"optionId":"r","kind":"reject_once","name":"Reject"}]}}'
 IFS= read -r line
 case "$line" in *'"optionId":"a"'*) ;; *) exit 3;; esac
@@ -309,6 +309,21 @@ IFS= read -r line
     assert!(session.chat().iter().any(|block| block.text == "first"));
     assert!(session.chat().iter().any(|block| block.text == "second"));
     assert_eq!(session.diffs().len(), 1);
+    // ACP のツール名・承認・差分は invocation_id で実行と差分に届く。
+    let activity = session.threads()[0]
+        .activities
+        .iter()
+        .find(|activity| activity.id == "tool-1")
+        .expect("tool-1 activity");
+    assert_eq!(activity.tool.as_deref(), Some("shell"));
+    assert_eq!(
+        activity.approval,
+        Some(ActivityApproval::Allowed("user".into()))
+    );
+    assert_eq!(activity.changed_paths, ["/tmp/a"]);
+    let origin = session.diffs()[0].origin.as_ref().unwrap();
+    assert_eq!(origin.invocation_id.as_deref(), Some("tool-1"));
+    assert_eq!(&*origin.turn_id, &*session.threads()[0].turn_id);
     drop(controller);
 }
 

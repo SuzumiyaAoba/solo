@@ -35,6 +35,9 @@ pub struct ToolCall {
 pub struct ToolResult {
     pub content: String,
     pub is_error: bool,
+    /// 結果の一行要約。worker が ToolFinished の表示に回す。未取得は None。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summary: Option<String>,
 }
 
 impl ToolResult {
@@ -42,6 +45,7 @@ impl ToolResult {
         Self {
             content: content.into(),
             is_error: false,
+            summary: None,
         }
     }
 
@@ -49,7 +53,14 @@ impl ToolResult {
         Self {
             content: content.into(),
             is_error: true,
+            summary: None,
         }
+    }
+
+    /// 結果の一行要約を付ける。
+    pub fn with_summary(mut self, summary: impl Into<String>) -> Self {
+        self.summary = Some(summary.into());
+        self
     }
 }
 

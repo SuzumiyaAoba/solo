@@ -5,13 +5,16 @@ use crate::{
     codex::{Authentication, DEFAULT_MODEL, DeviceLogin},
     event::{Emitter, Envelope, Event, Sequencer, SessionId, Usage},
     harness::{
-        self, Cancellation, Limits, Message, StopReason, ToolCall, Update,
-        workspace::{WorkspaceTools, canonical_workspace, system_prompt},
+        self, Cancellation, Limits, Message, StopReason, ToolCall, ToolResult, Update,
+        workspace::{
+            TOOL_EDIT, TOOL_EXEC, TOOL_LIST, TOOL_READ, TOOL_SEARCH, TOOL_WRITE, WorkspaceTools,
+            canonical_workspace, system_prompt,
+        },
     },
     text::preview,
 };
 use async_channel::{Receiver, Sender};
-use serde_json::json;
+use serde_json::{Value, json};
 use std::{
     cell::RefCell,
     io,
@@ -213,6 +216,7 @@ fn run(
                 request_id,
                 accepted: decision,
                 source: source.into(),
+                invocation_id: Some(call.id.clone()),
             });
             return decision;
         }
@@ -223,6 +227,7 @@ fn run(
             executor: request.executor.clone(),
             command: request.display_command.clone(),
             details: request.details.clone(),
+            invocation_id: Some(call.id.clone()),
         });
         let reply = approval::ask(
             &approval_sender,
@@ -239,6 +244,7 @@ fn run(
             request_id,
             accepted,
             source: source.into(),
+            invocation_id: Some(call.id.clone()),
         });
         accepted
     };
@@ -270,8 +276,9 @@ fn run(
             Update::ToolProposed(call) => {
                 emitter.borrow_mut().emit(Event::ToolStarted {
                     agent_id: None,
+                    tool: Some(call.name.clone()),
+                    command: command_label(&call),
                     invocation_id: call.id,
-                    command: format!("{} {}", call.name, call.arguments),
                     cwd: workspace.display().to_string(),
                 });
             }
@@ -279,6 +286,7 @@ fn run(
                 if let Some(diffs) = pending_diffs.borrow_mut().remove(&call_id) {
                     for (relative, diff) in diffs {
                         emitter.borrow_mut().emit(Event::DiffUpdated {
+                            invocation_id: Some(call_id.clone()),
                             path: relative,
                             unified_diff: diff,
                         });
@@ -295,6 +303,7 @@ fn run(
                 emitter.borrow_mut().emit(Event::ToolFinished {
                     invocation_id: call_id,
                     exit_code: if result.is_error { 1 } else { 0 },
+                    summary: result_summary(&result),
                 });
             }
             Update::Stopped(_) => {}
@@ -302,6 +311,54 @@ fn run(
     );
     finish_turn(run, &limits, sender, emitter.into_inner());
     Ok(())
+}
+
+/// ToolStarted の表示用コマンド行。既知ツールは引数から人が読める形にし、
+/// それ以外は従来どおりツール名と JSON 引数を並べる。
+fn command_label(call: &ToolCall) -> String {
+    let arg = |key: &str| {
+        call.arguments
+            .get(key)
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty())
+    };
+    let fallback = || format!("{} {}", call.name, call.arguments);
+    match call.name.as_str() {
+        TOOL_EXEC => arg("command").map(str::to_owned).unwrap_or_else(fallback),
+        TOOL_READ | TOOL_EDIT | TOOL_WRITE => match arg("path") {
+            Some(path) => format!("{} {path}", call.name),
+            None => fallback(),
+        },
+        TOOL_LIST => match arg("path") {
+            Some(path) => format!("list {path}"),
+            None => "list".into(),
+        },
+        TOOL_SEARCH => match arg("query") {
+            Some(query) => {
+                let mut label = format!("search \"{query}\"");
+                for value in [arg("path"), arg("glob")].into_iter().flatten() {
+                    label.push(' ');
+                    label.push_str(value);
+                }
+                label
+            }
+            None => fallback(),
+        },
+        _ => fallback(),
+    }
+}
+
+/// ToolFinished の一行要約。tool 自身の summary を優先し、
+/// 無ければ本文の先頭の非空行を拾う。
+fn result_summary(result: &ToolResult) -> Option<String> {
+    result.summary.clone().or_else(|| {
+        result
+            .content
+            .lines()
+            .map(str::trim)
+            .find(|line| !line.is_empty())
+            .map(|line| preview(line, 160))
+    })
 }
 
 /// すべての停止理由で会話履歴を先に返し、停止理由に応じた終了イベントを送る。
@@ -430,6 +487,75 @@ mod tests {
             completed.expect("cancellation must not wait for a UI reply"),
             None
         );
+    }
+
+    #[test]
+    fn command_label_formats_known_tools_and_falls_back_to_json() {
+        let call = |name: &str, arguments: serde_json::Value| ToolCall {
+            id: "i".into(),
+            name: name.into(),
+            arguments,
+        };
+        assert_eq!(
+            command_label(&call("exec", serde_json::json!({"command":"ls -l"}))),
+            "ls -l"
+        );
+        assert_eq!(
+            command_label(&call("read", serde_json::json!({"path":"src/a.rs"}))),
+            "read src/a.rs"
+        );
+        assert_eq!(
+            command_label(&call(
+                "write",
+                serde_json::json!({"path":"b.txt","content":"x"})
+            )),
+            "write b.txt"
+        );
+        assert_eq!(
+            command_label(&call("edit", serde_json::json!({"path":"c.rs"}))),
+            "edit c.rs"
+        );
+        assert_eq!(command_label(&call("list", serde_json::json!({}))), "list");
+        assert_eq!(
+            command_label(&call("list", serde_json::json!({"path":"src"}))),
+            "list src"
+        );
+        assert_eq!(
+            command_label(&call(
+                "search",
+                serde_json::json!({"query":"needle","path":"src","glob":"*.rs"})
+            )),
+            "search \"needle\" src *.rs"
+        );
+        // 必須引数が欠けた既知ツールと、未知ツールは name + JSON に落ちる。
+        assert_eq!(
+            command_label(&call("read", serde_json::json!({}))),
+            "read {}"
+        );
+        assert_eq!(
+            command_label(&call("unknown_tool", serde_json::json!({"a":1}))),
+            "unknown_tool {\"a\":1}"
+        );
+        // 空文字列の引数は無視する。
+        assert_eq!(
+            command_label(&call("exec", serde_json::json!({"command":""}))),
+            "exec {\"command\":\"\"}"
+        );
+    }
+
+    #[test]
+    fn result_summary_prefers_tool_summary_and_falls_back_to_first_line() {
+        let result = ToolResult::ok("done").with_summary("3 件");
+        assert_eq!(result_summary(&result).as_deref(), Some("3 件"));
+        let result = ToolResult::ok("\n\n最初の行\n二行目");
+        assert_eq!(result_summary(&result).as_deref(), Some("最初の行"));
+        let result = ToolResult::ok("   \n  \t");
+        assert_eq!(result_summary(&result), None);
+        // 長い行は 160 字で切る。
+        let long = "x".repeat(300);
+        let result = ToolResult::ok(long);
+        let summary = result_summary(&result).unwrap();
+        assert!(summary.chars().count() <= 160 + "…".chars().count());
     }
 
     #[test]

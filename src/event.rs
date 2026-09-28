@@ -9,6 +9,14 @@ use std::{
 
 pub const SCHEMA_VERSION: u32 = 1;
 
+/// envelope の timestamp_ms と、イベントを伴わない状態遷移の記録時刻に使う現在時刻。
+pub(crate) fn now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
+}
+
 /// ローカル session の識別子。session_store がディレクトリ名に使うため文字種を検査する。
 #[derive(Clone, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
@@ -95,10 +103,7 @@ impl Envelope {
             event_id: format!("{session_id}-{sequence}"),
             session_id: session_id.clone(),
             sequence,
-            timestamp_ms: SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_millis() as u64,
+            timestamp_ms: now_ms(),
             turn_id: Some(turn_id),
             payload: serde_json::to_value(event).expect("serializable event"),
         }
@@ -282,10 +287,16 @@ pub enum Event {
         cwd: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         agent_id: Option<String>,
+        /// "read"/"exec" などのツール名。古いイベントや ACP の報告では None。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tool: Option<String>,
     },
     ToolFinished {
         invocation_id: String,
         exit_code: i32,
+        /// 結果の一行要約。無い場合は投影側で終了コードから組み立てる。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        summary: Option<String>,
     },
     AgentStarted {
         agent_id: String,
@@ -306,12 +317,17 @@ pub enum Event {
         executor: String,
         command: Option<String>,
         details: Value,
+        /// 承認対象のツール呼び出し。特定できない場合は None。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        invocation_id: Option<String>,
     },
     /// user・auto・denied いずれもここに残る。accepted=false は拒否・中止を含む。
     ApprovalDecided {
         request_id: String,
         accepted: bool,
         source: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        invocation_id: Option<String>,
     },
     Log {
         level: String,
@@ -322,6 +338,9 @@ pub enum Event {
     DiffUpdated {
         path: String,
         unified_diff: String,
+        /// 変更を起こしたツール呼び出し。特定できない場合は None。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        invocation_id: Option<String>,
     },
     TurnCompleted {
         reason: String,

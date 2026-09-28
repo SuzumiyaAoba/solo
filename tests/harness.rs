@@ -193,7 +193,7 @@ fn tool_result_reaches_next_model_request() {
     assert_eq!(result.model_requests, 2);
     assert_eq!(result.tool_calls, 1);
     assert!(
-        matches!(&result.messages[2], Message::Tool { result: ToolResult { content, is_error: false }, .. } if content == "hello")
+        matches!(&result.messages[2], Message::Tool { result: ToolResult { content, is_error: false, .. }, .. } if content == "hello")
     );
     assert!(matches!(
         updates.last(),

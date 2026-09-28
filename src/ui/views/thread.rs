@@ -1,5 +1,7 @@
 use super::*;
-use solo::projection::{ActivityKind, ActivityState, ExecutionActivity, ExecutionThread};
+use solo::projection::{
+    ActivityApproval, ActivityKind, ActivityState, ExecutionActivity, ExecutionThread,
+};
 
 impl Workspace {
     pub(in crate::ui) fn open_thread(
@@ -124,7 +126,7 @@ impl Workspace {
                         .text_size(px(13.))
                         .child(thread.prompt.clone()),
                 )
-                .child(caption(format!("{} 件の実行", thread.activity_count()), cx)),
+                .child(caption(thread_meta(thread), cx)),
         )
         .when(current && session.approval.is_some(), |v| {
             v.child(
@@ -212,6 +214,7 @@ impl Workspace {
         let p = ds::theme(cx);
         let session = self.session();
         let key = format!("{:?}:{}", activity.kind, activity.id);
+        let toggle_key = key.clone();
         let expanded = session.view.expanded_activity.as_ref() == Some(&key);
         let tone = activity_tone(activity.state);
         let (color, _) = p.tone(tone);
@@ -224,6 +227,7 @@ impl Workspace {
                 .map(|a| a.title.clone())
                 .unwrap_or_else(|| id.clone())
         });
+        let duration = activity.duration_ms().map(duration_label);
         let copy = format!(
             "{}\n{}\n{}",
             activity.title, activity.detail, activity.result
@@ -243,15 +247,26 @@ impl Workspace {
                     .items_center()
                     .justify_between()
                     .gap_2()
-                    .child(caption(
-                        if agent {
-                            "サブエージェント"
-                        } else {
-                            "ツール呼び出し"
-                        },
-                        cx,
-                    ))
-                    .child(ds::badge(activity.state.label(), tone, cx)),
+                    .child(match &activity.tool {
+                        Some(tool) => ds::badge(tool.clone(), Tone::Neutral, cx).into_any_element(),
+                        None => caption(
+                            if agent {
+                                "サブエージェント"
+                            } else {
+                                "ツール呼び出し"
+                            },
+                            cx,
+                        )
+                        .into_any_element(),
+                    })
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .when_some(duration, |v, duration| v.child(caption(duration, cx)))
+                            .child(ds::badge(activity.state.label(), tone, cx)),
+                    ),
             )
             .child(
                 Button::new(
@@ -267,11 +282,24 @@ impl Workspace {
                 .tooltip(activity.title.clone())
                 .control_size(ControlSize::Small)
                 .on_click(cx.listener(move |this, _, _, cx| {
-                    this.session_mut().view.expanded_activity =
-                        if expanded { None } else { Some(key.clone()) };
+                    this.session_mut().view.expanded_activity = if expanded {
+                        None
+                    } else {
+                        Some(toggle_key.clone())
+                    };
                     cx.notify();
                 })),
             )
+            .when_some(activity.approval.as_ref(), |v, approval| {
+                let (label, tone) = match approval {
+                    ActivityApproval::Pending => ("承認待ち".into(), Tone::Warning),
+                    ActivityApproval::Allowed(source) => {
+                        (format!("許可 · {source}"), Tone::Neutral)
+                    }
+                    ActivityApproval::Denied(_) => ("拒否".into(), Tone::Danger),
+                };
+                v.child(ds::badge(label, tone, cx))
+            })
             .when_some(owner, |v, owner| {
                 v.child(caption(format!("担当: {owner}"), cx))
             })
@@ -317,6 +345,88 @@ impl Workspace {
             .when(!activity.result.is_empty(), |v| {
                 v.child(caption(activity.result.clone(), cx))
             })
+            .when(!activity.changed_paths.is_empty(), |v| {
+                v.child(self.changed_paths_row(&key, activity, cx))
+            })
+    }
+
+    /// 変更ファイルのチップ。押すと Diff タブの該当ファイルを開く。
+    fn changed_paths_row(
+        &self,
+        key: &str,
+        activity: &ExecutionActivity,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let p = ds::theme(cx);
+        const SHOWN: usize = 3;
+        let rest = activity.changed_paths.len().saturating_sub(SHOWN);
+        div()
+            .flex()
+            .flex_wrap()
+            .items_center()
+            .gap_1()
+            .children(
+                activity
+                    .changed_paths
+                    .iter()
+                    .take(SHOWN)
+                    .enumerate()
+                    .map(|(index, path)| {
+                        let name = path.rsplit('/').next().unwrap_or(path).to_owned();
+                        let file = path.clone();
+                        let tip = path.clone();
+                        div()
+                            .id(SharedString::from(format!("{key}-file-{index}")))
+                            .px_2()
+                            .py(px(1.))
+                            .rounded(px(ds::radius::CONTROL))
+                            .bg(ds::glass(p.accent_soft, 0.6))
+                            .text_color(rgb(p.accent_text))
+                            .text_size(px(typography::CAPTION))
+                            .font_family(typography::MONO)
+                            .cursor_pointer()
+                            .child(name)
+                            .hover(move |style| style.bg(ds::glass(p.hover, ds::GLASS_HOVER)))
+                            .tooltip(move |window, cx| {
+                                gpui_kit::component::tooltip::Tooltip::new(tip.clone())
+                                    .build(window, cx)
+                            })
+                            .on_click(cx.listener(move |this, _, _, cx| this.open_diff(&file, cx)))
+                    }),
+            )
+            .when(rest > 0, |v| v.child(caption(format!("他 {rest} 件"), cx)))
+    }
+}
+
+/// ヘッダの補足行。「2 件の実行 · 所要 3.2 秒 · 変更ファイル 1 件」のように並べる。
+fn thread_meta(thread: &ExecutionThread) -> String {
+    let mut parts = vec![format!("{} 件の実行", thread.activity_count())];
+    if let Some(duration) = thread.duration_ms() {
+        parts.push(format!("所要 {}", duration_label(duration)));
+    }
+    let changed = thread.changed_files();
+    if !changed.is_empty() {
+        parts.push(format!("変更ファイル {} 件", changed.len()));
+    }
+    parts.join(" · ")
+}
+
+/// 実行時間の表示。1 秒未満は切り捨てず明示し、長い場合は荒く丸める。
+fn duration_label(ms: u64) -> String {
+    if ms < 1_000 {
+        "1 秒未満".into()
+    } else if ms < 10_000 {
+        format!("{}.{} 秒", ms / 1_000, ms % 1_000 / 100)
+    } else if ms < 60_000 {
+        format!("{} 秒", ms / 1_000)
+    } else {
+        let minutes = ms / 60_000;
+        let seconds = ms % 60_000 / 1_000;
+        if seconds == 0 {
+            format!("{minutes} 分")
+        } else {
+            format!("{minutes} 分 {seconds} 秒")
+        }
     }
 }
 

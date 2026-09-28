@@ -1,5 +1,5 @@
 use super::*;
-use solo::projection::Diff;
+use solo::projection::{ActivityKind, Diff};
 
 impl SessionView {
     /// 差分の選択を切り替える。diff_index・diff_hunk・diff_scroll は一体で更新する
@@ -20,6 +20,61 @@ impl SessionView {
 }
 
 impl Workspace {
+    /// 差分が起きたファイルを選んで「変更」タブを開く。実行スレッドの変更ファイルから飛ぶ導線。
+    pub(in crate::ui) fn open_diff(&mut self, path: &str, cx: &mut Context<Self>) {
+        let session = self.session_mut();
+        if let Some(index) = session
+            .model
+            .diffs()
+            .iter()
+            .position(|diff| diff.path == path)
+        {
+            session.select_diff(index);
+        }
+        self.show_tab(Tab::Diff, cx);
+    }
+
+    /// 差分を起こした実行スレッドを開き、特定できていれば該当の実行を展開する。
+    /// スレッドが保存上限で捨てられた場合は何もしない。
+    pub(in crate::ui) fn open_diff_origin(
+        &mut self,
+        diff_index: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(origin) = self
+            .session()
+            .model
+            .diffs()
+            .get(diff_index)
+            .and_then(|diff| diff.origin.clone())
+        else {
+            return;
+        };
+        let Some(thread) = self
+            .session()
+            .model
+            .threads()
+            .iter()
+            .find(|thread| thread.turn_id == origin.turn_id)
+        else {
+            return;
+        };
+        // 差分を出した実行が分かるときは、その行を展開した状態でスレッドを開く。
+        let expand_key = origin.invocation_id.map(|invocation_id| {
+            let kind = thread
+                .activities
+                .iter()
+                .find(|activity| activity.id == invocation_id)
+                .map(|activity| activity.kind)
+                .unwrap_or(ActivityKind::Tool);
+            format!("{kind:?}:{invocation_id}")
+        });
+        let thread_id = thread.id;
+        self.open_thread(thread_id, window, cx);
+        self.session_mut().view.expanded_activity = expand_key;
+    }
+
     pub(super) fn diff(&self, cx: &mut Context<Self>) -> AnyElement {
         let s = self.session();
         if s.model.diffs().is_empty() {
@@ -46,6 +101,12 @@ impl Workspace {
         let s = self.session();
         let (added, removed) = diff.line_counts();
         let unreviewed = s.model.unreviewed_count();
+        // 最新スレッド由来のファイルに印を付ける。
+        let current_turn = s
+            .model
+            .threads()
+            .back()
+            .map(|thread| thread.turn_id.clone());
         div()
             .id("diff-file-rail")
             .w(px(208.))
@@ -90,6 +151,11 @@ impl Workspace {
                             .rsplit_once('/')
                             .unwrap_or(("", file.path.as_str()));
                         let (file_added, file_removed) = file.line_counts();
+                        let from_current = file
+                            .origin
+                            .as_ref()
+                            .is_some_and(|origin| Some(&origin.turn_id) == current_turn.as_ref());
+                        let marks = usize::from(file.reviewed) + usize::from(from_current);
                         let path = file.path.clone();
                         div()
                             .id(("diff-file", index))
@@ -120,6 +186,16 @@ impl Workspace {
                                     .when(file.reviewed, |v| {
                                         v.child(Icon::CircleCheck.view(p.success).size(px(12.)))
                                     })
+                                    .when(from_current, |v| {
+                                        v.child(ds::indicator(
+                                            ("diff-current-turn", index),
+                                            Icon::Activity,
+                                            "",
+                                            "最新の実行で変更されたファイル",
+                                            Tone::Accent,
+                                            cx,
+                                        ))
+                                    })
                                     .child(
                                         div()
                                             .flex_1()
@@ -148,7 +224,7 @@ impl Workspace {
                             )
                             .child(
                                 div()
-                                    .pl(px(if file.reviewed { 16. } else { 0. }))
+                                    .pl(px(marks as f32 * 16.))
                                     .text_size(px(10.))
                                     .text_color(rgb(p.secondary))
                                     .truncate()
@@ -196,6 +272,13 @@ impl Workspace {
     fn diff_detail(&self, diff: &Diff, cx: &mut Context<Self>) -> Div {
         let s = self.session();
         let running = s.display_status().is_active();
+        // スレッドが保存上限で破棄された差分は、辿る先が無いので導線を出さない。
+        let has_origin = diff.origin.as_ref().is_some_and(|origin| {
+            s.model
+                .threads()
+                .iter()
+                .any(|thread| thread.turn_id == origin.turn_id)
+        });
         let hunk_rows = diff.hunk_rows();
         let hunk_total = hunk_rows.len();
         // 表示は 1 始まり。未訪問なら 1 ハンク目に置く。
@@ -240,6 +323,36 @@ impl Workspace {
                                     })),
                             )
                     })
+                    .when(has_origin, |v| {
+                        v.child(
+                            Button::icon("diff-origin", Icon::MessageSquare, "変更元の実行を表示")
+                                .control_size(ControlSize::Small)
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    let index = this.session().view.diff_index;
+                                    this.open_diff_origin(index, window, cx)
+                                })),
+                        )
+                    })
+                    .child(
+                        Button::icon("copy-diff-patch", Icon::FileDiff, "パッチをコピー")
+                            .control_size(ControlSize::Small)
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                let session = this.session();
+                                let patch = session
+                                    .model
+                                    .diffs()
+                                    .get(session.view.diff_index)
+                                    .map(|diff| {
+                                        diff.lines
+                                            .iter()
+                                            .map(|line| line.text.as_str())
+                                            .collect::<Vec<_>>()
+                                            .join("\n")
+                                    })
+                                    .unwrap_or_default();
+                                this.copy(patch, "パッチをコピーしました", cx)
+                            })),
+                    )
                     .child(
                         Button::icon("copy-diff-path", Icon::Copy, "パスをコピー")
                             .control_size(ControlSize::Small)

@@ -1,6 +1,6 @@
 //! read/edit/write の実装と、書き込み先のパス解決。
 use super::{MAX_READ_FILE_BYTES, WorkspaceTools, invalid, resolve_file};
-use crate::storage::read_text;
+use crate::{harness::ToolResult, storage::read_text};
 use std::{
     fs,
     io::{self, Write},
@@ -18,7 +18,7 @@ impl WorkspaceTools {
         raw: &str,
         offset: Option<u64>,
         limit: Option<u64>,
-    ) -> io::Result<String> {
+    ) -> io::Result<ToolResult> {
         let path = resolve_file(&self.root, raw)?;
         if offset.is_none() && limit.is_none() {
             let size = fs::metadata(&path)?.len();
@@ -46,7 +46,8 @@ impl WorkspaceTools {
                     }
                 })?;
             self.observe(&path, text.as_bytes());
-            return Ok(text);
+            let total = text.lines().count();
+            return Ok(ToolResult::ok(text).with_summary(format!("{total} 行")));
         }
         let offset = offset.unwrap_or(1);
         let limit = limit.unwrap_or(2000);
@@ -113,7 +114,7 @@ impl WorkspaceTools {
         } else {
             output.push_str(&format!("\n[行 {offset}-{end} / 全 {total} 行]"));
         }
-        Ok(output)
+        Ok(ToolResult::ok(output).with_summary(format!("行 {offset}-{end} / 全 {total} 行")))
     }
 
     pub(super) fn edit(
@@ -122,7 +123,7 @@ impl WorkspaceTools {
         old: &str,
         new: &str,
         replace_all: Option<bool>,
-    ) -> io::Result<String> {
+    ) -> io::Result<ToolResult> {
         if old.is_empty() {
             return Err(invalid("old は空にできません".into()));
         }
@@ -158,13 +159,14 @@ impl WorkspaceTools {
         }
         temp.persist(&path).map_err(|error| error.error)?;
         self.observe(&path, updated.as_bytes());
-        Ok(format!(
-            "{} を更新しました（{count} 箇所を置換）",
-            relative(&self.root, &path)
-        ))
+        let relative = relative(&self.root, &path);
+        Ok(
+            ToolResult::ok(format!("{relative} を更新しました（{count} 箇所を置換）"))
+                .with_summary(format!("{relative} の {count} 箇所を置き換え")),
+        )
     }
 
-    pub(super) fn write(&mut self, raw: &str, content: &str) -> io::Result<String> {
+    pub(super) fn write(&mut self, raw: &str, content: &str) -> io::Result<ToolResult> {
         if content.len() > MAX_WRITE_BYTES {
             return Err(invalid("content は 1 MiB 以下にしてください".into()));
         }
@@ -212,12 +214,20 @@ impl WorkspaceTools {
         }
         self.observe(&path, content.as_bytes());
         let lines = content.lines().count();
+        let bytes = content.len();
         let relative = relative(&self.root, &path);
-        if existing {
-            Ok(format!("{relative} を上書きしました（{lines} 行）"))
+        let (result, summary) = if existing {
+            (
+                format!("{relative} を上書きしました（{lines} 行）"),
+                format!("{relative} を上書き（{bytes} バイト）"),
+            )
         } else {
-            Ok(format!("{relative} を作成しました（{lines} 行）"))
-        }
+            (
+                format!("{relative} を作成しました（{lines} 行）"),
+                format!("{relative} を作成（{bytes} バイト）"),
+            )
+        };
+        Ok(ToolResult::ok(result).with_summary(summary))
     }
 }
 

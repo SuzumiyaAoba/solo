@@ -1,4 +1,5 @@
 //! Unified diff の行番号・追加削除数と表示上限。
+use crate::event::TurnId;
 use crate::text::preview;
 
 pub const MAX_DIFF_LINES: usize = 20_000;
@@ -21,6 +22,13 @@ pub enum DiffKind {
     Added,
     Removed,
 }
+/// 差分を起こした実行。UI が「変更元の実行を表示」の遷移先と最新実行の印に使う。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DiffOrigin {
+    pub turn_id: TurnId,
+    pub invocation_id: Option<String>,
+}
+
 #[derive(Debug)]
 pub struct Diff {
     pub path: String,
@@ -29,6 +37,8 @@ pub struct Diff {
     pub rows: Vec<usize>,
     pub truncated: bool,
     pub reviewed: bool,
+    /// 最後にこのファイルの差分を報告した実行。古いイベントや turn_id 不明では None。
+    pub origin: Option<DiffOrigin>,
 }
 
 impl Diff {
@@ -127,6 +137,7 @@ impl Diff {
             rows,
             truncated,
             reviewed: false,
+            origin: None,
         }
     }
 

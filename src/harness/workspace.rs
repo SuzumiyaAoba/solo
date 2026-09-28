@@ -112,41 +112,31 @@ impl WorkspaceTools {
 
     fn execute_call(&mut self, call: &ToolCall) -> io::Result<ToolResult> {
         match call.name.as_str() {
-            TOOL_READ => self
-                .read(
-                    required_string(call, "path")?,
-                    optional_u64(call, "offset")?,
-                    optional_u64(call, "limit")?,
-                )
-                .map(ToolResult::ok),
-            TOOL_LIST => self
-                .list(
-                    optional_string(call, "path")?,
-                    optional_string(call, "pattern")?,
-                )
-                .map(ToolResult::ok),
-            TOOL_SEARCH => self
-                .search(
-                    required_string(call, "query")?,
-                    optional_string(call, "path")?,
-                    optional_string(call, "glob")?,
-                    optional_bool(call, "regex")?,
-                )
-                .map(ToolResult::ok),
-            TOOL_EDIT => self
-                .edit(
-                    required_string(call, "path")?,
-                    required_string(call, "old")?,
-                    required_string(call, "new")?,
-                    optional_bool(call, "replace_all")?,
-                )
-                .map(ToolResult::ok),
-            TOOL_WRITE => self
-                .write(
-                    required_string(call, "path")?,
-                    required_string(call, "content")?,
-                )
-                .map(ToolResult::ok),
+            TOOL_READ => self.read(
+                required_string(call, "path")?,
+                optional_u64(call, "offset")?,
+                optional_u64(call, "limit")?,
+            ),
+            TOOL_LIST => self.list(
+                optional_string(call, "path")?,
+                optional_string(call, "pattern")?,
+            ),
+            TOOL_SEARCH => self.search(
+                required_string(call, "query")?,
+                optional_string(call, "path")?,
+                optional_string(call, "glob")?,
+                optional_bool(call, "regex")?,
+            ),
+            TOOL_EDIT => self.edit(
+                required_string(call, "path")?,
+                required_string(call, "old")?,
+                required_string(call, "new")?,
+                optional_bool(call, "replace_all")?,
+            ),
+            TOOL_WRITE => self.write(
+                required_string(call, "path")?,
+                required_string(call, "content")?,
+            ),
             TOOL_EXEC => self.exec(
                 required_string(call, "command")?,
                 optional_u64(call, "timeout_seconds")?,

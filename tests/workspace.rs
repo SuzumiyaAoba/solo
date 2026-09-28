@@ -543,3 +543,75 @@ fn binary_output_stays_within_the_share_even_with_replacement_growth() {
         output.len()
     );
 }
+
+/// 各ワークスペースツールは実行スレッドに表示する 1 行の要約を返す。
+#[test]
+fn tools_return_one_line_summaries() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(dir.path().join("src")).unwrap();
+    std::fs::write(dir.path().join("note.txt"), "one\ntwo\nthree\n").unwrap();
+    std::fs::write(dir.path().join("src/lib.rs"), "needle\n").unwrap();
+    let mut tools = WorkspaceTools::new(dir.path()).unwrap();
+
+    let result = call_tool(&mut tools, "read", json!({"path":"note.txt"}));
+    assert_eq!(result.summary.as_deref(), Some("3 行"));
+    let result = call_tool(
+        &mut tools,
+        "read",
+        json!({"path":"note.txt","offset":2,"limit":1}),
+    );
+    assert_eq!(result.summary.as_deref(), Some("行 2-2 / 全 3 行"));
+
+    // ルートには note.txt と src/ の 2 件。
+    let result = call_tool(&mut tools, "list", json!({}));
+    assert_eq!(result.summary.as_deref(), Some("2 件"));
+
+    let result = call_tool(&mut tools, "search", json!({"query":"needle"}));
+    assert_eq!(result.summary.as_deref(), Some("1 件の一致"));
+
+    let result = call_tool(
+        &mut tools,
+        "edit",
+        json!({"path":"note.txt","old":"two","new":"二"}),
+    );
+    assert_eq!(
+        result.summary.as_deref(),
+        Some("note.txt の 1 箇所を置き換え")
+    );
+
+    let result = call_tool(
+        &mut tools,
+        "write",
+        json!({"path":"made.txt","content":"hello"}),
+    );
+    assert_eq!(
+        result.summary.as_deref(),
+        Some("made.txt を作成（5 バイト）")
+    );
+    call_tool(&mut tools, "read", json!({"path":"made.txt"}));
+    let result = call_tool(
+        &mut tools,
+        "write",
+        json!({"path":"made.txt","content":"hi!"}),
+    );
+    assert_eq!(
+        result.summary.as_deref(),
+        Some("made.txt を上書き（3 バイト）")
+    );
+
+    let result = exec(&mut tools, "printf ok");
+    assert_eq!(
+        result.summary.as_deref(),
+        Some("終了コード 0 · stdout 2 バイト / stderr 0 バイト")
+    );
+    // 非ゼロ終了でも終了コードを含む要約が付く。
+    let result = exec(&mut tools, "exit 3");
+    assert!(result.is_error);
+    assert!(
+        result
+            .summary
+            .as_deref()
+            .unwrap()
+            .starts_with("終了コード 3")
+    );
+}
