@@ -412,6 +412,20 @@ impl Session {
         }
     }
 
+    /// 永続化ストアから復元した未完了の実行を「結果未確認」として閉じる。
+    pub fn mark_recovered(&mut self, reason: impl Into<String>) {
+        if self.status.is_active() || self.turn_open {
+            self.incomplete = true;
+            self.finish(Status::Disconnected, reason.into());
+        }
+    }
+
+    /// 実行結果と独立した不整合(保存打ち切り・途中行の破損など)を記録する。
+    pub fn flag_incomplete(&mut self, reason: impl Into<String>) {
+        self.incomplete = true;
+        self.notice(reason.into());
+    }
+
     pub fn transport_failed(&mut self, reason: String) {
         let status = if self.status == Status::Cancelling {
             Status::Cancelled

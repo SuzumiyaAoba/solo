@@ -6,10 +6,10 @@ use solo::{
     projection::{Apply, Diff, MAX_TOOL_ACTIVITIES, Session, Status},
 };
 
-fn run(id: &str, backend: usize) -> QueuedRun {
+fn run(id: &str, backend_index: usize) -> QueuedRun {
     QueuedRun {
         session_id: id.into(),
-        backend,
+        backend_index,
         prompt: format!("{id} の依頼🙂"),
     }
 }

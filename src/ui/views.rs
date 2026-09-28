@@ -81,6 +81,16 @@ impl Workspace {
                     )
                     .child(self.approval_mode_button(cx))
                     .child(
+                        Button::icon(
+                            "export-session",
+                            Icon::ExternalLink,
+                            "会話とイベントを書き出す",
+                        )
+                        .control_size(ControlSize::Small)
+                        .disabled(view.model.accepted == 0)
+                        .on_click(cx.listener(|this, _, _, cx| this.export_session(cx))),
+                    )
+                    .child(
                         Button::icon("command-rules", Icon::Sliders, "コマンド実行ルール")
                             .control_size(ControlSize::Small)
                             .on_click(cx.listener(|this, _, window, cx| {
@@ -192,6 +202,7 @@ impl Workspace {
                             .control_size(ControlSize::Small)
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.queue.paused = false;
+                                this.save_workspace_state(cx);
                                 this.dispatch_queue(cx);
                                 cx.notify();
                             })),
@@ -436,12 +447,17 @@ pub(super) fn status_tone(status: Status) -> Tone {
         _ => Tone::Neutral,
     }
 }
+/// サイドバーの各チャンネル右端に表示する状態アイコン。実行の段階ごとに形を変える。
 pub(super) fn status_icon(status: Status) -> Icon {
     match status {
-        Status::Failed | Status::Disconnected => Icon::Warning,
-        Status::Connecting | Status::Running | Status::Cancelling => Icon::Spinner,
-        Status::Completed => Icon::Check,
-        _ => Icon::Layers,
+        Status::Idle => Icon::Layers,
+        Status::Connecting => Icon::Unplug,
+        Status::Running => Icon::Spinner,
+        Status::Cancelling => Icon::Pause,
+        Status::Completed => Icon::CircleCheck,
+        Status::Cancelled => Icon::Square,
+        Status::Failed => Icon::Warning,
+        Status::Disconnected => Icon::Unplug,
     }
 }
 fn number(value: Option<u64>) -> String {

@@ -126,6 +126,24 @@ pub(super) fn start(window: &Window, cx: &mut Context<Workspace>) {
         approval_modes_smoke::check(&this, cx).await;
         workflow_smoke::run(&this, cx).await;
         threads_smoke::run(&this, cx).await;
+        // 永続化: 同じストアから読み直し、会話・状態・下書き・全文ログが復元されることを確認する。
+        this.update_in(cx, |this, _, cx| {
+            let store = this.store.clone().expect("smoke store must exist");
+            let model = &this.sessions[0].model;
+            let restored = store.load(&model.id).expect("session restore must succeed");
+            assert_eq!(restored.session.id, model.id);
+            assert_eq!(restored.session.accepted, model.accepted);
+            assert_eq!(restored.session.status, model.status);
+            assert_eq!(restored.session.chat.len(), model.chat.len());
+            assert_eq!(restored.session.diffs.len(), model.diffs.len());
+            assert!(!restored.log_paths.is_empty(), "全文ログがストアに残ること");
+            assert_eq!(
+                restored.meta.as_ref().map(|meta| meta.draft.as_str()),
+                Some("保持する下書き🙂"),
+            );
+            println!("Solo smoke: restore events={} logs={} draft_ok", restored.session.accepted, restored.log_paths.len());
+            cx.notify();
+        }).unwrap();
         this.update_in(cx, |this, _, cx| {
             assert_eq!(ds::scheme(cx), ColorScheme::Light);
             assert!(this.rendered > 30);

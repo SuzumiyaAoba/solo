@@ -3,13 +3,13 @@ use solo::{
     projection::{MAX_LOG_ROWS, Session, Status},
 };
 use std::{
+    path::PathBuf,
     sync::Arc,
     thread,
     time::{Duration, Instant},
 };
-use tempfile::TempPath;
 
-fn drain(receiver: async_channel::Receiver<Delivery>, session: &mut Session) -> Vec<Arc<TempPath>> {
+fn drain(receiver: async_channel::Receiver<Delivery>, session: &mut Session) -> Vec<Arc<PathBuf>> {
     let mut paths = Vec::new();
     while let Ok(delivery) = receiver.recv_blocking() {
         match delivery {
@@ -138,7 +138,11 @@ fn concurrent_streams_do_not_mix_sessions() {
 
 #[test]
 fn hundred_mib_giant_line_is_spooled_with_bounded_preview() {
-    let (controller, receiver) = mock::start(config(Scenario::Log100MiB)).unwrap();
+    // 保存領域を渡すと、全文ログはそのディレクトリに残り、アプリ終了後も参照できる。
+    let dir = tempfile::tempdir().unwrap();
+    let mut config = config(Scenario::Log100MiB);
+    config.log_dir = Some(dir.path().join("logs"));
+    let (controller, receiver) = mock::start(config).unwrap();
     let mut session = Session::new("s1".into(), "".into());
     let paths = drain(receiver, &mut session);
     controller.shutdown_and_join().unwrap();
@@ -148,12 +152,13 @@ fn hundred_mib_giant_line_is_spooled_with_bounded_preview() {
         std::fs::metadata(&*paths[0]).unwrap().len(),
         100 * 1024 * 1024
     );
+    assert!(paths[0].starts_with(dir.path().join("logs")));
     assert_eq!(session.logs.len(), MAX_LOG_ROWS);
     assert!(session.logs.iter().map(|row| row.text.len()).sum::<usize>() < 520_000);
     let path = paths[0].to_path_buf();
     drop(paths);
     assert!(
-        !path.exists(),
-        "temporary logs are removed with their last owner"
+        path.exists(),
+        "logs under the session store survive the last reference"
     );
 }

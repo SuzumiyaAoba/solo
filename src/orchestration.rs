@@ -4,7 +4,9 @@ use std::collections::VecDeque;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct QueuedRun {
     pub session_id: String,
-    pub backend: usize,
+    /// 実行先選択の index(SessionView::selected_backend と同じ座標系)。
+    pub backend_index: usize,
+    /// UI から届いた prompt。末尾改行を残すとキュー一覧のタイトルが崩れるので strip する。
     pub prompt: String,
 }
 
@@ -51,6 +53,17 @@ impl RunQueue {
             return None;
         }
         self.pending.pop_front()
+    }
+
+    /// 保存用に先頭からの参照列を返す。消費しない。
+    pub fn entries(&self) -> impl Iterator<Item = &QueuedRun> {
+        self.pending.iter()
+    }
+
+    /// 復元した待ち行列で置き換える。paused は呼出側の判断で与える。
+    pub fn restore(&mut self, entries: impl IntoIterator<Item = QueuedRun>, paused: bool) {
+        self.pending = entries.into_iter().collect();
+        self.paused = paused;
     }
 }
 

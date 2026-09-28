@@ -3,7 +3,9 @@
 use crate::event::{Envelope, Event, Sequencer, Usage, preview};
 use async_channel::{Receiver, Sender, TrySendError};
 use std::{
+    fs,
     io::{self, BufWriter, Write},
+    path::PathBuf,
     sync::{
         Arc,
         atomic::{AtomicU8, Ordering},
@@ -11,7 +13,6 @@ use std::{
     thread::{self, JoinHandle},
     time::Duration,
 };
-use tempfile::TempPath;
 use unicode_segmentation::UnicodeSegmentation;
 
 pub const CHANNEL_CAPACITY: usize = 256;
@@ -58,6 +59,9 @@ pub struct Config {
     pub prompt: String,
     pub scenario: Scenario,
     pub start_sequence: u64,
+    /// Some なら全文ログをこのディレクトリに残す(再起動後も参照可能)。
+    /// None はシステムの一時領域で、セッション保存が無い環境向け。
+    pub log_dir: Option<PathBuf>,
     pub delay: Duration,
 }
 
@@ -70,6 +74,7 @@ impl Config {
             prompt: "調査結果をもとに、イベント表示の試作を確認してください。".into(),
             scenario,
             start_sequence: 0,
+            log_dir: None,
             delay: if matches!(scenario, Scenario::Demo | Scenario::Faults) {
                 Duration::from_millis(18)
             } else {
@@ -82,8 +87,9 @@ impl Config {
 #[derive(Debug)]
 pub enum Delivery {
     Event(Envelope),
-    /// 全文への参照。最後の所有者が消えたときだけ一時ファイルを削除する。
-    LogOpened(Arc<TempPath>),
+    /// 全文ログへのパス。log_dir 指定時はセッションの保存領域に残り、
+    /// 未指定(一時領域)では明示的な削除はしない。
+    LogOpened(Arc<PathBuf>),
     Error(String),
 }
 
@@ -235,11 +241,24 @@ impl Producer {
             return Ok(());
         }
 
-        let file = tempfile::Builder::new()
-            .prefix("solo-phase0-")
-            .suffix(".log")
-            .tempfile()?;
-        let (file, path) = file.into_parts();
+        let (file, path) = if let Some(dir) = &self.config.log_dir {
+            fs::create_dir_all(dir)?;
+            let path = dir.join(format!(
+                "log-{}-{}.log",
+                self.config.start_sequence,
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|at| at.as_millis())
+                    .unwrap_or_default()
+            ));
+            (fs::File::create(&path)?, path)
+        } else {
+            let file = tempfile::Builder::new()
+                .prefix("solo-phase0-")
+                .suffix(".log")
+                .tempfile()?;
+            file.keep().map_err(|error| error.error)?
+        };
         let mut writer = BufWriter::new(file);
         if !self.send(Delivery::LogOpened(Arc::new(path)), true) {
             self.interrupted();

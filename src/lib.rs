@@ -13,6 +13,7 @@ pub mod mock;
 pub mod orchestration;
 pub mod projection;
 pub mod projects;
+pub mod session_store;
 mod storage;
 pub mod subscription_worker;
 pub mod text;

@@ -7,12 +7,22 @@ use solo::{acp_worker, mock, subscription_worker};
 pub(super) enum Backend {
     Subscription,
     Acp(String),
-    Mock,
+    Mock(Scenario),
 }
 
 impl Backend {
     pub(super) fn uses_workspace(&self) -> bool {
-        !matches!(self, Self::Mock)
+        !matches!(self, Self::Mock(_))
+    }
+
+    /// 保存済み BackendKind から実行中 backend を復元する(表示上の選択には使わない)。
+    /// Mock 番号が範囲外になった場合のみ None。
+    pub(super) fn from_kind(kind: &BackendKind) -> Option<Self> {
+        match kind {
+            BackendKind::Subscription => Some(Self::Subscription),
+            BackendKind::Acp { id } => Some(Self::Acp(id.clone())),
+            BackendKind::Mock { scenario } => SCENARIOS.get(*scenario).copied().map(Self::Mock),
+        }
     }
 }
 
@@ -56,6 +66,13 @@ impl SessionView {
         });
     }
 
+    /// 実行 backend・永続化 kind・選択 index を一括で確定する(片方だけ更新する漏れを防ぐ)。
+    fn assign_backend(&mut self, backend: Backend, kind: BackendKind, selected: usize) {
+        self.backend = Some(backend);
+        self.meta.backend = Some(kind);
+        self.selected_backend = selected;
+    }
+
     fn attach_stream<D: Send + 'static>(
         &mut self,
         controller: UiController,
@@ -87,13 +104,10 @@ impl Workspace {
             return;
         }
         let selected = self.sessions[index].selected_backend;
-        let requested = if selected == 0 {
-            Backend::Subscription
-        } else if let Some(agent) = self.acp_agents.get(selected - 1) {
-            Backend::Acp(agent.id.clone())
-        } else {
-            Backend::Mock
-        };
+        let requested = self
+            .backend_kind_at(selected)
+            .and_then(|kind| Backend::from_kind(&kind))
+            .unwrap_or(Backend::Subscription);
         if self.sessions[index].model.last_sequence > 0
             && self.sessions[index].backend.as_ref() != Some(&requested)
         {
@@ -159,6 +173,15 @@ impl Workspace {
         config.prompt = prompt.clone();
         config.start_sequence = session.model.last_sequence;
         config.workspace = self.workspace_path.clone();
+        // 全文ログはセッションの保存領域へ書き、再起動後も参照できるようにする。
+        if let Some(store) = self.store.clone() {
+            if let Err(error) = session.open_or_create(&store)
+                && self.message.is_empty()
+            {
+                self.message = format!("セッションを保存できません: {error}");
+            }
+            config.log_dir = session.file.as_ref().map(|file| file.log_dir());
+        }
         let (controller, receiver) = match mock::start(config) {
             Ok(stream) => stream,
             Err(error) => {
@@ -172,13 +195,17 @@ impl Workspace {
             }
         };
         session.begin_run(cx);
-        session.backend = Some(Backend::Mock);
-        session.selected_backend = 1
-            + self.acp_agents.len()
-            + SCENARIOS
-                .iter()
-                .position(|item| *item == scenario)
-                .unwrap_or(0);
+        let scenario_index = SCENARIOS
+            .iter()
+            .position(|item| *item == scenario)
+            .unwrap_or(0);
+        session.assign_backend(
+            Backend::Mock(scenario),
+            BackendKind::Mock {
+                scenario: scenario_index,
+            },
+            1 + self.acp_agents.len() + scenario_index,
+        );
         if index == self.selected {
             self.scenario_picker.update(cx, |picker, cx| {
                 picker.selected = session.selected_backend;
@@ -192,6 +219,7 @@ impl Workspace {
             cx,
         );
         self.message.clear();
+        self.save_session_meta(index, cx);
         self.sync_controls(cx);
         cx.notify();
     }
@@ -226,8 +254,7 @@ impl Workspace {
         session.login = None;
         session.login_only = false;
         session.approval = None;
-        session.backend = Some(Backend::Subscription);
-        session.selected_backend = 0;
+        session.assign_backend(Backend::Subscription, BackendKind::Subscription, 0);
         if index == self.selected {
             self.scenario_picker.update(cx, |picker, cx| {
                 picker.selected = 0;
@@ -241,6 +268,7 @@ impl Workspace {
             cx,
         );
         self.message.clear();
+        self.save_session_meta(index, cx);
         self.sync_controls(cx);
         cx.notify();
     }
@@ -333,13 +361,19 @@ impl Workspace {
         }
         session.begin_run(cx);
         session.model.provider = format!("ACP / {}", agent.name);
-        session.backend = Some(Backend::Acp(agent.id.clone()));
-        session.selected_backend = 1 + self
-            .acp_agents
-            .iter()
-            .position(|profile| profile.id == agent.id)
-            .unwrap_or(0);
+        session.assign_backend(
+            Backend::Acp(agent.id.clone()),
+            BackendKind::Acp {
+                id: agent.id.clone(),
+            },
+            1 + self
+                .acp_agents
+                .iter()
+                .position(|profile| profile.id == agent.id)
+                .unwrap_or(0),
+        );
         self.message.clear();
+        self.save_session_meta(index, cx);
         self.sync_controls(cx);
         cx.notify();
     }

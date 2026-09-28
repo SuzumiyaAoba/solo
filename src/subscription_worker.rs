@@ -215,6 +215,7 @@ fn run(
     let mut model_requests = 0;
     let mut log_offset = 0;
     let mut edit_snapshots: HashMap<String, (String, String)> = HashMap::new();
+    let mut exec_snapshots: HashMap<String, WorkspaceSnapshot> = HashMap::new();
     let run = harness::run(
         &mut model,
         &mut tools,
@@ -243,6 +244,8 @@ fn run(
                     && let Some(before) = read_workspace_file(&workspace, relative)
                 {
                     edit_snapshots.insert(call.id.clone(), (relative.into(), before));
+                } else if call.name == "exec" {
+                    exec_snapshots.insert(call.id.clone(), workspace_snapshot(&workspace));
                 }
                 emitter.emit(Event::ToolStarted {
                     agent_id: None,
@@ -252,6 +255,18 @@ fn run(
                 });
             }
             Update::ToolFinished { call_id, result } => {
+                if !result.is_error
+                    && let Some(before) = exec_snapshots.remove(&call_id)
+                {
+                    for (relative, old, new) in snapshot_changes(&workspace, &before, 8) {
+                        if let Some(diff) = unified_diff(&relative, &old, &new) {
+                            emitter.emit(Event::DiffUpdated {
+                                path: relative,
+                                unified_diff: diff,
+                            });
+                        }
+                    }
+                }
                 if let Some((relative, before)) = edit_snapshots.remove(&call_id)
                     && !result.is_error
                     && let Some(after) = read_workspace_file(&workspace, &relative)
@@ -294,6 +309,115 @@ fn run(
         }),
     }
     Ok(())
+}
+
+/// `exec` 前後の workspace 差分検出用スナップショット。
+/// 深いディレクトリと大きいファイルは除外し、UI 差分に乗せるファイルだけを保持する。
+struct WorkspaceSnapshot {
+    files: HashMap<String, FileState>,
+}
+
+struct FileState {
+    content: Option<String>,
+    len: u64,
+    modified: Option<std::time::SystemTime>,
+}
+
+/// 追跡から外すディレクトリ。ベンダーやビルド成果物は diff 対象外にする。
+fn skip_dir(name: &str) -> bool {
+    matches!(
+        name,
+        ".git" | "target" | "node_modules" | ".next" | "dist" | "build" | ".venv" | "__pycache__"
+    )
+}
+
+fn workspace_snapshot(root: &PathBuf) -> WorkspaceSnapshot {
+    let mut files = HashMap::new();
+    let mut stack = vec![root.clone()];
+    let mut visited = 0usize;
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            if visited >= 20_000 {
+                return WorkspaceSnapshot { files };
+            }
+            visited += 1;
+            let path = entry.path();
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            let Ok(meta) = entry.metadata() else { continue };
+            if meta.is_dir() {
+                if !skip_dir(&name) {
+                    stack.push(path);
+                }
+                continue;
+            }
+            if !meta.is_file() {
+                continue;
+            }
+            let Ok(relative) = path.strip_prefix(root) else {
+                continue;
+            };
+            let relative = relative.to_string_lossy().replace('\\', "/");
+            let content = (meta.len() <= 256 * 1024)
+                .then(|| read_workspace_file(root, &relative))
+                .flatten();
+            files.insert(
+                relative,
+                FileState {
+                    content,
+                    len: meta.len(),
+                    modified: meta.modified().ok(),
+                },
+            );
+        }
+    }
+    WorkspaceSnapshot { files }
+}
+
+/// スナップショットとの差分(新規・変更・削除)を最大 `limit` 件返す。
+fn snapshot_changes(
+    root: &PathBuf,
+    before: &WorkspaceSnapshot,
+    limit: usize,
+) -> Vec<(String, String, String)> {
+    let after = workspace_snapshot(root);
+    let mut changes = Vec::new();
+    for (path, state) in &after.files {
+        let Some(prev) = before.files.get(path) else {
+            if let Some(content) = &state.content {
+                changes.push((path.clone(), String::new(), content.clone()));
+            }
+            continue;
+        };
+        let unchanged_meta = prev.len == state.len && prev.modified == state.modified;
+        let unchanged_content = prev.content == state.content;
+        if unchanged_meta || unchanged_content {
+            continue;
+        }
+        // 内容を取得できないファイル(サイズ上限など)は差分に出せない。
+        let (Some(old), Some(new)) = (prev.content.clone(), state.content.clone()) else {
+            continue;
+        };
+        changes.push((path.clone(), old, new));
+        if changes.len() >= limit {
+            return changes;
+        }
+    }
+    for (path, prev) in &before.files {
+        if after.files.contains_key(path) {
+            continue;
+        }
+        if let Some(old) = prev.content.clone() {
+            changes.push((path.clone(), old, String::new()));
+            if changes.len() >= limit {
+                return changes;
+            }
+        }
+    }
+    changes
 }
 
 fn read_workspace_file(workspace: &std::path::Path, relative: &str) -> Option<String> {
@@ -446,5 +570,33 @@ mod tests {
         let diff = unified_diff("src/a.rs", "one\ntwo\n", "one\nthree\n").unwrap();
         assert!(diff.starts_with("--- a/src/a.rs\n+++ b/src/a.rs\n@@ -1,2 +1,2 @@"));
         assert!(diff.contains("-two\n+three\n"));
+    }
+
+    #[test]
+    fn exec_snapshot_captures_create_modify_and_delete() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        fs::write(root.join("keep.txt"), "same").unwrap();
+        fs::write(root.join("modify.txt"), "before").unwrap();
+        fs::write(root.join("delete.txt"), "gone").unwrap();
+        fs::create_dir(root.join(".git")).unwrap();
+        fs::write(root.join(".git").join("internal"), "x").unwrap();
+
+        let before = workspace_snapshot(&root);
+        fs::write(root.join("modify.txt"), "after").unwrap();
+        fs::write(root.join("new.txt"), "added").unwrap();
+        fs::remove_file(root.join("delete.txt")).unwrap();
+        fs::write(root.join(".git").join("internal"), "y").unwrap();
+
+        let mut paths: Vec<_> = snapshot_changes(&root, &before, 8).into_iter().collect();
+        paths.sort();
+        let names: Vec<_> = paths.iter().map(|(p, _, _)| p.as_str()).collect();
+        assert_eq!(names, ["delete.txt", "modify.txt", "new.txt"]);
+        let modify = paths.iter().find(|(p, _, _)| p == "modify.txt").unwrap();
+        assert_eq!((modify.1.as_str(), modify.2.as_str()), ("before", "after"));
+        let new_file = paths.iter().find(|(p, _, _)| p == "new.txt").unwrap();
+        assert_eq!((new_file.1.as_str(), new_file.2.as_str()), ("", "added"));
+        let deleted = paths.iter().find(|(p, _, _)| p == "delete.txt").unwrap();
+        assert_eq!((deleted.1.as_str(), deleted.2.as_str()), ("gone", ""));
     }
 }

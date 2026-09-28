@@ -74,9 +74,10 @@ impl Workspace {
         reply: async_channel::Sender<bool>,
         cx: &mut Context<Self>,
     ) {
-        let Some(index) = self.sessions.iter().position(|session| {
-            session.model.id == session_id && session.stream_generation == generation
-        }) else {
+        let Some(index) = self
+            .session_index(session_id)
+            .filter(|&index| self.sessions[index].stream_generation == generation)
+        else {
             let _ = reply.try_send(false);
             return;
         };
@@ -205,10 +206,9 @@ impl Workspace {
         result: Result<Assessment, String>,
         cx: &mut Context<Self>,
     ) {
-        let Some(index) = self.sessions.iter().position(|session| {
-            session.model.id == session_id
-                && session.stream_generation == generation
-                && session
+        let Some(index) = self.session_index(session_id).filter(|&index| {
+            self.sessions[index].stream_generation == generation
+                && self.sessions[index]
                     .approval
                     .as_ref()
                     .is_some_and(|approval| approval.serial == serial)

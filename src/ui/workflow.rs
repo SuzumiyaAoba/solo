@@ -38,10 +38,16 @@ impl Workspace {
     }
 
     pub(super) fn enqueue(&mut self, index: usize, prompt: String, cx: &mut Context<Self>) {
+        // キューに載せる前にストアを確定させ、復元時に同じ ID で紐づくようにする。
+        if let Some(store) = self.store.clone()
+            && let Err(error) = self.sessions[index].open_or_create(&store)
+        {
+            self.report(format!("セッションを保存できません: {error}"));
+        }
         let session = &mut self.sessions[index];
         if self.queue.push(QueuedRun {
             session_id: session.model.id.clone(),
-            backend: session.selected_backend,
+            backend_index: session.selected_backend,
             prompt: prompt.clone(),
         }) {
             session.composer.update(cx, |input, cx| {
@@ -51,6 +57,7 @@ impl Workspace {
             });
             session.tab = Tab::Overview;
             self.message.clear();
+            self.save_workspace_state(cx);
             self.sync_controls(cx);
             self.dispatch_queue(cx);
             cx.notify();
@@ -65,6 +72,7 @@ impl Workspace {
                 input.can_submit = true;
                 input.set_value(run.prompt, cx);
             });
+            self.save_workspace_state(cx);
             self.sync_controls(cx);
             cx.notify();
         }
@@ -72,11 +80,7 @@ impl Workspace {
 
     pub(super) fn dispatch_queue(&mut self, cx: &mut Context<Self>) {
         while let Some(run) = self.queue.next(self.workspace_busy()) {
-            let Some(index) = self
-                .sessions
-                .iter()
-                .position(|s| s.model.id == run.session_id)
-            else {
+            let Some(index) = self.session_index(&run.session_id) else {
                 continue;
             };
             self.sessions[index].composer.update(cx, |input, cx| {
@@ -84,10 +88,12 @@ impl Workspace {
                 input.can_submit = true;
                 input.set_value("", cx);
             });
-            self.run_backend(index, run.backend, run.prompt, cx);
+            self.run_backend(index, run.backend_index, run.prompt, cx);
             if !self.sessions[index].model.status.is_active() {
                 self.queue.paused = true;
             }
+            // 取り出した実行と一時停止を保存する(連続 dispatch でも最終状態を残す)。
+            self.save_workspace_state(cx);
             self.sync_controls(cx);
             break;
         }
@@ -119,6 +125,14 @@ impl Workspace {
             if session.model.unreviewed_count() == 0 {
                 session.unread_result = false;
             }
+            session.meta.reviewed = session
+                .model
+                .diffs
+                .iter()
+                .filter(|diff| diff.reviewed)
+                .map(|diff| diff.path.clone())
+                .collect();
+            self.save_session_meta(self.selected, cx);
             cx.notify();
         }
     }
@@ -173,7 +187,7 @@ impl Workspace {
                         .items_center()
                         .gap_2()
                         .child(Icon::Trash.view(p.danger))
-                        .child("会話・下書き・一時ログを削除"),
+                        .child("会話・下書き・保存済みの履歴と全文ログを削除"),
                 )
                 .child(
                     div()
@@ -192,7 +206,7 @@ impl Workspace {
                 )
                 .on_ok(move |_, window, cx| {
                     let _ = weak.update(cx, |this, cx| {
-                        if let Some(index) = this.sessions.iter().position(|s| s.model.id == id) {
+                        if let Some(index) = this.session_index(&id) {
                             this.selected = index;
                             this.close_session(window, cx);
                         }

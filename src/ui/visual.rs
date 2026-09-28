@@ -56,11 +56,51 @@ pub(super) fn run(dir: &Path) {
             .unwrap();
         capture(&mut cx, window, dir, &format!("composer-{name}-mock"));
 
+        // 差分レビュー: Demo を走らせて変更タブを開く。
+        let window = idle_window(&mut cx);
+        window
+            .update(&mut cx, |workspace, window, cx| {
+                workspace.start_mock(
+                    workspace.selected,
+                    Scenario::Demo,
+                    "差分レビューの表示確認".into(),
+                    cx,
+                );
+                window.refresh();
+            })
+            .unwrap();
+        // listen のバッチ化は background_executor のタイマーに依存する。
+        // 疑似時計を進めて配送を完了させる。
+        for _ in 0..500 {
+            cx.advance_clock(std::time::Duration::from_millis(500));
+            cx.run_until_parked();
+            // worker 側の delay は実時間で進むため、配送を待つ実時間の猶予を入れる。
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            let done = window
+                .update(&mut cx, |workspace, _, _| {
+                    !workspace.sessions[workspace.selected]
+                        .model
+                        .diffs
+                        .is_empty()
+                })
+                .unwrap();
+            if done {
+                break;
+            }
+        }
+        window
+            .update(&mut cx, |workspace, window, cx| {
+                workspace.show_tab(Tab::Diff, cx);
+                window.refresh();
+            })
+            .unwrap();
+        capture(&mut cx, window, dir, &format!("diff-{name}"));
+
         let manager_slot = std::rc::Rc::new(std::cell::RefCell::new(None));
         let slot = manager_slot.clone();
         let window = cx
             .open_window(size(px(1240.), px(840.)), move |window, cx| {
-                let view = cx.new(|cx| projects::ProjectManager::new(true, window, cx));
+                let view = cx.new(|cx| projects::ProjectManager::fixture(window, cx));
                 *slot.borrow_mut() = Some(view.clone());
                 cx.new(|cx| gpui_kit::component::Root::new(view, window, cx))
             })
@@ -102,7 +142,7 @@ fn idle_window(cx: &mut HeadlessAppContext) -> WindowHandle<Workspace> {
     std::mem::forget(dir); // プロセス終了まで保持
     cx.open_window(size(px(1240.), px(840.)), move |window, cx| {
         let toast = cx.new(ToastHost::new);
-        cx.new(|cx| Workspace::new(path.clone(), "visual".into(), true, toast, window, cx))
+        cx.new(|cx| Workspace::new(path.clone(), "visual".into(), true, None, toast, window, cx))
     })
     .expect("open headless window")
 }

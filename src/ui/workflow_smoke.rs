@@ -69,7 +69,10 @@ pub(super) async fn run(this: &WeakEntity<Workspace>, cx: &mut AsyncWindowContex
             this.select_session(&this.sessions[blocker].model.id.clone(), window, cx);
             this.dispatch_queue(cx);
             assert!(this.sessions[queued].model.status.is_active());
-            assert_eq!(this.sessions[queued].backend, Some(Backend::Mock));
+            assert!(matches!(
+                this.sessions[queued].backend,
+                Some(Backend::Mock(_))
+            ));
             assert_eq!(
                 this.scenario_picker.read(cx).selected,
                 0,

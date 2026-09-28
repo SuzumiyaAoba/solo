@@ -9,6 +9,8 @@ pub struct DiffLine {
     pub old: Option<u32>,
     pub new: Option<u32>,
     pub text: String,
+    /// 符号(+/-/空白)を除いた本文中の変化範囲。隣接する削除・追加行の語レベル差分。
+    pub changed: Option<std::ops::Range<usize>>,
     pub kind: DiffKind,
 }
 
@@ -19,11 +21,12 @@ pub enum DiffKind {
     Added,
     Removed,
 }
-
 #[derive(Debug)]
 pub struct Diff {
     pub path: String,
     pub lines: Vec<DiffLine>,
+    /// 描画対象の行だけを `lines` のインデックスで保持する(---/+++ 等のノイズを除外)。
+    pub rows: Vec<usize>,
     pub truncated: bool,
     pub reviewed: bool,
 }
@@ -70,15 +73,63 @@ impl Diff {
                 old: old_number,
                 new: new_number,
                 text: preview(line, MAX_LINE_BYTES),
+                changed: None,
                 kind,
             });
+        }
+        // diff --git や ---/+++ のメタ行はエディタ同様に描画しない。
+        // @@ と \ (改行なし) の注記は残す。
+        let rows: Vec<usize> = lines
+            .iter()
+            .enumerate()
+            .filter(|(_, line)| {
+                line.kind != DiffKind::Header
+                    || line.text.starts_with("@@")
+                    || line.text.starts_with('\\')
+            })
+            .map(|(i, _)| i)
+            .collect();
+        // 連続する削除行と追加行をペアにして語レベルの差分範囲を求める。
+        for i in 0..lines.len() {
+            if lines[i].kind != DiffKind::Added {
+                continue;
+            }
+            // 直前の同種ブロック内で、未ペアの削除行を探す。
+            let Some(j) = (0..i)
+                .rev()
+                .take_while(|&k| lines[k].kind != DiffKind::Header)
+                .find(|&k| lines[k].kind == DiffKind::Removed && lines[k].changed.is_none())
+            else {
+                continue;
+            };
+            let added_body = lines[i].text.get(1..).unwrap_or("");
+            let removed_body = lines[j].text.get(1..).unwrap_or("");
+            let (ra, rb) = changed_ranges(removed_body, added_body);
+            if !ra.is_empty() || !rb.is_empty() {
+                lines[j].changed = (!ra.is_empty()).then_some(ra);
+                lines[i].changed = (!rb.is_empty()).then_some(rb);
+            }
         }
         Self {
             path,
             lines,
+            rows,
             truncated,
             reviewed: false,
         }
+    }
+
+    /// 表示行ベースでの @@ ハンク見出しの行番号(スクロール用)。
+    pub fn hunk_rows(&self) -> Vec<usize> {
+        self.rows
+            .iter()
+            .enumerate()
+            .filter(|item| {
+                self.lines[*item.1].kind == DiffKind::Header
+                    && self.lines[*item.1].text.starts_with("@@")
+            })
+            .map(|(row, _)| row)
+            .collect()
     }
 
     pub fn line_counts(&self) -> (usize, usize) {
@@ -104,6 +155,27 @@ impl Default for LineRange {
             remaining: 0,
         }
     }
+}
+
+/// 削除行・追加行の本文(符号を除く)から、共通 prefix/suffix を除いた差分範囲を両側に返す。
+/// 行全体の強調の内側に、変化した部分だけをさらに濃く出すために使う。
+fn changed_ranges(a: &str, b: &str) -> (std::ops::Range<usize>, std::ops::Range<usize>) {
+    let prefix = a
+        .char_indices()
+        .zip(b.chars())
+        .take_while(|((_, x), y)| *x == *y)
+        .map(|((i, c), _)| i + c.len_utf8())
+        .last()
+        .unwrap_or(0);
+    let (mut sa, mut sb) = (a.len(), b.len());
+    for ((ia, x), (ib, y)) in a.char_indices().rev().zip(b.char_indices().rev()) {
+        if x != y || ia < prefix || ib < prefix {
+            break;
+        }
+        sa = ia;
+        sb = ib;
+    }
+    (prefix..sa.max(prefix), prefix..sb.max(prefix))
 }
 
 impl LineRange {

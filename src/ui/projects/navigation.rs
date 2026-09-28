@@ -35,6 +35,149 @@ impl ProjectManager {
             .child(caption("エージェントワークスペース", cx))
     }
 
+    /// VSCode 風の縦アイコンパネル。タブ・スレッド・要対応・テーマ・プロジェクト管理を並べる。
+    pub(super) fn activity_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let p = ds::theme(cx);
+        let workspace = self.catalog.active.and_then(|id| self.workspace(id));
+        let session = workspace.as_ref().map(|w| {
+            let w = w.read(cx);
+            w.sessions[w.selected].tab
+        });
+        let thread_open = workspace
+            .as_ref()
+            .map(|w| {
+                let w = w.read(cx);
+                let session = &w.sessions[w.selected];
+                session.tab == Tab::Chat && session.selected_thread.is_some()
+            })
+            .unwrap_or(false);
+        let dark = ds::scheme(cx) == ColorScheme::Dark;
+        let row =
+            |id: &'static str, icon: Icon, tooltip: &'static str, active: bool| -> Stateful<Div> {
+                div()
+                    .id(id)
+                    .relative()
+                    .w(px(40.))
+                    .h(px(34.))
+                    .flex_shrink_0()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded(px(ds::radius::CONTROL))
+                    .cursor_pointer()
+                    .child(
+                        icon.view(if active { p.accent_text } else { p.muted })
+                            .size(px(16.)),
+                    )
+                    .tooltip(move |window, cx| {
+                        gpui_kit::component::tooltip::Tooltip::new(tooltip).build(window, cx)
+                    })
+                    .when(active, |v| {
+                        v.child(
+                            div()
+                                .absolute()
+                                .left(px(-6.))
+                                .top(px(6.))
+                                .bottom(px(6.))
+                                .w(px(2.))
+                                .rounded(px(1.))
+                                .bg(rgb(p.accent)),
+                        )
+                    })
+                    .hover(move |style| style.bg(ds::glass(p.hover, ds::GLASS_HOVER)))
+            };
+        let on_action = |id, icon, tooltip, active, action: Box<dyn gpui_kit::Action>| {
+            row(id, icon, tooltip, active)
+                .on_click(move |_, window, cx| window.dispatch_action(action.boxed_clone(), cx))
+        };
+        div()
+            .w(px(46.))
+            .flex_shrink_0()
+            .bg(ds::glass(p.sidebar, ds::GLASS_SIDEBAR))
+            .border_r_1()
+            .border_color(ds::glass(p.border, 0.6))
+            .flex()
+            .flex_col()
+            .items_center()
+            .pt(px(6.))
+            .pb_2()
+            .gap(px(6.))
+            .children([
+                on_action(
+                    "rail-chat",
+                    Icon::MessageSquare,
+                    "会話 · ⌘1",
+                    session == Some(Tab::Chat),
+                    Box::new(ShowChat),
+                ),
+                on_action(
+                    "rail-diff",
+                    Icon::FileDiff,
+                    "変更 · ⌘2",
+                    session == Some(Tab::Diff),
+                    Box::new(ShowDiff),
+                ),
+                on_action(
+                    "rail-logs",
+                    Icon::Terminal,
+                    "ログ · ⌘3",
+                    session == Some(Tab::Logs),
+                    Box::new(ShowLogs),
+                ),
+                on_action(
+                    "rail-overview",
+                    Icon::Activity,
+                    "概要 · ⌘0",
+                    session == Some(Tab::Overview),
+                    Box::new(ShowOverview),
+                ),
+                on_action(
+                    "rail-thread",
+                    Icon::Layers,
+                    "スレッド · ⌘⇧T",
+                    thread_open,
+                    Box::new(ShowThread),
+                ),
+                row(
+                    "rail-attention",
+                    Icon::Bell,
+                    "要対応のチャンネル · ⌘⇧A",
+                    self.attention_only,
+                )
+                .on_click(cx.listener(|this, _, _window, cx| {
+                    this.attention_only = !this.attention_only;
+                    if this.attention_only {
+                        this.collapsed_projects.clear();
+                    }
+                    cx.notify();
+                })),
+            ])
+            .child(div().flex_1())
+            .children([
+                on_action(
+                    "rail-theme",
+                    if dark { Icon::Sun } else { Icon::Moon },
+                    "テーマ切替 · ⌘⇧L",
+                    false,
+                    Box::new(ToggleTheme),
+                ),
+                on_action(
+                    "rail-projects",
+                    Icon::Sliders,
+                    "プロジェクトを管理 · ⌘⇧P",
+                    false,
+                    Box::new(ShowProjects),
+                ),
+                on_action(
+                    "rail-add-project",
+                    Icon::Plus,
+                    "プロジェクトを追加 · ⌘⇧O",
+                    false,
+                    Box::new(AddProject),
+                ),
+            ])
+    }
+
     pub(in crate::ui) fn select_channel(
         &mut self,
         project: u64,
