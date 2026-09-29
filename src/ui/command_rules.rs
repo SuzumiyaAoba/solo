@@ -5,7 +5,7 @@ use gpui_kit::component::{
     tab::{Tab as KitTab, TabBar},
 };
 use solo::command_rules::{CommandInvocation, CommandRule, Matching, Rules};
-use solo::harness::workspace::{TOOL_NAMES, is_read_only_tool, tool_description};
+use solo::harness::workspace::{is_read_only_tool, tool_description, tool_names};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum Page {
@@ -55,9 +55,9 @@ impl CommandRuleEditor {
             },
         )];
         let mut tool_pickers = Vec::new();
-        for name in TOOL_NAMES {
+        for name in tool_names() {
             let picker = cx.new(|cx| Select::new(["既定", "Allow", "Deny", "Ask"], 0, window, cx));
-            let tool = (*name).to_string();
+            let tool = name.to_string();
             subscriptions.push(cx.subscribe(
                 &picker,
                 move |this, _, selected: &ds::SelectionChanged, cx| {
@@ -107,7 +107,7 @@ impl CommandRuleEditor {
                 self.approval = approval;
                 self.rules = rules;
                 self.error = None;
-                for (picker, name) in self.tool_pickers.iter().zip(TOOL_NAMES) {
+                for (picker, name) in self.tool_pickers.iter().zip(tool_names()) {
                     let selected = match self.rules.tool_decision(name) {
                         Some(Decision::Allow) => 1,
                         Some(Decision::Deny) => 2,
@@ -607,7 +607,7 @@ impl CommandRuleEditor {
                             .text_color(rgb(p.secondary))
                             .child("Allow は確認を省略し、Deny は常に拒否、Ask はコマンドルールと同じ承認確認に戻します。既定はツールごとの安全な初期値です。"),
                     )
-                    .children(TOOL_NAMES.iter().enumerate().map(|(index, name)| {
+                    .children(tool_names().enumerate().map(|(index, name)| {
                         let decision = self.rules.tool_decision(name);
                         let default = if is_read_only_tool(name) { "許可" } else { "確認" };
                         div()
@@ -619,7 +619,7 @@ impl CommandRuleEditor {
                                     .w(px(56.))
                                     .flex_shrink_0()
                                     .font_weight(FontWeight::MEDIUM)
-                                    .child(*name),
+                                    .child(name),
                             )
                             .child(
                                 div()

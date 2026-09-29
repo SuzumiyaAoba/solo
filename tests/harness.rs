@@ -1,7 +1,7 @@
 use serde_json::json;
 use solo::harness::{
-    Cancellation, Limits, Message, Model, ModelOutput, StopReason, ToolCall, ToolExecutor,
-    ToolResult, ToolSpec, Update, run, workspace::WorkspaceTools,
+    Cancellation, Limits, Message, Model, ModelOutput, Policy, PolicyVerdict, StopReason, ToolCall,
+    ToolExecutor, ToolResult, ToolSpec, Update, run, workspace::WorkspaceTools,
 };
 use std::collections::VecDeque;
 
@@ -485,6 +485,239 @@ fn run_usage_is_none_when_no_response_reports_it() {
         |_| {},
     );
     assert_eq!(result.usage, None);
+}
+
+#[test]
+fn policy_denial_reasons_reach_the_model_and_tool_finished() {
+    struct RulePolicy;
+    impl Policy for RulePolicy {
+        fn decide(&mut self, _: &ToolCall) -> PolicyVerdict {
+            PolicyVerdict::deny("コマンドルールで拒否されました")
+        }
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let mut tools = WorkspaceTools::new(dir.path()).unwrap();
+    let mut model = ScriptedModel(VecDeque::from([
+        ModelOutput {
+            usage: None,
+            text: String::new(),
+            tool_calls: vec![call("1", "exec", json!({"command":"rm -rf /"}))],
+        },
+        ModelOutput {
+            usage: None,
+            text: "done".into(),
+            tool_calls: vec![],
+        },
+    ]));
+    let mut results = Vec::new();
+    let result = run(
+        &mut model,
+        &mut tools,
+        &mut RulePolicy,
+        vec![Message::User {
+            text: "clean".into(),
+        }],
+        &Limits::default(),
+        &Cancellation::default(),
+        |update| {
+            if let Update::ToolFinished { result, .. } = update {
+                results.push(result);
+            }
+        },
+    );
+    assert_eq!(result.stop, StopReason::Completed);
+    assert_eq!(result.tool_calls, 1);
+    assert!(matches!(
+        &result.messages[2],
+        Message::Tool {
+            result: ToolResult { content, is_error: true, .. },
+            ..
+        } if content == "コマンドルールで拒否されました"
+    ));
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].content, "コマンドルールで拒否されました");
+}
+
+#[test]
+fn panics_in_policy_or_tool_do_not_abort_the_run() {
+    struct FragilePolicy;
+    impl Policy for FragilePolicy {
+        fn decide(&mut self, call: &ToolCall) -> PolicyVerdict {
+            if call.id == "panic" {
+                panic!("policy が壊れました");
+            }
+            PolicyVerdict::Allow
+        }
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let mut tools = WorkspaceTools::new(dir.path()).unwrap();
+    let spec = tools.specs().first().unwrap().name.clone();
+    let mut model = ScriptedModel(VecDeque::from([
+        ModelOutput {
+            usage: None,
+            text: String::new(),
+            tool_calls: vec![
+                call("panic", &spec, json!({"path":"a.txt"})),
+                call("work", "write", json!({"path":"a.txt","content":"ok"})),
+            ],
+        },
+        ModelOutput {
+            usage: None,
+            text: "done".into(),
+            tool_calls: vec![],
+        },
+    ]));
+    // policy の panic は拒否として扱い、後続の tool は実行を続ける。
+    let result = run(
+        &mut model,
+        &mut tools,
+        &mut FragilePolicy,
+        vec![Message::User { text: "run".into() }],
+        &Limits::default(),
+        &Cancellation::default(),
+        |_| {},
+    );
+    assert_eq!(result.stop, StopReason::Completed);
+    assert!(matches!(
+        &result.messages[2],
+        Message::Tool { result: ToolResult { content, is_error: true, .. }, .. }
+        if content.contains("承認判定が異常終了しました")
+    ));
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("a.txt")).unwrap(),
+        "ok",
+        "policy の panic 後も許可済みの tool は実行される"
+    );
+
+    // tool の panic はエラー結果としてモデルへ返り、実行は継続する。
+    struct PanickingExecutor(Vec<ToolSpec>);
+    impl ToolExecutor for PanickingExecutor {
+        fn specs(&self) -> &[ToolSpec] {
+            &self.0
+        }
+        fn execute(&mut self, _: &ToolCall) -> ToolResult {
+            panic!("tool が壊れました")
+        }
+    }
+    let spec = ToolSpec {
+        name: "fragile".into(),
+        description: "panic する tool".into(),
+        parameters: json!({"type":"object"}),
+    };
+    let mut tools = PanickingExecutor(vec![spec]);
+    let mut model = ScriptedModel(VecDeque::from([
+        ModelOutput {
+            usage: None,
+            text: String::new(),
+            tool_calls: vec![call("1", "fragile", json!({}))],
+        },
+        ModelOutput {
+            usage: None,
+            text: "done".into(),
+            tool_calls: vec![],
+        },
+    ]));
+    let result = run(
+        &mut model,
+        &mut tools,
+        &mut |_: &ToolCall| true,
+        vec![Message::User { text: "run".into() }],
+        &Limits::default(),
+        &Cancellation::default(),
+        |_| {},
+    );
+    assert_eq!(result.stop, StopReason::Completed);
+    assert!(matches!(
+        &result.messages[2],
+        Message::Tool { result: ToolResult { content, is_error: true, .. }, .. }
+        if content.contains("tool `fragile` の実行が異常終了しました")
+    ));
+}
+
+#[test]
+fn a_model_panic_stops_the_run_with_history_preserved() {
+    struct PanickingModel;
+    impl Model for PanickingModel {
+        fn complete(&mut self, _: &[Message], _: &[ToolSpec]) -> Result<ModelOutput, String> {
+            panic!("model が壊れました")
+        }
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let mut tools = WorkspaceTools::new(dir.path()).unwrap();
+    let mut stopped = None;
+    let result = run(
+        &mut PanickingModel,
+        &mut tools,
+        &mut |_: &ToolCall| true,
+        vec![Message::User { text: "run".into() }],
+        &Limits::default(),
+        &Cancellation::default(),
+        |update| {
+            if let Update::Stopped(reason) = update {
+                stopped = Some(reason);
+            }
+        },
+    );
+    assert!(matches!(
+        result.stop,
+        StopReason::ModelError(ref error) if error.contains("異常終了")
+    ));
+    assert_eq!(result.messages.len(), 1, "panic でも履歴は保持される");
+    assert_eq!(stopped, Some(result.stop.clone()));
+}
+
+#[test]
+fn tool_result_content_and_summary_are_bounded() {
+    // specs は実行前の既知 tool 確認に使う。テストでは自前の spec を定義する。
+    struct BigTool(Vec<ToolSpec>);
+    impl ToolExecutor for BigTool {
+        fn specs(&self) -> &[ToolSpec] {
+            &self.0
+        }
+        fn execute(&mut self, _: &ToolCall) -> ToolResult {
+            ToolResult::ok("x".repeat(200_000)).with_summary("s".repeat(200_000))
+        }
+    }
+    let mut tools = BigTool(vec![ToolSpec {
+        name: "big".into(),
+        description: "大きい結果".into(),
+        parameters: json!({"type":"object"}),
+    }]);
+    let mut model = ScriptedModel(VecDeque::from([
+        ModelOutput {
+            usage: None,
+            text: String::new(),
+            tool_calls: vec![call("1", "big", json!({}))],
+        },
+        ModelOutput {
+            usage: None,
+            text: "done".into(),
+            tool_calls: vec![],
+        },
+    ]));
+    let limits = Limits {
+        max_result_bytes: 1024,
+        ..Limits::default()
+    };
+    let result = run(
+        &mut model,
+        &mut tools,
+        &mut |_: &ToolCall| true,
+        vec![Message::User { text: "run".into() }],
+        &limits,
+        &Cancellation::default(),
+        |_| {},
+    );
+    let Message::Tool { result, .. } = &result.messages[2] else {
+        panic!("tool の結果が履歴にありません")
+    };
+    const SUFFIX: &str = "\n[出力を省略]";
+    assert!(result.content.ends_with(SUFFIX));
+    assert!(result.content.len() <= 1024 + SUFFIX.len());
+    assert!(
+        result.summary.as_deref().unwrap().len() <= 1024 + SUFFIX.len(),
+        "summary も上限で切り詰める"
+    );
 }
 
 #[test]

@@ -208,7 +208,7 @@ impl<R: BufRead, W: Write> Client<R, W> {
         started()?;
         loop {
             let mut message = self.read()?;
-            if message["id"] == id && message.get("method").is_none() {
+            if response_id_matches(&message["id"], id) && message.get("method").is_none() {
                 if message.get("result").is_some() == message.get("error").is_some() {
                     return Err(invalid(
                         "ACP 応答には result と error のどちらか一方が必要です",
@@ -253,7 +253,9 @@ impl<R: BufRead, W: Write> Client<R, W> {
                 "ACP agent が切断されました",
             ));
         }
-        if bytes > MAX_JSON_LINE_BYTES || line.last() != Some(&b'\n') {
+        // take(MAX+1) で打ち切られた行は末尾が '\n' にならない。
+        // 末尾改行が無い = 上限超過か切断、どちらも継続できない。
+        if line.last() != Some(&b'\n') {
             return Err(invalid(
                 "ACP agent の応答が大きすぎるか、途中で切断されました",
             ));
@@ -263,6 +265,15 @@ impl<R: BufRead, W: Write> Client<R, W> {
             return Err(invalid("ACP JSON-RPC version が不正です"));
         }
         Ok(value)
+    }
+}
+
+/// 応答 id の照合。同じ値を文字列で返す実装も許容する(JSON-RPC は数値・
+/// 文字列どちらも有効)。数値・文字列以外の型は一致しない。
+fn response_id_matches(message_id: &Value, id: u64) -> bool {
+    match message_id {
+        Value::String(text) => text.parse::<u64>().ok() == Some(id),
+        other => other.as_u64() == Some(id),
     }
 }
 
@@ -370,6 +381,46 @@ mod tests {
             .unwrap();
         assert_eq!(reason, "end_turn");
         assert_eq!(text, "hi");
+    }
+
+    #[test]
+    fn responses_with_string_ids_still_match_numeric_requests() {
+        // JSON-RPC は文字列 id も有効。数値 id を文字列で返す実装も許容する。
+        let response = json!({"jsonrpc":"2.0","id":"0","result":{"protocolVersion":1}});
+        let mut input = serde_json::to_vec(&response).unwrap();
+        input.push(b'\n');
+        let mut client = Client::new(Cursor::new(input), Vec::new());
+        assert_eq!(client.initialize().unwrap()["protocolVersion"], 1);
+
+        // 違う値の文字列 id はこの要求の応答として受け取らない。
+        let response = json!({"jsonrpc":"2.0","id":"9","result":{}});
+        let mut input = serde_json::to_vec(&response).unwrap();
+        input.push(b'\n');
+        let mut client = Client::new(Cursor::new(input), Vec::new());
+        let error = client.initialize().unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn json_lines_at_and_over_the_size_limit() {
+        // payload 本体が上限ちょうど(行全体は MAX+1)の行は受理する。
+        let prefix = r#"{"jsonrpc":"2.0","pad":""#;
+        let suffix = r#""}"#;
+        let pad = MAX_JSON_LINE_BYTES - prefix.len() - suffix.len();
+        let mut input = Vec::with_capacity(MAX_JSON_LINE_BYTES + 2);
+        input.extend_from_slice(prefix.as_bytes());
+        input.extend(std::iter::repeat_n(b'x', pad));
+        input.extend_from_slice(suffix.as_bytes());
+        input.push(b'\n');
+        assert_eq!(input.len(), MAX_JSON_LINE_BYTES + 1);
+        let mut client = Client::new(Cursor::new(input.clone()), Vec::new());
+        assert!(client.read().is_ok(), "上限ちょうどの行は読める");
+
+        // payload が上限を 1 byte 超える行は打ち切られて '\n' で終わらない。
+        input.insert(input.len() - 1, b'x');
+        let mut client = Client::new(Cursor::new(input), Vec::new());
+        let error = client.read().unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
     }
 
     #[test]

@@ -25,8 +25,130 @@ pub const TOOL_EDIT: &str = "edit";
 pub const TOOL_WRITE: &str = "write";
 pub const TOOL_EXEC: &str = "exec";
 
+/// (description, parameters.properties, required) の組。
+type Schema = (&'static str, serde_json::Value, &'static [&'static str]);
+
+/// 組込み tool の定義一覧。spec・1行説明・実行・読み取り専用判定はすべて
+/// この表から導く。tool の追加は表へ 1 行と実装関数を足すだけでよい。
+struct ToolDef {
+    name: &'static str,
+    /// ツールタブにそのまま表示する 1 行説明。
+    summary: &'static str,
+    /// 副作用のないツールは承認を省略できる。
+    read_only: bool,
+    /// モデルへ渡す description と parameters。
+    schema: fn() -> Schema,
+    run: fn(&mut WorkspaceTools, &ToolCall) -> io::Result<ToolResult>,
+}
+
+impl ToolDef {
+    fn spec(&self) -> ToolSpec {
+        let (description, properties, required) = (self.schema)();
+        ToolSpec {
+            name: self.name.into(),
+            description: description.into(),
+            parameters: json!({"type":"object","properties":properties,"required":required,"additionalProperties":false}),
+        }
+    }
+}
+
+const TOOLS: &[ToolDef] = &[
+    ToolDef {
+        name: TOOL_READ,
+        summary: "workspace 内の UTF-8 ファイルを読む（行範囲の指定可）",
+        read_only: true,
+        schema: read_schema,
+        run: |tools, call| {
+            tools.read(
+                required_string(call, "path")?,
+                optional_u64(call, "offset")?,
+                optional_u64(call, "limit")?,
+            )
+        },
+    },
+    ToolDef {
+        name: TOOL_LIST,
+        summary: "workspace 内のディレクトリを一覧・glob で検索する",
+        read_only: true,
+        schema: list_schema,
+        run: |tools, call| {
+            tools.list(
+                optional_string(call, "path")?,
+                optional_string(call, "pattern")?,
+            )
+        },
+    },
+    ToolDef {
+        name: TOOL_SEARCH,
+        summary: "workspace 内の UTF-8 ファイルから文字列・正規表現を探す",
+        read_only: true,
+        schema: search_schema,
+        run: |tools, call| {
+            tools.search(
+                required_string(call, "query")?,
+                optional_string(call, "path")?,
+                optional_string(call, "glob")?,
+                optional_bool(call, "regex")?,
+            )
+        },
+    },
+    ToolDef {
+        name: TOOL_EDIT,
+        summary: "既存ファイルの一致する箇所を置換する",
+        read_only: false,
+        schema: edit_schema,
+        run: |tools, call| {
+            tools.edit(
+                required_string(call, "path")?,
+                required_string(call, "old")?,
+                required_string(call, "new")?,
+                optional_bool(call, "replace_all")?,
+            )
+        },
+    },
+    ToolDef {
+        name: TOOL_WRITE,
+        summary: "ファイルを新規作成・全体を上書きする",
+        read_only: false,
+        schema: write_schema,
+        run: |tools, call| {
+            tools.write(
+                required_string(call, "path")?,
+                required_string(call, "content")?,
+            )
+        },
+    },
+    ToolDef {
+        name: TOOL_EXEC,
+        summary: "workspace で shell command を実行する",
+        read_only: false,
+        schema: exec_schema,
+        run: |tools, call| {
+            tools.exec(
+                required_string(call, "command")?,
+                optional_u64(call, "timeout_seconds")?,
+            )
+        },
+    },
+];
+
+/// 基本ツールの表示順。`WorkspaceTools::specs` の配列と一致する。
+pub fn tool_names() -> impl Iterator<Item = &'static str> + Clone {
+    TOOLS.iter().map(|def| def.name)
+}
+
+/// 副作用のない組込み tool なら true。承認 policy が確認を省略できる。
 pub fn is_read_only_tool(name: &str) -> bool {
-    matches!(name, TOOL_READ | TOOL_LIST | TOOL_SEARCH)
+    TOOLS.iter().any(|def| def.name == name && def.read_only)
+}
+
+/// 基本ツールの1行説明。ツールタブにそのまま表示する。
+pub fn tool_description(name: &str) -> &'static str {
+    TOOLS
+        .iter()
+        .find(|def| def.name == name)
+        .map(|def| def.summary)
+        .unwrap_or("外部ツール")
 }
 
 /// 探索・差分追跡から外すディレクトリ。ベンダーやビルド成果物は対象外にする。
@@ -35,29 +157,6 @@ pub(crate) fn is_ignored_dir(name: &str) -> bool {
         name,
         ".git" | "target" | "node_modules" | ".next" | "dist" | "build" | ".venv" | "__pycache__"
     )
-}
-
-/// 基本ツールの表示順。`specs` の配列と一致させる。
-pub const TOOL_NAMES: &[&str] = &[
-    TOOL_READ,
-    TOOL_LIST,
-    TOOL_SEARCH,
-    TOOL_EDIT,
-    TOOL_WRITE,
-    TOOL_EXEC,
-];
-
-/// 基本ツールの1行説明。ツールタブにそのまま表示する。
-pub fn tool_description(name: &str) -> &'static str {
-    match name {
-        TOOL_READ => "workspace 内の UTF-8 ファイルを読む（行範囲の指定可）",
-        TOOL_LIST => "workspace 内のディレクトリを一覧・glob で検索する",
-        TOOL_SEARCH => "workspace 内の UTF-8 ファイルから文字列・正規表現を探す",
-        TOOL_EDIT => "既存ファイルの一致する箇所を置換する",
-        TOOL_WRITE => "ファイルを新規作成・全体を上書きする",
-        TOOL_EXEC => "workspace で shell command を実行する",
-        _ => "外部ツール",
-    }
 }
 
 /// 範囲指定の `read` が一度に読むファイルの上限。
@@ -88,7 +187,7 @@ impl WorkspaceTools {
             max_output_bytes: 64 * 1024,
             max_search_entries: 20_000,
             observed: HashMap::new(),
-            specs: TOOL_NAMES.iter().map(|name| spec(name)).collect(),
+            specs: TOOLS.iter().map(ToolDef::spec).collect(),
         })
     }
 
@@ -111,38 +210,10 @@ impl WorkspaceTools {
     }
 
     fn execute_call(&mut self, call: &ToolCall) -> io::Result<ToolResult> {
-        match call.name.as_str() {
-            TOOL_READ => self.read(
-                required_string(call, "path")?,
-                optional_u64(call, "offset")?,
-                optional_u64(call, "limit")?,
-            ),
-            TOOL_LIST => self.list(
-                optional_string(call, "path")?,
-                optional_string(call, "pattern")?,
-            ),
-            TOOL_SEARCH => self.search(
-                required_string(call, "query")?,
-                optional_string(call, "path")?,
-                optional_string(call, "glob")?,
-                optional_bool(call, "regex")?,
-            ),
-            TOOL_EDIT => self.edit(
-                required_string(call, "path")?,
-                required_string(call, "old")?,
-                required_string(call, "new")?,
-                optional_bool(call, "replace_all")?,
-            ),
-            TOOL_WRITE => self.write(
-                required_string(call, "path")?,
-                required_string(call, "content")?,
-            ),
-            TOOL_EXEC => self.exec(
-                required_string(call, "command")?,
-                optional_u64(call, "timeout_seconds")?,
-            ),
-            _ => Err(io::Error::other("未知の tool")),
-        }
+        let Some(def) = TOOLS.iter().find(|def| def.name == call.name) else {
+            return Err(io::Error::other("未知の tool"));
+        };
+        (def.run)(self, call)
     }
 }
 
@@ -216,69 +287,76 @@ fn hash(bytes: &[u8]) -> u64 {
     hasher.finish()
 }
 
-/// 各 tool の description と JSON schema。パラメータは ToolSpec へそのまま入れる。
-fn spec(name: &str) -> ToolSpec {
-    let (description, properties, required): (&str, serde_json::Value, &[&str]) = match name {
-        TOOL_READ => (
-            "workspace 内の UTF-8 テキストファイルを読む。offset と limit を省略するとファイル全体（64 KiB まで）を返す。大きなファイルや長いファイルは offset と limit で行範囲を指定する。結果に行番号は付かない。",
-            json!({
-                "path": {"type":"string","description":"workspace ルートからの相対パス"},
-                "offset": {"type":"integer","minimum":1,"description":"読み始める行（1 始まり）。limit だけ指定した場合は 1"},
-                "limit": {"type":"integer","minimum":1,"description":"読む最大行数。offset だけ指定した場合は 2000"},
-            }),
-            &["path"],
-        ),
-        TOOL_LIST => (
-            "workspace 内のディレクトリを一覧する。pattern を省略すると path 直下の項目を返す（ディレクトリは末尾に /）。pattern を指定すると path 以下を再帰的に探し、glob に一致するファイルを返す。.git・target・node_modules などは再帰の対象外。",
-            json!({
-                "path": {"type":"string","description":"一覧するディレクトリ（workspace ルートからの相対パス）。省略時はルート"},
-                "pattern": {"type":"string","description":"path からの相対パスに対する glob。例: \"**/*.rs\"、\"src/**/mod.rs\"、\"*.toml\""},
-            }),
-            &[],
-        ),
-        TOOL_SEARCH => (
-            "workspace 内の UTF-8 テキストファイルから query を含む行を探し、`パス:行番号:行` の形式で返す。既定は文字列の完全一致。.git・target・node_modules などは対象外。",
-            json!({
-                "query": {"type":"string","description":"探す文字列。regex が true の場合は正規表現（Rust の regex 構文）"},
-                "path": {"type":"string","description":"検索するディレクトリまたはファイル（workspace ルートからの相対パス）。省略時はルート"},
-                "glob": {"type":"string","description":"対象ファイルを絞り込む glob。/ を含まない場合はファイル名、含む場合は path からの相対パスに一致させる。例: \"*.rs\"、\"src/**/*.ts\""},
-                "regex": {"type":"boolean","description":"true の場合、query を正規表現として扱う"},
-            }),
-            &["query"],
-        ),
-        TOOL_EDIT => (
-            "既存ファイルの中の old と完全に一致する部分を new に置き換える。old はファイル中で一度だけ一致する必要がある（前後の行を含めて一意にする）。replace_all が true の場合は一致するすべての箇所を置き換える。",
-            json!({
-                "path": {"type":"string","description":"workspace ルートからの相対パス"},
-                "old": {"type":"string","description":"置き換える元の文字列。read の結果のとおり、空白やインデントも含めて正確に指定する"},
-                "new": {"type":"string","description":"置き換え後の文字列"},
-                "replace_all": {"type":"boolean","description":"true の場合、old に一致するすべての箇所を置き換える。既定は false"},
-            }),
-            &["path", "old", "new"],
-        ),
-        TOOL_WRITE => (
-            "ファイルを新規作成するか、既存ファイルの内容全体を置き換える。親ディレクトリがなければ作成する。既存ファイルを上書きする場合は、同じ実行の中で先に read で内容を確認している必要がある。一部だけ変更する場合は edit を使う。",
-            json!({
-                "path": {"type":"string","description":"workspace ルートからの相対パス"},
-                "content": {"type":"string","description":"ファイルの新しい内容全体"},
-            }),
-            &["path", "content"],
-        ),
-        TOOL_EXEC => (
-            "workspace のルートで `sh -c` によりシェルコマンドを実行し、終了コードと標準出力・標準エラーを返す。標準入力は使えないため、対話的なコマンドは実行できない。出力が長い場合は先頭と末尾を残して省略する。",
-            json!({
-                "command": {"type":"string","description":"実行するシェルコマンド"},
-                "timeout_seconds": {"type":"integer","minimum":1,"maximum":600,"description":"制限時間（秒）。既定は 120。時間のかかるビルドやテストでは長めに指定する"},
-            }),
-            &["command"],
-        ),
-        _ => unreachable!("TOOL_NAMES 外の tool"),
-    };
-    ToolSpec {
-        name: name.into(),
-        description: description.into(),
-        parameters: json!({"type":"object","properties":properties,"required":required,"additionalProperties":false}),
-    }
+/// 各 tool の description と JSON schema。ToolDef::spec が ToolSpec へ組み立てる。
+fn read_schema() -> Schema {
+    (
+        "workspace 内の UTF-8 テキストファイルを読む。offset と limit を省略するとファイル全体（64 KiB まで）を返す。大きなファイルや長いファイルは offset と limit で行範囲を指定する。結果に行番号は付かない。",
+        json!({
+            "path": {"type":"string","description":"workspace ルートからの相対パス"},
+            "offset": {"type":"integer","minimum":1,"description":"読み始める行（1 始まり）。limit だけ指定した場合は 1"},
+            "limit": {"type":"integer","minimum":1,"description":"読む最大行数。offset だけ指定した場合は 2000"},
+        }),
+        &["path"],
+    )
+}
+
+fn list_schema() -> Schema {
+    (
+        "workspace 内のディレクトリを一覧する。pattern を省略すると path 直下の項目を返す（ディレクトリは末尾に /）。pattern を指定すると path 以下を再帰的に探し、glob に一致するファイルを返す。.git・target・node_modules などは再帰の対象外。",
+        json!({
+            "path": {"type":"string","description":"一覧するディレクトリ（workspace ルートからの相対パス）。省略時はルート"},
+            "pattern": {"type":"string","description":"path からの相対パスに対する glob。例: \"**/*.rs\"、\"src/**/mod.rs\"、\"*.toml\""},
+        }),
+        &[],
+    )
+}
+
+fn search_schema() -> Schema {
+    (
+        "workspace 内の UTF-8 テキストファイルから query を含む行を探し、`パス:行番号:行` の形式で返す。既定は文字列の完全一致。.git・target・node_modules などは対象外。",
+        json!({
+            "query": {"type":"string","description":"探す文字列。regex が true の場合は正規表現（Rust の regex 構文）"},
+            "path": {"type":"string","description":"検索するディレクトリまたはファイル（workspace ルートからの相対パス）。省略時はルート"},
+            "glob": {"type":"string","description":"対象ファイルを絞り込む glob。/ を含まない場合はファイル名、含む場合は path からの相対パスに一致させる。例: \"*.rs\"、\"src/**/*.ts\""},
+            "regex": {"type":"boolean","description":"true の場合、query を正規表現として扱う"},
+        }),
+        &["query"],
+    )
+}
+
+fn edit_schema() -> Schema {
+    (
+        "既存ファイルの中の old と完全に一致する部分を new に置き換える。old はファイル中で一度だけ一致する必要がある（前後の行を含めて一意にする）。replace_all が true の場合は一致するすべての箇所を置き換える。",
+        json!({
+            "path": {"type":"string","description":"workspace ルートからの相対パス"},
+            "old": {"type":"string","description":"置き換える元の文字列。read の結果のとおり、空白やインデントも含めて正確に指定する"},
+            "new": {"type":"string","description":"置き換え後の文字列"},
+            "replace_all": {"type":"boolean","description":"true の場合、old に一致するすべての箇所を置き換える。既定は false"},
+        }),
+        &["path", "old", "new"],
+    )
+}
+
+fn write_schema() -> Schema {
+    (
+        "ファイルを新規作成するか、既存ファイルの内容全体を置き換える。親ディレクトリがなければ作成する。既存ファイルを上書きする場合は、同じ実行の中で先に read で内容を確認している必要がある。一部だけ変更する場合は edit を使う。",
+        json!({
+            "path": {"type":"string","description":"workspace ルートからの相対パス"},
+            "content": {"type":"string","description":"ファイルの新しい内容全体"},
+        }),
+        &["path", "content"],
+    )
+}
+
+fn exec_schema() -> Schema {
+    (
+        "workspace のルートで `sh -c` によりシェルコマンドを実行し、終了コードと標準出力・標準エラーを返す。標準入力は使えないため、対話的なコマンドは実行できない。出力が長い場合は先頭と末尾を残して省略する。",
+        json!({
+            "command": {"type":"string","description":"実行するシェルコマンド"},
+            "timeout_seconds": {"type":"integer","minimum":1,"maximum":600,"description":"制限時間（秒）。既定は 120。時間のかかるビルドやテストでは長めに指定する"},
+        }),
+        &["command"],
+    )
 }
 
 /// workspace root を canonicalize し、ディレクトリであることを確認する。

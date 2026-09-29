@@ -5,7 +5,8 @@ use crate::{
     codex::{Authentication, DEFAULT_MODEL, DeviceLogin},
     event::{Emitter, Envelope, Event, Sequencer, SessionId, Usage},
     harness::{
-        self, Cancellation, Limits, Message, StopReason, ToolCall, ToolResult, Update,
+        self, Cancellation, Limits, Message, Policy, PolicyVerdict, StopReason, ToolCall,
+        ToolResult, Update,
         workspace::{
             TOOL_EDIT, TOOL_EXEC, TOOL_LIST, TOOL_READ, TOOL_SEARCH, TOOL_WRITE, WorkspaceTools,
             canonical_workspace, system_prompt,
@@ -19,7 +20,7 @@ use std::{
     cell::RefCell,
     io,
     panic::{AssertUnwindSafe, catch_unwind},
-    path::PathBuf,
+    path::{Path, PathBuf},
     thread,
 };
 use workspace_diff::DiffTracking;
@@ -117,20 +118,12 @@ pub fn start(config: Config) -> io::Result<(Controller, Receiver<Delivery>)> {
                 Err(payload) => emitter.emit(Event::TurnFailed {
                     reason: format!(
                         "実行ワーカーが異常終了しました: {}",
-                        panic_message(&payload)
+                        harness::panic_message(&payload)
                     ),
                 }),
             }
         })?;
     Ok((controller, receiver))
-}
-
-fn panic_message(payload: &Box<dyn std::any::Any + Send>) -> &str {
-    payload
-        .downcast_ref::<String>()
-        .map(String::as_str)
-        .or_else(|| payload.downcast_ref::<&str>().copied())
-        .unwrap_or("原因を取得できませんでした")
 }
 
 pub fn start_login() -> io::Result<(Controller, Receiver<Delivery>)> {
@@ -203,50 +196,14 @@ fn run(
     messages.push(Message::User {
         text: config.prompt,
     });
-    let approval_sender = sender.clone();
-    let approval_workspace = workspace.clone();
-    let approval_cancellation = cancellation.clone();
     // policy(on_update より先に呼ばれる)と on_update が emitter を交互に使うため
     // RefCell で包む。emit は逐次呼ばれ、借用が入れ子になることはない。
     let emitter = RefCell::new(emitter);
-    let mut policy = |call: &ToolCall| {
-        let request_id = format!("approval-{}", emitter.borrow().sequence() + 1);
-        if let Some((decision, source)) = approval::precheck(call, &approval_workspace) {
-            emitter.borrow_mut().emit(Event::ApprovalDecided {
-                request_id,
-                accepted: decision,
-                source: source.into(),
-                invocation_id: Some(call.id.clone()),
-            });
-            return decision;
-        }
-        let request = ApprovalRequest::tool(call, &approval_workspace);
-        emitter.borrow_mut().emit(Event::ApprovalRequested {
-            request_id: request_id.clone(),
-            title: request.title.clone(),
-            executor: request.executor.clone(),
-            command: request.display_command.clone(),
-            details: request.details.clone(),
-            invocation_id: Some(call.id.clone()),
-        });
-        let reply = approval::ask(
-            &approval_sender,
-            request,
-            |request, reply| Delivery::Approval { request, reply },
-            &approval_cancellation,
-        );
-        let (accepted, source) = match reply {
-            Some(reply) => (reply.accepted, reply.source.label()),
-            None if approval_cancellation.is_cancelled() => (false, "cancelled"),
-            None => (false, "closed"),
-        };
-        emitter.borrow_mut().emit(Event::ApprovalDecided {
-            request_id,
-            accepted,
-            source: source.into(),
-            invocation_id: Some(call.id.clone()),
-        });
-        accepted
+    let mut policy = TurnPolicy {
+        emitter: &emitter,
+        sender,
+        workspace: &workspace,
+        cancellation,
     };
     let mut model_requests = 0;
     let mut log_offset = 0;
@@ -311,6 +268,64 @@ fn run(
     );
     finish_turn(run, &limits, sender, emitter.into_inner());
     Ok(())
+}
+
+/// harness::run に渡す承認判定。ルールと読み取り専用ツールの即決(precheck)を
+/// 先に試し、残りは UI 承認へ回す。拒否理由は verdict 経由でモデルへ返る。
+struct TurnPolicy<'a, 'e> {
+    emitter: &'a RefCell<&'e mut Emitter<Delivery>>,
+    sender: &'a Sender<Delivery>,
+    workspace: &'a Path,
+    cancellation: &'a Cancellation,
+}
+
+impl Policy for TurnPolicy<'_, '_> {
+    fn decide(&mut self, call: &ToolCall) -> PolicyVerdict {
+        if let Some((decision, source)) = approval::precheck(call, self.workspace) {
+            let request_id = format!("approval-{}", self.emitter.borrow().sequence() + 1);
+            self.emitter.borrow_mut().emit(Event::ApprovalDecided {
+                request_id,
+                accepted: decision,
+                source: source.into(),
+                invocation_id: Some(call.id.clone()),
+            });
+            return if decision {
+                PolicyVerdict::Allow
+            } else {
+                PolicyVerdict::deny(denial_reason(source))
+            };
+        }
+        let request = ApprovalRequest::tool(call, self.workspace);
+        let reply = {
+            let mut emitter = self.emitter.borrow_mut();
+            approval::ask_and_record(
+                &mut **emitter,
+                self.sender,
+                request,
+                Some(call.id.clone()),
+                |request, reply| Delivery::Approval { request, reply },
+                self.cancellation,
+            )
+        };
+        match reply {
+            Some(reply) if reply.accepted => PolicyVerdict::Allow,
+            Some(reply) => PolicyVerdict::deny(denial_reason(reply.source.label())),
+            None if self.cancellation.is_cancelled() => PolicyVerdict::deny("実行が中止されました"),
+            None => PolicyVerdict::deny("承認の返答が得られませんでした"),
+        }
+    }
+}
+
+/// ApprovalDecided.source のラベルをモデル向けの拒否理由に変換する。
+fn denial_reason(source: &str) -> String {
+    match source {
+        "user" => "ユーザーが拒否しました",
+        "auto" => "Auto 判定で拒否されました",
+        "rule" => "コマンドルールで拒否されました",
+        "cancelled" => "実行が中止されました",
+        _ => "承認されませんでした",
+    }
+    .into()
 }
 
 /// ToolStarted の表示用コマンド行。既知ツールは引数から人が読める形にし、

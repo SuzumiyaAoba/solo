@@ -89,6 +89,44 @@ where
     wait_for_reply(answer, cancellation)
 }
 
+/// ApprovalRequested → 返答待ち → ApprovalDecided の往復。request_id は
+/// emitter の次の sequence から採番する。返答が得られない場合も
+/// cancelled/closed の source で決定イベントを必ず記録する。
+pub(crate) fn ask_and_record<D>(
+    emitter: &mut crate::event::Emitter<D>,
+    sender: &async_channel::Sender<D>,
+    request: ApprovalRequest,
+    invocation_id: Option<String>,
+    delivery: impl FnOnce(Box<ApprovalRequest>, async_channel::Sender<ApprovalReply>) -> D,
+    cancellation: &crate::harness::Cancellation,
+) -> Option<ApprovalReply>
+where
+    D: Send + From<crate::event::Envelope>,
+{
+    let request_id = format!("approval-{}", emitter.sequence() + 1);
+    emitter.emit(crate::event::Event::ApprovalRequested {
+        request_id: request_id.clone(),
+        title: request.title.clone(),
+        executor: request.executor.clone(),
+        command: request.display_command.clone(),
+        details: request.details.clone(),
+        invocation_id: invocation_id.clone(),
+    });
+    let reply = ask(sender, request, delivery, cancellation);
+    let (accepted, source) = match reply {
+        Some(reply) => (reply.accepted, reply.source.label()),
+        None if cancellation.is_cancelled() => (false, "cancelled"),
+        None => (false, "closed"),
+    };
+    emitter.emit(crate::event::Event::ApprovalDecided {
+        request_id,
+        accepted,
+        source: source.into(),
+        invocation_id,
+    });
+    reply
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ApprovalPlan {
     Allow(&'static str),

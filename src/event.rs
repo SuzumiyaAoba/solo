@@ -109,8 +109,9 @@ impl Envelope {
         }
     }
 
+    /// payload を複製せず decode する。unknown kind のときだけ payload を複製する。
     pub fn decode(&self) -> Result<Decoded, serde_json::Error> {
-        Decoded::from_payload(self.schema_version, self.payload.clone())
+        Decoded::from_payload_ref(self.schema_version, &self.payload)
     }
 }
 /// producer 側の sequence / turn_id 採番。時刻ではなく sequence で順序を確定する。
@@ -234,6 +235,15 @@ pub enum Decoded {
     Unknown { kind: String, payload: Value },
 }
 
+/// 未知 schema か未知の type なら、kind 名(なければ "(type なし)")を返す。
+/// type が無い・文字列でない payload は未知ではなく「既知 type の破損」として
+/// 呼出し側の serde エラーに回す。
+fn unknown_kind(schema_version: u32, kind: Option<&str>) -> Option<&str> {
+    (schema_version != SCHEMA_VERSION
+        || kind.is_some_and(|kind| !Event::KNOWN_TYPES.contains(&kind)))
+    .then(|| kind.unwrap_or("(type なし)"))
+}
+
 impl Decoded {
     /// 所有済みの payload はコピーせずに event へ変換する。
     pub(crate) fn from_payload(
@@ -241,15 +251,25 @@ impl Decoded {
         payload: Value,
     ) -> Result<Self, serde_json::Error> {
         let kind = payload.get("type").and_then(Value::as_str);
-        if schema_version != SCHEMA_VERSION
-            || kind.is_some_and(|kind| !Event::KNOWN_TYPES.contains(&kind))
-        {
+        if let Some(kind) = unknown_kind(schema_version, kind) {
             return Ok(Self::Unknown {
-                kind: kind.unwrap_or("(type なし)").to_owned(),
+                kind: kind.to_owned(),
                 payload,
             });
         }
         serde_json::from_value(payload).map(Self::Known)
+    }
+
+    /// 借用 payload の decode。unknown 判定に payload を複製しない。
+    fn from_payload_ref(schema_version: u32, payload: &Value) -> Result<Self, serde_json::Error> {
+        let kind = payload.get("type").and_then(Value::as_str);
+        if let Some(kind) = unknown_kind(schema_version, kind) {
+            return Ok(Self::Unknown {
+                kind: kind.to_owned(),
+                payload: payload.clone(),
+            });
+        }
+        Event::deserialize(payload).map(Self::Known)
     }
 }
 
@@ -376,4 +396,140 @@ impl Event {
         "turn_cancelled",
         "disconnected",
     ];
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    /// Event の全 variant を 1 つずつ。variant を増やしたら KNOWN_TYPES と
+    /// この一覧の両方を更新する(片方だけだと unknown 扱いにずれる)。
+    fn all_variants() -> Vec<Event> {
+        vec![
+            Event::SessionCreated {
+                title: "t".into(),
+                workspace_id: "w".into(),
+                settings: Value::Null,
+            },
+            Event::TurnStarted { prompt: "p".into() },
+            Event::ModelRequestStarted {
+                provider: "p".into(),
+                model: "m".into(),
+                request_id: "r".into(),
+            },
+            Event::MessageDelta {
+                message_id: "m".into(),
+                text: "t".into(),
+            },
+            Event::ToolStarted {
+                invocation_id: "i".into(),
+                command: "c".into(),
+                cwd: "d".into(),
+                agent_id: None,
+                tool: None,
+            },
+            Event::ToolFinished {
+                invocation_id: "i".into(),
+                exit_code: 0,
+                summary: None,
+            },
+            Event::AgentStarted {
+                agent_id: "a".into(),
+                name: "n".into(),
+                task: "t".into(),
+                parent_agent_id: None,
+            },
+            Event::AgentFinished {
+                agent_id: "a".into(),
+                success: true,
+                summary: "s".into(),
+            },
+            Event::ApprovalRequested {
+                request_id: "r".into(),
+                title: "t".into(),
+                executor: "e".into(),
+                command: None,
+                details: Value::Null,
+                invocation_id: None,
+            },
+            Event::ApprovalDecided {
+                request_id: "r".into(),
+                accepted: true,
+                source: "s".into(),
+                invocation_id: None,
+            },
+            Event::Log {
+                level: "tool".into(),
+                preview: "p".into(),
+                offset: 0,
+                bytes: 0,
+            },
+            Event::DiffUpdated {
+                path: "p".into(),
+                unified_diff: "d".into(),
+                invocation_id: None,
+            },
+            Event::TurnCompleted {
+                reason: "r".into(),
+                usage: Usage::default(),
+            },
+            Event::TurnFailed { reason: "r".into() },
+            Event::TurnCancelled { reason: "r".into() },
+            Event::Disconnected { reason: "r".into() },
+        ]
+    }
+
+    fn envelope(schema_version: u32, payload: Value) -> Envelope {
+        Envelope {
+            schema_version,
+            event_id: "e".into(),
+            session_id: SessionId::parse("s").unwrap(),
+            sequence: 1,
+            timestamp_ms: 0,
+            turn_id: None,
+            payload,
+        }
+    }
+
+    #[test]
+    fn every_event_variant_is_registered_and_round_trips() {
+        let events = all_variants();
+        assert_eq!(
+            events.len(),
+            Event::KNOWN_TYPES.len(),
+            "variant と KNOWN_TYPES の数が一致しません"
+        );
+        for event in events {
+            let payload = serde_json::to_value(&event).unwrap();
+            let kind = payload["type"].as_str().unwrap().to_owned();
+            assert!(
+                Event::KNOWN_TYPES.contains(&kind.as_str()),
+                "{kind} が KNOWN_TYPES にありません"
+            );
+            let decoded = envelope(SCHEMA_VERSION, payload).decode().unwrap();
+            assert!(
+                matches!(decoded, Decoded::Known(_)),
+                "{kind} を既知イベントとして decode できませんでした"
+            );
+        }
+    }
+
+    #[test]
+    fn decode_distinguishes_unknown_kinds_from_broken_payloads() {
+        // 未知の type・未知の schema は欠落を避けて Unknown として保持する。
+        for envelope in [
+            envelope(SCHEMA_VERSION, json!({"type":"future_event","data":1})),
+            envelope(99, json!({"type":"turn_started","prompt":"p"})),
+        ] {
+            assert!(matches!(envelope.decode(), Ok(Decoded::Unknown { .. })));
+        }
+        // 既知 type の破損・type 欠落は未知イベントではなく decode エラー。
+        for envelope in [
+            envelope(SCHEMA_VERSION, json!({"type":"turn_started"})),
+            envelope(SCHEMA_VERSION, json!({"note":"no type"})),
+        ] {
+            assert!(envelope.decode().is_err());
+        }
+    }
 }

@@ -72,8 +72,24 @@ impl RunQueue {
     }
 
     /// 復元した待ち行列で置き換える。paused は呼出側の判断で与える。
-    pub fn restore(&mut self, entries: impl IntoIterator<Item = QueuedRun>, paused: bool) {
-        self.pending = entries.into_iter().collect();
+    /// push と同じ条件(空 prompt・重複 session)を保存データにも適用し、
+    /// 落とした件数を返す。壊れた永続化データがキューの不変条件を壊さないため。
+    pub fn restore(&mut self, entries: impl IntoIterator<Item = QueuedRun>, paused: bool) -> usize {
+        let mut pending = VecDeque::new();
+        let mut dropped = 0;
+        for run in entries {
+            if run.prompt.trim().is_empty()
+                || pending
+                    .iter()
+                    .any(|queued: &QueuedRun| queued.session_id == run.session_id)
+            {
+                dropped += 1;
+            } else {
+                pending.push_back(run);
+            }
+        }
+        self.pending = pending;
         self.paused = paused;
+        dropped
     }
 }

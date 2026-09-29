@@ -251,38 +251,24 @@ impl Bridge {
                 .map(str::to_owned)
         };
         let (allow, reject) = (option_id("allow_once"), option_id("reject_once"));
-        let request_id = format!("approval-{}", out.sequence() + 1);
         let invocation_id = params["toolCall"]["toolCallId"].as_str().map(str::to_owned);
         let request = ApprovalRequest::acp(params, profile, workspace);
-        out.emit(Event::ApprovalRequested {
-            request_id: request_id.clone(),
-            title: request.title.clone(),
-            executor: request.executor.clone(),
-            command: request.display_command.clone(),
-            details: request.details.clone(),
-            invocation_id: invocation_id.clone(),
-        });
-        let reply = approval::ask(
+        let reply = approval::ask_and_record(
+            out,
             sender,
             request,
+            invocation_id,
             |request, reply| Delivery::Approval { request, reply },
             cancellation,
         );
-        let (accepted, source) = match reply {
-            Some(reply) => (reply.accepted, reply.source.label()),
-            None if cancellation.is_cancelled() => (false, "cancelled"),
-            None => (false, "closed"),
-        };
-        out.emit(Event::ApprovalDecided {
-            request_id,
-            accepted,
-            source: source.into(),
-            invocation_id,
-        });
         if cancellation.is_cancelled() {
             return json!({"outcome":{"outcome":"cancelled"}});
         }
-        match if accepted { allow } else { reject } {
+        match if reply.is_some_and(|reply| reply.accepted) {
+            allow
+        } else {
+            reject
+        } {
             Some(option_id) => {
                 json!({"outcome":{"outcome":"selected","optionId":option_id}})
             }

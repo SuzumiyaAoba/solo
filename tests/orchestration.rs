@@ -83,6 +83,35 @@ fn cancellation_restores_exact_draft_without_reordering_remaining_work() {
 }
 
 #[test]
+fn restore_applies_the_same_invariants_as_push() {
+    let mut queue = RunQueue::default();
+    let dropped = queue.restore(
+        vec![
+            run("a", BackendKind::Subscription),
+            run("a", BackendKind::Subscription),
+            QueuedRun {
+                prompt: "  \n ".into(),
+                ..run("b", BackendKind::Subscription)
+            },
+            run("c", BackendKind::Subscription),
+        ],
+        true,
+    );
+    assert_eq!(dropped, 2, "重複・空 prompt の保存データは落とす");
+    assert_eq!(queue.len(), 2);
+    assert_eq!(queue.position(&sid("a")), Some(1));
+    assert_eq!(queue.position(&sid("b")), None);
+    assert_eq!(queue.position(&sid("c")), Some(2));
+    assert_eq!(
+        queue.next(false),
+        None,
+        "paused な復元は明示再開まで動かない"
+    );
+    queue.set_paused(false);
+    assert_eq!(queue.next(false).unwrap().session_id, sid("a"));
+}
+
+#[test]
 fn titles_use_the_first_nonempty_line_and_preserve_graphemes() {
     assert_eq!(task_title("\n  日本語の改善  \n完了条件"), "日本語の改善");
     let family = "👩‍👩‍👧‍👦";

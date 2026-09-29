@@ -3,7 +3,10 @@
 //! モデルと tool の実装はホストが渡す。各 tool 呼び出しの許可もホストが決める。
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::HashSet;
+use std::{
+    collections::HashSet,
+    panic::{AssertUnwindSafe, catch_unwind},
+};
 use tokio_util::sync::CancellationToken;
 
 pub mod workspace;
@@ -107,14 +110,35 @@ pub trait ToolExecutor {
     fn execute(&mut self, call: &ToolCall) -> ToolResult;
 }
 
-/// `false` の場合、実行せず拒否結果をモデルへ返す。
+/// Policy の判定。拒否理由はモデルへそのまま返るため、ルール名や承認元を
+/// 添えるとモデルが再提案を調整できる。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PolicyVerdict {
+    Allow,
+    /// モデルへ返す拒否理由。None は既定の文言にする。
+    Deny(Option<String>),
+}
+
+impl PolicyVerdict {
+    /// 理由付きで拒否する。
+    pub fn deny(reason: impl Into<String>) -> Self {
+        Self::Deny(Some(reason.into()))
+    }
+}
+
+/// `Deny` の場合、実行せず拒否結果をモデルへ返す。
+/// 判定側で panic しても安全側(Deny)に倒す。
 pub trait Policy {
-    fn allow(&mut self, call: &ToolCall) -> bool;
+    fn decide(&mut self, call: &ToolCall) -> PolicyVerdict;
 }
 
 impl<F: FnMut(&ToolCall) -> bool> Policy for F {
-    fn allow(&mut self, call: &ToolCall) -> bool {
-        self(call)
+    fn decide(&mut self, call: &ToolCall) -> PolicyVerdict {
+        if self(call) {
+            PolicyVerdict::Allow
+        } else {
+            PolicyVerdict::Deny(None)
+        }
     }
 }
 
@@ -206,6 +230,8 @@ pub struct Run {
 
 /// 一回のユーザー入力を処理する。中止はモデル呼出しと tool 実行の間で確認する。
 /// blocking な呼出しを即時停止する必要がある場合はアダプター自身も中止を実装する。
+/// 拡張側(model/policy/tool)の panic は実行ごと落とさない。モデルの panic は
+/// ModelError、policy の panic は拒否、tool の panic はエラー結果として処理する。
 pub fn run<M, T, P, F>(
     model: &mut M,
     tools: &mut T,
@@ -238,13 +264,21 @@ where
             break StopReason::Cancelled;
         }
         let mut streamed_text = String::new();
-        let output = match model.complete_with_updates(&messages, tools.specs(), &mut |delta| {
-            streamed_text.push_str(delta);
-            on_update(Update::AssistantDelta(delta.into()));
-        }) {
-            Ok(output) => output,
-            Err(_) if cancellation.is_cancelled() => break StopReason::Cancelled,
-            Err(error) => break StopReason::ModelError(error),
+        let output = match catch_unwind(AssertUnwindSafe(|| {
+            model.complete_with_updates(&messages, tools.specs(), &mut |delta| {
+                streamed_text.push_str(delta);
+                on_update(Update::AssistantDelta(delta.into()));
+            })
+        })) {
+            Ok(Ok(output)) => output,
+            _ if cancellation.is_cancelled() => break StopReason::Cancelled,
+            Ok(Err(error)) => break StopReason::ModelError(error),
+            Err(payload) => {
+                break StopReason::ModelError(format!(
+                    "モデルの呼び出しが異常終了しました: {}",
+                    panic_message(&payload)
+                ));
+            }
         };
         if cancellation.is_cancelled() {
             break StopReason::Cancelled;
@@ -286,16 +320,41 @@ where
             } else if !tools.specs().iter().any(|spec| spec.name == call.name) {
                 calls += 1;
                 ToolResult::error(format!("未知の tool: {}", call.name))
-            } else if !policy.allow(&call) {
-                calls += 1;
-                ToolResult::error("tool の実行は許可されませんでした")
-            } else if cancellation.is_cancelled() {
-                ToolResult::error("承認待ちの間に中止されたため実行しませんでした")
             } else {
-                calls += 1;
-                tools.execute(&call)
+                let verdict = match catch_unwind(AssertUnwindSafe(|| policy.decide(&call))) {
+                    Ok(verdict) => verdict,
+                    Err(payload) => PolicyVerdict::deny(format!(
+                        "承認判定が異常終了しました: {}",
+                        panic_message(&payload)
+                    )),
+                };
+                match verdict {
+                    PolicyVerdict::Deny(reason) => {
+                        calls += 1;
+                        ToolResult::error(
+                            reason.unwrap_or_else(|| "tool の実行は許可されませんでした".into()),
+                        )
+                    }
+                    PolicyVerdict::Allow if cancellation.is_cancelled() => {
+                        ToolResult::error("承認待ちの間に中止されたため実行しませんでした")
+                    }
+                    PolicyVerdict::Allow => {
+                        calls += 1;
+                        match catch_unwind(AssertUnwindSafe(|| tools.execute(&call))) {
+                            Ok(result) => result,
+                            Err(payload) => ToolResult::error(format!(
+                                "tool `{}` の実行が異常終了しました: {}",
+                                call.name,
+                                panic_message(&payload)
+                            )),
+                        }
+                    }
+                }
             };
             result.content = truncate_utf8(result.content, limits.max_result_bytes);
+            result.summary = result
+                .summary
+                .map(|summary| truncate_utf8(summary, limits.max_result_bytes));
             on_update(Update::ToolFinished {
                 call_id: call.id.clone(),
                 result: result.clone(),
@@ -314,6 +373,15 @@ where
         stop,
         usage,
     }
+}
+
+/// catch_unwind の payload から panic の説明を取り出す。
+pub(crate) fn panic_message(payload: &(dyn std::any::Any + Send)) -> &str {
+    payload
+        .downcast_ref::<String>()
+        .map(String::as_str)
+        .or_else(|| payload.downcast_ref::<&str>().copied())
+        .unwrap_or("原因を取得できませんでした")
 }
 
 fn truncate_utf8(mut value: String, limit: usize) -> String {

@@ -308,7 +308,10 @@ impl Workspace {
         if requested != entries.len() {
             self.report("消えた実行先やセッションを参照する順番待ちを復元できませんでした".into());
         }
-        self.queue.restore(entries, paused);
+        let dropped = self.queue.restore(entries, paused);
+        if dropped > 0 {
+            self.report(format!("不正な順番待ち {dropped} 件を復元しませんでした"));
+        }
     }
 
     /// 保存済みセッションから SessionView を組み立てる。実行中だったものは mark_recovered 済み。
