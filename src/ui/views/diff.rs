@@ -112,8 +112,6 @@ impl Workspace {
             .w(px(208.))
             .flex_shrink_0()
             .bg(ds::glass(p.sidebar, ds::GLASS_SIDEBAR))
-            .border_r_1()
-            .border_color(ds::glass(p.border, 0.6))
             .flex()
             .flex_col()
             .overflow_hidden()
@@ -162,7 +160,7 @@ impl Workspace {
                             .relative()
                             .w_full()
                             .px_2()
-                            .py(px(5.))
+                            .py_1()
                             .rounded(px(ds::radius::CONTROL))
                             .cursor_pointer()
                             .when(selected, |v| {
@@ -170,8 +168,8 @@ impl Workspace {
                                     div()
                                         .absolute()
                                         .left(px(-4.))
-                                        .top(px(6.))
-                                        .bottom(px(6.))
+                                        .top(px(space::SM))
+                                        .bottom(px(space::SM))
                                         .w(px(2.))
                                         .rounded(px(1.))
                                         .bg(rgb(p.accent)),
@@ -201,7 +199,7 @@ impl Workspace {
                                             .flex_1()
                                             .min_w_0()
                                             .truncate()
-                                            .text_size(px(12.))
+                                            .text_size(px(typography::LABEL))
                                             .font_weight(if selected {
                                                 FontWeight::SEMIBOLD
                                             } else {
@@ -211,13 +209,13 @@ impl Workspace {
                                     )
                                     .child(
                                         div()
-                                            .text_size(px(10.))
+                                            .text_size(px(typography::CAPTION))
                                             .text_color(rgb(p.success))
                                             .child(format!("+{file_added}")),
                                     )
                                     .child(
                                         div()
-                                            .text_size(px(10.))
+                                            .text_size(px(typography::CAPTION))
                                             .text_color(rgb(p.danger))
                                             .child(format!("−{file_removed}")),
                                     ),
@@ -225,7 +223,7 @@ impl Workspace {
                             .child(
                                 div()
                                     .pl(px(marks as f32 * 16.))
-                                    .text_size(px(10.))
+                                    .text_size(px(typography::CAPTION))
                                     .text_color(rgb(p.secondary))
                                     .truncate()
                                     .child(dir_part.to_string()),
@@ -245,8 +243,6 @@ impl Workspace {
                     .flex_shrink_0()
                     .px(px(space::MD))
                     .py(px(space::SM))
-                    .border_t_1()
-                    .border_color(ds::glass(p.border, 0.6))
                     .flex()
                     .items_center()
                     .gap(px(space::SM))
@@ -397,7 +393,6 @@ impl Workspace {
                     cx,
                 ))
             })
-            .child(ds::divider(cx))
             .child(
                 uniform_list(
                     "diff-lines",

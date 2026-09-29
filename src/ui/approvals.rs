@@ -477,7 +477,7 @@ fn approval_body(
                 .flex_wrap()
                 .items_center()
                 .gap_2()
-                .text_size(px(12.))
+                .text_size(px(typography::LABEL))
                 .text_color(rgb(p.secondary))
                 .child(request.executor.clone())
                 .when(request.is_command, |v| {
@@ -556,9 +556,8 @@ fn approval_body(
 
 /// 承認カードのフッタ: ルール登録・再判定・承認/拒否の操作ボタン。
 fn approval_footer(request: &ApprovalRequest, cx: &mut Context<Workspace>) -> Div {
-    let p = ds::theme(cx);
     let can_remember = request.command.is_some();
-    div().flex_shrink_0().flex().flex_col().gap_2().pt_2().border_t_1().border_color(rgb(p.border))
+    div().flex_shrink_0().flex().flex_col().gap_2().pt_2()
         .when(can_remember, |v| v.child(div().flex().flex_wrap().items_center().gap_2()
             .child(Button::new("approval-deny", "登録して拒否").with_icon(Icon::Close).control_size(ControlSize::Small)
                 .tooltip("Deny に登録して今回の要求を拒否")
@@ -595,7 +594,7 @@ pub(super) fn command_block(id: impl Into<ElementId>, text: &str, cx: &App) -> S
         .border_1()
         .border_color(rgb(p.border))
         .font_family(typography::MONO)
-        .text_size(px(12.))
+        .text_size(px(typography::LABEL))
         .line_height(px(18.))
         .child(solo::text::preview(text, 16 * 1024))
         .when(truncated, |v| {

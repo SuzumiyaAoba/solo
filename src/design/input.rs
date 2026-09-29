@@ -10,11 +10,29 @@ use std::ops::Range;
 
 actions!(solo_input, [Submit]);
 pub fn bind_keys(cx: &mut App) {
-    cx.bind_keys([KeyBinding::new(
-        "cmd-enter",
-        Submit,
-        Some("SoloInput > Input"),
-    )]);
+    #[cfg(target_os = "macos")]
+    use gpui_kit::component::input as kit_input;
+    cx.bind_keys([
+        KeyBinding::new("cmd-enter", Submit, Some("SoloInput > Input")),
+        // Cocoa テキストフィールドと同じ Emacs 系編集キー。
+        // 矢印・⌘/⌥ 系は Kit の "Input" コンテキストがすでに束縛済み。
+        #[cfg(target_os = "macos")]
+        KeyBinding::new("ctrl-b", kit_input::MoveLeft, Some("Input")),
+        #[cfg(target_os = "macos")]
+        KeyBinding::new("ctrl-f", kit_input::MoveRight, Some("Input")),
+        #[cfg(target_os = "macos")]
+        KeyBinding::new("ctrl-n", kit_input::MoveDown, Some("Input")),
+        #[cfg(target_os = "macos")]
+        KeyBinding::new("ctrl-p", kit_input::MoveUp, Some("Input")),
+        #[cfg(target_os = "macos")]
+        KeyBinding::new("ctrl-d", kit_input::Delete, Some("Input")),
+        #[cfg(target_os = "macos")]
+        KeyBinding::new("ctrl-h", kit_input::Backspace, Some("Input")),
+        #[cfg(target_os = "macos")]
+        KeyBinding::new("ctrl-k", kit_input::DeleteToEndOfLine, Some("Input")),
+        #[cfg(target_os = "macos")]
+        KeyBinding::new("ctrl-v", kit_input::MovePageDown, Some("Input")),
+    ]);
 }
 
 pub struct Submitted(pub String);

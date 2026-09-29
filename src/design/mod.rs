@@ -12,6 +12,7 @@ pub use icons::{DesignAssets, Icon};
 pub use input::{InputChanged, Submitted, TextInput};
 pub use overlays::{Dialog, DialogEvent, ToastHost};
 pub use select::{Select, SelectionChanged};
+use std::rc::Rc;
 
 #[derive(Clone, Copy, Default)]
 pub struct Theme(pub ColorScheme);
@@ -122,4 +123,27 @@ pub fn root(cx: &App) -> Div {
         .font_family(typography::FONT)
         .text_size(px(typography::BODY))
         .bg(glass(p.canvas, GLASS_STRONG))
+}
+
+/// パネル境界は線を引かず背景色の差で表す。ドラッグ中だけアクセント色を出す。
+/// ヒット領域とカーソルはハンドル側が持つため、ここでは見た目だけを返す。
+pub fn split_handle(cx: &App) -> gpui_kit::base::ResizeHandleRenderer {
+    let p = theme(cx);
+    Rc::new(move |handle, _, _| {
+        let color = if handle.is_active() {
+            glass(p.focus, 0.9)
+        } else {
+            rgba(0)
+        };
+        Some(
+            div()
+                .flex_none()
+                .bg(color)
+                .map(|v| match handle.axis() {
+                    Axis::Horizontal => v.h_full().w(px(1.)),
+                    Axis::Vertical => v.w_full().h(px(1.)),
+                })
+                .into_any_element(),
+        )
+    })
 }

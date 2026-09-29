@@ -264,7 +264,7 @@ impl CommandRuleEditor {
                         .flex()
                         .items_center()
                         .gap_2()
-                        .text_size(px(11.))
+                        .text_size(px(typography::CAPTION))
                         .text_color(rgb(p.muted))
                         .child(Icon::Folder.view(p.muted))
                         .child(store.workspace().display().to_string()),
@@ -353,7 +353,7 @@ impl CommandRuleEditor {
                             )),
                     )
                     .when_some(self.editing.as_ref(), |v, rule| {
-                        v.child(div().text_size(px(11.)).text_color(rgb(p.secondary)).child(
+                        v.child(div().text_size(px(typography::CAPTION)).text_color(rgb(p.secondary)).child(
                             format!(
                                 "編集中 · {} · {}",
                                 rule.executor_label(),
@@ -537,7 +537,7 @@ impl CommandRuleEditor {
                                     .flex()
                                     .items_center()
                                     .gap_2()
-                                    .text_size(px(11.))
+                                    .text_size(px(typography::CAPTION))
                                     .text_color(rgb(p.muted))
                                     .child(Icon::Folder.view(p.muted))
                                     .child(command.cwd.display().to_string()),
@@ -603,7 +603,7 @@ impl CommandRuleEditor {
                     )
                     .child(
                         div()
-                            .text_size(px(12.))
+                            .text_size(px(typography::LABEL))
                             .text_color(rgb(p.secondary))
                             .child("Allow は確認を省略し、Deny は常に拒否、Ask はコマンドルールと同じ承認確認に戻します。既定はツールごとの安全な初期値です。"),
                     )
@@ -625,7 +625,7 @@ impl CommandRuleEditor {
                                 div()
                                     .flex_1()
                                     .min_w_0()
-                                    .text_size(px(12.))
+                                    .text_size(px(typography::LABEL))
                                     .text_color(rgb(p.secondary))
                                     .truncate()
                                     .child(format!("{default} · {}", tool_description(name))),
@@ -689,7 +689,7 @@ impl CommandRuleEditor {
                     .child(self.mode_picker.clone())
                     .child(
                         div()
-                            .text_size(px(12.))
+                            .text_size(px(typography::LABEL))
                             .text_color(rgb(p.secondary))
                             .child(description),
                     )
@@ -701,7 +701,7 @@ impl CommandRuleEditor {
                     .child(self.auto_model.clone())
                     .child(
                         div()
-                            .text_size(px(11.))
+                            .text_size(px(typography::CAPTION))
                             .text_color(rgb(p.muted))
                             .child(format!(
                                 "ChatGPT ログインで利用できるモデル名 · 制限時間 {} 秒",
@@ -725,7 +725,7 @@ impl CommandRuleEditor {
             .when_some(self.store.as_ref().ok(), |v, store| {
                 v.child(
                     div()
-                        .text_size(px(11.))
+                        .text_size(px(typography::CAPTION))
                         .text_color(rgb(p.muted))
                         .child(format!("設定ファイル: {}", store.path().display())),
                 )

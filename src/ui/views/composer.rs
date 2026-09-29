@@ -15,14 +15,6 @@ impl Workspace {
         let focused = composer.focus_handle(cx).is_focused(window);
         // User メッセージがあれば「↑で直前の依頼」ヒントを出す。
         let can_recall = super::chat::last_user_prompt(session.model.chat()).is_some();
-        // Subscription の初回ログインだけ促す。実行中・順番待ち・別 backend では出さない。
-        let login = session.selected_backend == 0
-            && !active
-            && !queued
-            && session
-                .backend
-                .as_ref()
-                .is_none_or(|backend| *backend == Backend::Subscription);
         // 高さの半分の角丸で正方形のアイコンボタンを真円にする。
         let round = px(ControlSize::Medium.height() / 2.);
         div()
@@ -39,36 +31,17 @@ impl Workspace {
                     .flex_col()
                     .gap(px(space::SM))
                     // 状態チップは必要なときだけカードの上に出す。
-                    .when(login || queued, |v| {
-                        v.child(
-                            div().flex().items_center().justify_between().gap_2().child(
-                                div()
-                                    .flex()
-                                    .items_center()
-                                    .gap_2()
-                                    .when(login, |v| {
-                                        v.child(
-                                            Button::new("chatgpt-login", "ChatGPT にログイン")
-                                                .with_icon(Icon::LogIn)
-                                                .control_size(ControlSize::Small)
-                                                .on_click(cx.listener(|this, _, _, cx| {
-                                                    this.start_login(cx);
-                                                    this.show_tab(Tab::Overview, cx);
-                                                })),
-                                        )
-                                    })
-                                    .when(queued, |v| {
-                                        v.child(ds::indicator(
-                                            "composer-queued",
-                                            Icon::Clock,
-                                            "順番待ち",
-                                            "順番待ち · 依頼を保存済み",
-                                            Tone::Accent,
-                                            cx,
-                                        ))
-                                    }),
-                            ),
-                        )
+                    .when(queued, |v| {
+                        v.child(div().flex().items_center().justify_between().gap_2().child(
+                            div().flex().items_center().gap_2().child(ds::indicator(
+                                "composer-queued",
+                                Icon::Clock,
+                                "順番待ち",
+                                "順番待ち · 依頼を保存済み",
+                                Tone::Accent,
+                                cx,
+                            )),
+                        ))
                     })
                     .child(
                         div()
@@ -105,7 +78,7 @@ impl Workspace {
                             } else {
                                 Hsla::from(glass(p.control_border, 0.7))
                             })
-                            .bg(glass(p.surface, ds::GLASS_SURFACE))
+                            .bg(glass(p.elevated, ds::GLASS_SURFACE))
                             .child(
                                 div()
                                     .px(px(space::LG))
@@ -117,7 +90,7 @@ impl Workspace {
                                     .flex()
                                     .items_center()
                                     .px(px(space::MD))
-                                    .pb(px(space::SM))
+                                    .pb(px(space::MD))
                                     .gap_2()
                                     .child(session.agent_avatar(cx))
                                     .child(div().w(px(200.)).child(self.scenario_picker.clone()))

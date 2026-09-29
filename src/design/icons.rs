@@ -51,9 +51,10 @@ pub enum Icon {
     Pin,
     Pencil,
     OpenAi,
+    Wrench,
 }
 impl Icon {
-    pub const ALL: [Self; 45] = [
+    pub const ALL: [Self; 46] = [
         Self::Plus,
         Self::Check,
         Self::Minus,
@@ -99,6 +100,7 @@ impl Icon {
         Self::Pin,
         Self::Pencil,
         Self::OpenAi,
+        Self::Wrench,
     ];
     pub fn name(self) -> &'static str {
         match self {
@@ -147,6 +149,7 @@ impl Icon {
             Self::Pin => "pin",
             Self::Pencil => "pencil",
             Self::OpenAi => "openai",
+            Self::Wrench => "wrench",
         }
     }
     pub fn kit(self) -> gpui_kit::component::Icon {
@@ -197,6 +200,7 @@ impl Icon {
             Self::Pin => N::Pin,
             Self::Pencil => N::Pencil,
             Self::OpenAi => return gpui_kit::component::Icon::default().path(OPENAI_PATH),
+            Self::Wrench => N::Wrench,
         };
         gpui_kit::component::Icon::new(name)
     }

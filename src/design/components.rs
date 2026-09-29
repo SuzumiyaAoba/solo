@@ -1,10 +1,15 @@
-use super::{ControlSize, Icon, Tone, glass, radius, theme};
-use gpui_kit::component::{self as kit, Disableable, Selectable, Sizable, button::ButtonVariants};
+use super::{ControlSize, Icon, Tone, glass, radius, theme, typography};
+use gpui_kit::component::{
+    self as kit, Disableable, Selectable, Sizable,
+    button::ButtonVariants,
+    menu::{DropdownMenu, PopupMenu},
+};
 use gpui_kit::{prelude::*, *};
 use std::rc::Rc;
 
 pub type ClickHandler = Rc<dyn Fn(&ClickEvent, &mut Window, &mut App)>;
 type ChangeHandler = Rc<dyn Fn(&bool, &mut Window, &mut App)>;
+type MenuBuilder = Rc<dyn Fn(PopupMenu, &mut Window, &mut Context<PopupMenu>) -> PopupMenu>;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum ButtonVariant {
@@ -39,6 +44,7 @@ pub struct Button {
     tooltip: Option<SharedString>,
     preview: PreviewState,
     on_click: Option<ClickHandler>,
+    menu: Option<(Anchor, MenuBuilder)>,
     style: StyleRefinement,
 }
 impl Button {
@@ -58,6 +64,7 @@ impl Button {
             tooltip: None,
             preview: PreviewState::Rest,
             on_click: None,
+            menu: None,
             style: StyleRefinement::default(),
         }
     }
@@ -110,6 +117,22 @@ impl Button {
     /// Gallery の静的な状態見本。通常の操作状態は Kit が管理する。
     pub fn preview(mut self, state: PreviewState) -> Self {
         self.preview = state;
+        self
+    }
+    /// Kit の DropdownMenu をトリガーに付ける。メニューは開くたびに作り直される。
+    pub fn dropdown_menu(
+        self,
+        build: impl Fn(PopupMenu, &mut Window, &mut Context<PopupMenu>) -> PopupMenu + 'static,
+    ) -> Self {
+        self.dropdown_menu_with_anchor(Anchor::TopLeft, build)
+    }
+    /// メニューのアンカー角を指定する版。ヘッダー右端のトリガーは TopRight で揃える。
+    pub fn dropdown_menu_with_anchor(
+        mut self,
+        anchor: impl Into<Anchor>,
+        build: impl Fn(PopupMenu, &mut Window, &mut Context<PopupMenu>) -> PopupMenu + 'static,
+    ) -> Self {
+        self.menu = Some((anchor.into(), Rc::new(build)));
         self
     }
     pub fn on_click(
@@ -166,7 +189,12 @@ impl RenderOnce for Button {
                 b.on_click(move |e, w, cx| handler(e, w, cx))
             });
         button.style().refine(&self.style);
-        button
+        match self.menu {
+            Some((anchor, build)) => button
+                .dropdown_menu_with_anchor(anchor, move |menu, window, cx| build(menu, window, cx))
+                .into_any_element(),
+            None => button.into_any_element(),
+        }
     }
 }
 
@@ -277,7 +305,7 @@ pub fn indicator(
         .flex()
         .items_center()
         .gap_1()
-        .text_size(px(12.))
+        .text_size(px(typography::LABEL))
         .text_color(rgb(fg))
         .aria_label(label.clone())
         .child(icon.view(fg).size(px(14.)))
@@ -338,7 +366,9 @@ pub fn progress(value: f32, tone: Tone, cx: &App) -> kit::progress::Progress {
         .w_full()
 }
 pub fn skeleton(width: f32, _: &App) -> kit::skeleton::Skeleton {
-    kit::skeleton::Skeleton::new().w(px(width)).h(px(10.))
+    kit::skeleton::Skeleton::new()
+        .w(px(width))
+        .h(px(typography::LABEL))
 }
 pub fn empty_state(
     icon: Icon,

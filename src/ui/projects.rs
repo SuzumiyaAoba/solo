@@ -412,6 +412,7 @@ impl ProjectManager {
         let p = ds::theme(cx);
         div()
             .size_full()
+            .bg(ds::glass(p.surface, ds::GLASS_STRONG))
             .flex()
             .flex_col()
             .child(
@@ -518,23 +519,36 @@ impl Render for ProjectManager {
                     .flex()
                     .child(self.activity_bar(cx))
                     .child(
-                        h_resizable("project-channel-layout")
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .ml(px(space::SM))
+                            .mr(px(space::SM))
+                            .mt(px(space::SM))
+                            .mb(px(space::SM))
+                            .rounded(px(ds::radius::DIALOG))
+                            .overflow_hidden()
+                            .bg(ds::glass(p.sidebar, ds::GLASS_STRONG))
                             .child(
-                                resizable_panel()
-                                    .size(px(244.))
-                                    .size_range(px(210.)..px(330.))
-                                    .child(self.navigation(window, cx)),
-                            )
-                            .child(
-                                resizable_panel().size_range(px(480.)..px(5000.)).child(
-                                    div()
-                                        .relative()
-                                        .size_full()
-                                        .when_some(view.clone(), |v, view| v.child(view))
-                                        .when(view.is_none(), |v| {
-                                            v.child(self.no_project_view(cx))
-                                        }),
-                                ),
+                                h_resizable("project-channel-layout")
+                                    .with_handle_appearance(ds::split_handle(cx))
+                                    .child(
+                                        resizable_panel()
+                                            .size(px(244.))
+                                            .size_range(px(210.)..px(330.))
+                                            .child(self.navigation(window, cx)),
+                                    )
+                                    .child(
+                                        resizable_panel().size_range(px(480.)..px(5000.)).child(
+                                            div()
+                                                .relative()
+                                                .size_full()
+                                                .when_some(view.clone(), |v, view| v.child(view))
+                                                .when(view.is_none(), |v| {
+                                                    v.child(self.no_project_view(cx))
+                                                }),
+                                        ),
+                                    ),
                             ),
                     ),
             )
@@ -548,7 +562,7 @@ impl Render for ProjectManager {
                         .items_center()
                         .gap_2()
                         .child(Icon::Warning.view(p.warning))
-                        .child(div().flex_1().text_size(px(12.)).child(error))
+                        .child(div().flex_1().text_size(px(typography::LABEL)).child(error))
                         .child(
                             Button::icon(
                                 "reload-project-error",

@@ -5,18 +5,18 @@ impl Gallery {
         let p = theme(cx);
         stack()
             .child(row().gap_2().child(badge("GPUI Kit 0.6.6", Tone::Neutral, cx)).child(badge("Light & Dark", Tone::Neutral, cx)).child(badge("Keyboard ready", Tone::Neutral, cx)))
-            .child(div().flex().gap_5()
-                .child(card(cx).flex_1().min_w_0().p_6().gap_5()
+            .child(div().flex().gap_6()
+                .child(card(cx).flex_1().min_w_0().p_6().gap_4()
                     .child(div().flex().items_center().justify_between().child(label("COMPONENT COMPOSITION", cx)).child(Icon::Layers.view(p.muted)))
-                    .child(div().flex().flex_col().gap_2().child(div().text_size(px(20.)).font_weight(FontWeight::SEMIBOLD).child("次のアイデアを、ここから。"))
-                        .child(div().text_size(px(12.)).line_height(px(21.)).text_color(rgb(p.secondary)).child("部品を組み合わせた、小さなワークスペース。\n入力や操作を試して、使い心地を確かめてください。")))
+                    .child(div().flex().flex_col().gap_2().child(div().text_size(px(typography::HEADING)).font_weight(FontWeight::SEMIBOLD).child("次のアイデアを、ここから。"))
+                        .child(div().text_size(px(typography::LABEL)).line_height(px(18.)).text_color(rgb(p.secondary)).child("部品を組み合わせた、小さなワークスペース。\n入力や操作を試して、使い心地を確かめてください。")))
                     .child(field("Workspace name", self.fields[0].clone(), "日本語・絵文字もそのまま入力できます。", cx))
                     .child(divider(cx))
                     .child(div().flex().items_center().justify_between().gap_3()
                         .child(Toggle::switch("overview-auto-save", "自動保存", self.switch_on).on_change(cx.listener(|this, value: &bool, _, cx| { this.switch_on = *value; cx.notify(); })))
                         .child(Button::new("overview-create", "変更を保存").variant(ButtonVariant::Primary).with_icon(Icon::Check).loading(self.loading)
                             .on_click(cx.listener(|this, _, _, cx| this.start_loading(cx))))))
-                .child(card(cx).w(px(280.)).flex_shrink_0().p_5().gap_5()
+                .child(card(cx).w(px(280.)).flex_shrink_0().p_6().gap_4()
                     .child(div().flex().items_center().justify_between().child(div().font_weight(FontWeight::MEDIUM).child("Activity")).child(badge("3 updates", Tone::Neutral, cx)))
                     .children([
                         ("S", "コンポーネントを整える", "Foundations · Just now", Tone::Accent),
@@ -24,7 +24,7 @@ impl Gallery {
                         ("U", "入力の使い心地を磨く", "Interaction · 5 min ago", Tone::Neutral),
                     ].into_iter().map(|(initial, title, detail, tone)| {
                         div().flex().gap_3().child(avatar(initial, tone, cx))
-                            .child(div().flex().flex_col().gap_1().child(div().text_size(px(12.)).child(title)).child(label(detail, cx)))
+                            .child(div().flex().flex_col().gap_1().child(div().text_size(px(typography::LABEL)).child(title)).child(label(detail, cx)))
                     }))
                     .child(divider(cx))
                     .child(div().flex().flex_col().gap_2().child(div().flex().justify_between().child(label("Design coverage", cx)).child(label("8 categories", cx))).child(progress(1., Tone::Accent, cx)))
@@ -86,13 +86,13 @@ impl Gallery {
                                         .items_center()
                                         .justify_between()
                                         .gap_2()
-                                        .child(div().text_size(px(12.)).child(name))
+                                        .child(div().text_size(px(typography::LABEL)).child(name))
                                         .child(
                                             Button::new(("copy-color", i), hex.clone())
                                                 .control_size(ControlSize::Small)
                                                 .variant(ButtonVariant::Ghost)
                                                 .font_family(typography::MONO)
-                                                .text_size(px(10.))
+                                                .text_size(px(typography::CAPTION))
                                                 .on_click(cx.listener(move |this, _, _, cx| {
                                                     cx.write_to_clipboard(
                                                         ClipboardItem::new_string(hex.clone()),
@@ -137,7 +137,7 @@ impl Gallery {
                     cx,
                 )
                 .child(
-                    card(cx).p_5().gap_5().children(
+                    card(cx).p_6().gap_4().children(
                         [
                             (
                                 "Title",
@@ -169,12 +169,12 @@ impl Gallery {
                             div()
                                 .flex()
                                 .items_center()
-                                .gap_5()
+                                .gap_4()
                                 .child(
                                     div()
                                         .w(px(100.))
                                         .flex_shrink_0()
-                                        .text_size(px(11.))
+                                        .text_size(px(typography::CAPTION))
                                         .text_color(rgb(p.muted))
                                         .child(format!("{name} / {size:.0}")),
                                 )
@@ -191,12 +191,12 @@ impl Gallery {
                 )
                 .child(
                     card(cx)
-                        .p_5()
-                        .gap_5()
+                        .p_6()
+                        .gap_4()
                         .child(
                             row()
                                 .items_end()
-                                .gap_5()
+                                .gap_6()
                                 .children(space::SCALE.into_iter().map(|n| {
                                     div()
                                         .flex()
@@ -215,7 +215,7 @@ impl Gallery {
                         )
                         .child(divider(cx))
                         .child(
-                            row().gap_5().children(
+                            row().gap_6().children(
                                 [radius::SMALL, radius::CONTROL, radius::CARD, radius::DIALOG]
                                     .into_iter()
                                     .map(|r| {
@@ -281,7 +281,7 @@ impl Gallery {
                         .child(Button::new(("button-size", i), "セッションを作成").control_size(size).with_icon(Icon::Plus).on_click(cx.listener(|this, _, _, cx| this.record_click(cx))))
                 })))))
             .child(section("Interaction states", "hover・押下・focus の比較用表示です。実際のマウスとキーボードでも同じ状態になります。", cx)
-                .child(card(cx).p_5().child(row().gap_5().items_end().children([
+                .child(card(cx).p_6().child(row().gap_6().items_end().children([
                     ("Default", PreviewState::Rest), ("Hover", PreviewState::Hover), ("Pressed", PreviewState::Pressed), ("Focus", PreviewState::Focus),
                 ].into_iter().enumerate().map(|(i, (name, state))| {
                     div().flex().flex_col().gap_3().child(label(name, cx)).child(Button::new(("state", i), "ボタン").preview(state).on_click(cx.listener(|this, _, _, cx| this.record_click(cx))))
@@ -311,8 +311,8 @@ impl Gallery {
                 )
                 .child(
                     card(cx)
-                        .p_5()
-                        .gap_5()
+                        .p_6()
+                        .gap_4()
                         .child(
                             row()
                                 .items_start()
@@ -366,7 +366,7 @@ impl Gallery {
                     cx,
                 )
                 .child(
-                    card(cx).p_5().gap_4().child(
+                    card(cx).p_6().gap_4().child(
                         row()
                             .items_start()
                             .child(field(
@@ -391,7 +391,7 @@ impl Gallery {
                     cx,
                 )
                 .child(
-                    card(cx).p_5().gap_3().child(self.composer.clone()).child(
+                    card(cx).p_6().gap_3().child(self.composer.clone()).child(
                         row()
                             .justify_between()
                             .child(label(format!("送信済み {} 件", self.submissions.len()), cx))
@@ -426,7 +426,7 @@ impl Gallery {
                 .child(
                     div()
                         .flex()
-                        .gap_5()
+                        .gap_6()
                         .child(
                             example("Checkbox", cx)
                                 .flex_1()
@@ -500,7 +500,7 @@ impl Gallery {
                     cx,
                 )
                 .child(
-                    card(cx).p_5().gap_3().child(
+                    card(cx).p_6().gap_3().child(
                         row()
                             .items_start()
                             .child(
@@ -540,8 +540,8 @@ impl Gallery {
                 )
                 .child(
                     card(cx)
-                        .p_5()
-                        .gap_5()
+                        .p_6()
+                        .gap_4()
                         .child(
                             TabBar::new("gallery-tabs")
                                 .segmented()
@@ -583,7 +583,7 @@ impl Gallery {
                     cx,
                 )
                 .child(
-                    card(cx).p_5().child(
+                    card(cx).p_6().child(
                         div()
                             .flex()
                             .gap_6()
@@ -709,7 +709,7 @@ impl Gallery {
                 .child(
                     div()
                         .flex()
-                        .gap_5()
+                        .gap_6()
                         .child(
                             example("Determinate progress", cx)
                                 .flex_1()

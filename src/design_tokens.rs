@@ -38,13 +38,13 @@ pub struct Palette {
 
 pub const DARK: Palette = Palette {
     canvas: 0x151517,
-    sidebar: 0x111113,
-    surface: 0x1b1b1e,
-    elevated: 0x232326,
-    hover: 0x2a2a2e,
-    pressed: 0x35353a,
-    border: 0x303035,
-    control_border: 0x70707a,
+    sidebar: 0x0d0d10,
+    surface: 0x1f1f24,
+    elevated: 0x29292f,
+    hover: 0x323238,
+    pressed: 0x3f3f47,
+    border: 0x3b3b44,
+    control_border: 0x787880,
     text: 0xededf0,
     secondary: 0xb0b0b9,
     muted: 0x95959f,
@@ -65,17 +65,17 @@ pub const DARK: Palette = Palette {
     danger_solid: 0xb9344b,
 };
 pub const LIGHT: Palette = Palette {
-    canvas: 0xffffff,
-    sidebar: 0xf7f7f8,
-    surface: 0xfafafb,
+    canvas: 0xececef,
+    sidebar: 0xdfdfe5,
+    surface: 0xffffff,
     elevated: 0xffffff,
-    hover: 0xefeff2,
-    pressed: 0xe5e5ea,
-    border: 0xe4e4e8,
+    hover: 0xe5e5ea,
+    pressed: 0xd8d8df,
+    border: 0xd6d6dd,
     control_border: 0x85858f,
     text: 0x242428,
     secondary: 0x5b5b65,
-    muted: 0x6b6b76,
+    muted: 0x666672,
     disabled: 0xa0a0a9,
     accent: 0x6259ce,
     accent_hover: 0x554bbf,
@@ -137,9 +137,9 @@ impl ControlSize {
     }
     pub const fn font_size(self) -> f32 {
         match self {
-            Self::Small => 12.,
-            Self::Medium => 13.,
-            Self::Large => 14.,
+            Self::Small => typography::LABEL,
+            Self::Medium => typography::BODY,
+            Self::Large => typography::LEAD,
         }
     }
 }

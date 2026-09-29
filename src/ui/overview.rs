@@ -1,5 +1,6 @@
 use super::views::{caption, status_icon};
 use super::*;
+use gpui_kit::component::{WindowExt, dialog::DialogButtonProps};
 
 impl Workspace {
     pub(super) fn overview(&self, cx: &mut Context<Self>) -> AnyElement {
@@ -49,7 +50,7 @@ impl Workspace {
                             .gap_2()
                             .child(
                                 div()
-                                    .text_size(px(22.))
+                                    .text_size(px(typography::HEADING))
                                     .font_weight(FontWeight::SEMIBOLD)
                                     .child(s.model.title().to_owned()),
                             )
@@ -58,7 +59,7 @@ impl Workspace {
                     .when_some(s.approval_note.clone(), |v, note| {
                         v.child(
                             div()
-                                .text_size(px(12.))
+                                .text_size(px(typography::LABEL))
                                 .text_color(rgb(p.secondary))
                                 .child(note),
                         )
@@ -78,8 +79,7 @@ impl Workspace {
     /// ChatGPT デバイスログインの案内カード。コード表示と認証ページへの導線。
     fn login_card(&self, login: &DeviceLogin, cx: &mut Context<Self>) -> Div {
         let p = ds::theme(cx);
-        let url = login.verification_url.clone();
-        let code = login.user_code.clone();
+        let weak = cx.weak_entity();
         ds::card(cx)
             .p_4()
             .gap_3()
@@ -93,32 +93,158 @@ impl Workspace {
                     .child("ChatGPT")
                     .child(ds::badge("ログイン待ち", Tone::Warning, cx)),
             )
+            .child(self.login_actions("overview-login", login, weak))
+    }
+
+    /// デバイスコードとコピー・認証ページへの導線。概要カードとログインモーダルで共有する。
+    /// ボタンのハンドラはモーダル側が &App しか持てないため weak 経由で更新する。
+    fn login_actions(
+        &self,
+        scope: &'static str,
+        login: &DeviceLogin,
+        weak: WeakEntity<Self>,
+    ) -> Div {
+        let url = login.verification_url.clone();
+        let code = login.user_code.clone();
+        div()
+            .flex()
+            .items_center()
+            .gap_2()
+            .child(
+                div()
+                    .flex_1()
+                    .font_family(typography::MONO)
+                    .text_size(px(typography::HEADING))
+                    .child(code.clone()),
+            )
+            .child(
+                Button::icon(
+                    format!("{scope}-copy-login-code"),
+                    Icon::Copy,
+                    "認証コードをコピー",
+                )
+                .on_click(move |_, _, cx| {
+                    let _ = weak.update(cx, |this, cx| {
+                        this.copy(code.clone(), "コードをコピーしました", cx)
+                    });
+                }),
+            )
+            .child(
+                Button::icon(
+                    format!("{scope}-open-login-url"),
+                    Icon::ExternalLink,
+                    "認証ページを開く",
+                )
+                .variant(ButtonVariant::Primary)
+                .tooltip(format!("認証ページ · {url}"))
+                .on_click(move |_, _, cx| cx.open_url(&url)),
+            )
+    }
+
+    /// ツールメニューからデバイスログインを開始し、進行をモーダルに表示する。
+    pub(super) fn open_login(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.start_login(cx);
+        self.show_login_dialog(window, cx);
+    }
+
+    /// ログインモーダルの開閉。smoke が実 worker なしで呼べるよう start_login と分離する。
+    /// ダイアログは毎フレーム作り直されるので、届いたコードや結果がそのまま反映される。
+    pub(super) fn show_login_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let weak = cx.weak_entity();
+        window.open_dialog(cx, move |dialog, _, cx| {
+            let handle = weak.clone();
+            let body = weak
+                .read_with(cx, |this, cx| this.login_dialog_body(handle, cx))
+                .unwrap_or_else(|_| div().into_any_element());
+            dialog
+                .title("ChatGPT ログイン")
+                .w(px(440.))
+                .child(body)
+                .button_props(DialogButtonProps::default().ok_text("閉じる"))
+        });
+    }
+
+    /// ログインモーダルの本文。コード待ち・デバイスコード・成功・中断・失敗を状態から描く。
+    fn login_dialog_body(&self, weak: WeakEntity<Self>, cx: &App) -> AnyElement {
+        let p = ds::theme(cx);
+        let session = self.session();
+        let hint = session.exec.provider_hint.as_deref();
+        let body: AnyElement = if let Some(login) = session.login.as_ref() {
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(space::MD))
+                .child(caption(
+                    "ブラウザで認証ページが開きます。コードを入力してサインインしてください",
+                    cx,
+                ))
+                .child(self.login_actions("modal-login", login, weak))
+                .into_any_element()
+        } else if session.login_only {
+            div()
+                .flex()
+                .items_center()
+                .gap_2()
+                .child(Icon::Spinner.view(p.accent_text))
+                .child(caption("認証ページとコードを受け取っています…", cx))
+                .into_any_element()
+        } else if session.model.status() == Status::Failed {
+            div()
+                .flex()
+                .items_center()
+                .gap_2()
+                .child(Icon::Warning.view(p.danger))
+                .child(caption(
+                    format!("ログインできませんでした: {}", session.model.reason()),
+                    cx,
+                ))
+                .into_any_element()
+        } else if hint == Some("ChatGPT ログイン済み") {
+            div()
+                .flex()
+                .items_center()
+                .gap_2()
+                .child(Icon::CircleCheck.view(p.success))
+                .child(caption("ChatGPT にログインしました", cx))
+                .into_any_element()
+        } else if hint == Some("OpenAI Codex") {
+            div()
+                .flex()
+                .items_center()
+                .gap_2()
+                .child(Icon::Info.view(p.muted))
+                .child(caption("ログインは中断されました", cx))
+                .into_any_element()
+        } else {
+            div()
+                .flex()
+                .items_center()
+                .gap_2()
+                .child(Icon::Info.view(p.muted))
+                .child(caption(
+                    "実行中・順番待ち・または別の実行先を選択しているときは開始できません",
+                    cx,
+                ))
+                .into_any_element()
+        };
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(space::MD))
             .child(
                 div()
                     .flex()
                     .items_center()
                     .gap_2()
+                    .child(Icon::OpenAi.view(p.text))
                     .child(
                         div()
-                            .flex_1()
-                            .font_family(typography::MONO)
-                            .text_size(px(20.))
-                            .child(code.clone()),
-                    )
-                    .child(
-                        Button::icon("copy-login-code", Icon::Copy, "認証コードをコピー").on_click(
-                            cx.listener(move |this, _, _, cx| {
-                                this.copy(code.clone(), "コードをコピーしました", cx)
-                            }),
-                        ),
-                    )
-                    .child(
-                        Button::icon("open-login-url", Icon::ExternalLink, "認証ページを開く")
-                            .variant(ButtonVariant::Primary)
-                            .tooltip(format!("認証ページ · {url}"))
-                            .on_click(move |_, _, cx| cx.open_url(&url)),
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .child("ChatGPT サブスクリプション"),
                     ),
             )
+            .child(body)
+            .into_any_element()
     }
 
     /// 直近のツール実行を最大12件だけ新しい順で並べる。
@@ -161,8 +287,6 @@ impl Workspace {
                             div()
                                 .px_4()
                                 .py_3()
-                                .border_b_1()
-                                .border_color(rgb(p.border))
                                 .flex()
                                 .items_center()
                                 .gap_3()
@@ -177,7 +301,7 @@ impl Workspace {
                                         .child(
                                             div()
                                                 .font_family(typography::MONO)
-                                                .text_size(px(12.))
+                                                .text_size(px(typography::LABEL))
                                                 .truncate()
                                                 .child(activity.command.clone()),
                                         )
@@ -219,8 +343,6 @@ impl Workspace {
                         div()
                             .px_4()
                             .py_2()
-                            .border_b_1()
-                            .border_color(rgb(p.border))
                             .flex()
                             .items_center()
                             .gap_3()
@@ -242,18 +364,18 @@ impl Workspace {
                                     .min_w_0()
                                     .truncate()
                                     .font_family(typography::MONO)
-                                    .text_size(px(12.))
+                                    .text_size(px(typography::LABEL))
                                     .child(diff.path.clone()),
                             )
                             .child(
                                 div()
-                                    .text_size(px(12.))
+                                    .text_size(px(typography::LABEL))
                                     .text_color(rgb(p.success))
                                     .child(format!("+{added}")),
                             )
                             .child(
                                 div()
-                                    .text_size(px(12.))
+                                    .text_size(px(typography::LABEL))
                                     .text_color(rgb(p.danger))
                                     .child(format!("−{removed}")),
                             )

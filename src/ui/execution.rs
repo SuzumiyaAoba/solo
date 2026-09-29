@@ -299,16 +299,20 @@ impl Workspace {
         self.finish_start(index, cx);
     }
 
-    pub(super) fn start_login(&mut self, cx: &mut Context<Self>) {
+    /// ChatGPT ログインを開始できる状態か。ツールメニューの項目の有効化と start_login のガードで共有する。
+    pub(super) fn can_start_login(&self) -> bool {
         let session = self.session();
-        if session.display_status().is_active()
-            || self.queue.position(&session.model.id).is_some()
-            || session.selected_backend != 0
-            || session
+        !session.display_status().is_active()
+            && self.queue.position(&session.model.id).is_none()
+            && session.selected_backend == 0
+            && session
                 .backend
                 .as_ref()
-                .is_some_and(|backend| *backend != Backend::Subscription)
-        {
+                .is_none_or(|backend| *backend == Backend::Subscription)
+    }
+
+    pub(super) fn start_login(&mut self, cx: &mut Context<Self>) {
+        if !self.can_start_login() {
             return;
         }
         let (controller, receiver) = match codex_worker::start_login() {

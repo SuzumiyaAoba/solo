@@ -212,6 +212,24 @@ fn closed_acp_conversation(this: &mut Workspace, window: &mut Window, cx: &mut C
 
 fn login_lifecycle(this: &mut Workspace, window: &mut Window, cx: &mut Context<Workspace>) {
     this.new_session(window, cx);
+    // ツールメニュー経由のログインモーダル。実 worker は起こさず、開始条件と開閉だけ確認する。
+    assert!(this.can_start_login());
+    this.show_login_dialog(window, cx);
+    assert!(window.has_active_dialog(cx));
+    window.close_dialog(cx);
+    assert!(!window.has_active_dialog(cx));
+    {
+        let session = this.session_mut();
+        session.exec.connecting = true;
+        session.login_only = true;
+    }
+    assert!(!this.can_start_login(), "実行中はログインを開始できない");
+    {
+        let session = this.session_mut();
+        session.exec.connecting = false;
+        session.login_only = false;
+    }
+    assert!(this.can_start_login());
     for (delivery, expected) in [
         (SubscriptionDelivery::Authenticated, Status::Idle),
         (SubscriptionDelivery::LoginCancelled, Status::Idle),

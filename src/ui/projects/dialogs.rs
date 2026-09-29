@@ -138,7 +138,7 @@ impl ProjectManager {
                 )
                 .child(
                     div()
-                        .text_size(px(12.))
+                        .text_size(px(typography::LABEL))
                         .text_color(rgb(p.muted))
                         .child(project.path.display().to_string()),
                 )

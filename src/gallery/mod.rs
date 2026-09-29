@@ -513,7 +513,7 @@ impl Render for Gallery {
                                     .flex()
                                     .items_center()
                                     .gap_2()
-                                    .text_size(px(12.))
+                                    .text_size(px(typography::LABEL))
                                     .text_color(rgb(p.muted))
                                     .child("Design system")
                                     .child(Icon::ChevronRight.view(p.disabled).size(px(12.)))
@@ -554,12 +554,12 @@ impl Render for Gallery {
                                     .w_full()
                                     .max_w(px(1120.))
                                     .mx_auto()
-                                    .px(px(40.))
-                                    .pt(px(36.))
-                                    .pb(px(48.))
+                                    .px(px(space::SECTION))
+                                    .pt(px(space::XXL))
+                                    .pb(px(space::SECTION))
                                     .flex()
                                     .flex_col()
-                                    .gap(px(28.))
+                                    .gap(px(space::XXL))
                                     .child(
                                         div()
                                             .flex()
@@ -567,7 +567,7 @@ impl Render for Gallery {
                                             .gap_2()
                                             .child(
                                                 div()
-                                                    .text_size(px(11.))
+                                                    .text_size(px(typography::CAPTION))
                                                     .text_color(rgb(p.accent_text))
                                                     .font_weight(FontWeight::MEDIUM)
                                                     .child(if self.page == Page::Overview {
@@ -584,7 +584,7 @@ impl Render for Gallery {
                                                     .gap_4()
                                                     .child(
                                                         div()
-                                                            .text_size(px(30.))
+                                                            .text_size(px(typography::TITLE))
                                                             .font_weight(FontWeight::SEMIBOLD)
                                                             .child(
                                                                 if self.page == Page::Overview {
@@ -600,8 +600,8 @@ impl Render for Gallery {
                                             )
                                             .child(
                                                 div()
-                                                    .text_size(px(13.))
-                                                    .line_height(px(22.))
+                                                    .text_size(px(typography::BODY))
+                                                    .line_height(px(20.))
                                                     .text_color(rgb(p.secondary))
                                                     .child(self.page.description()),
                                             ),
@@ -619,7 +619,7 @@ impl Render for Gallery {
                             .justify_between()
                             .border_t_1()
                             .border_color(rgb(p.border))
-                            .text_size(px(10.))
+                            .text_size(px(typography::CAPTION))
                             .text_color(rgb(p.muted))
                             .child("Tab で移動   ·   Enter / Space で操作   ·   Esc で閉じる")
                             .child(format!("{} theme  ·  GPUI Kit", ds::scheme(cx).label())),
@@ -635,27 +635,27 @@ impl Render for Gallery {
 }
 
 fn stack() -> Div {
-    div().w_full().flex().flex_col().gap(px(24.))
+    div().w_full().flex().flex_col().gap(px(space::XL))
 }
 fn row() -> Div {
-    div().flex().flex_wrap().items_center().gap(px(12.))
+    div().flex().flex_wrap().items_center().gap(px(space::MD))
 }
 fn section(title: &'static str, description: &'static str, cx: &App) -> Div {
     let p = theme(cx);
-    div().flex().flex_col().gap(px(16.)).child(
+    div().flex().flex_col().gap(px(space::LG)).child(
         div()
             .flex()
             .flex_col()
             .gap_1()
             .child(
                 div()
-                    .text_size(px(14.))
+                    .text_size(px(typography::LEAD))
                     .font_weight(FontWeight::SEMIBOLD)
                     .child(title),
             )
             .child(
                 div()
-                    .text_size(px(12.))
+                    .text_size(px(typography::LABEL))
                     .text_color(rgb(p.muted))
                     .child(description),
             ),
@@ -663,14 +663,14 @@ fn section(title: &'static str, description: &'static str, cx: &App) -> Div {
 }
 fn label(text: impl Into<SharedString>, cx: &App) -> Div {
     div()
-        .text_size(px(11.))
+        .text_size(px(typography::CAPTION))
         .text_color(rgb(theme(cx).muted))
         .child(text.into())
 }
 fn example(title: &'static str, cx: &App) -> Div {
-    card(cx).p_5().gap_4().child(
+    card(cx).p_6().gap_4().child(
         div()
-            .text_size(px(12.))
+            .text_size(px(typography::LABEL))
             .font_weight(FontWeight::MEDIUM)
             .text_color(rgb(theme(cx).secondary))
             .child(title),
@@ -685,7 +685,7 @@ fn field(label_text: &'static str, input: Entity<TextInput>, hint: &'static str,
         .gap_2()
         .child(
             div()
-                .text_size(px(12.))
+                .text_size(px(typography::LABEL))
                 .font_weight(FontWeight::MEDIUM)
                 .child(label_text),
         )

@@ -330,7 +330,8 @@ impl Workspace {
             )
             .chain(SCENARIOS.iter().map(|scenario| scenario.label().to_owned()))
             .collect::<Vec<_>>();
-        let scenario_picker = cx.new(|cx| Select::new(choices, 0, window, cx));
+        // コンポーザー内の実行先ピッカーは枠・背景を持たないテキストボタンにする。
+        let scenario_picker = cx.new(|cx| Select::new(choices, 0, window, cx).appearance(false));
         let picker_subscription = cx.subscribe(
             &scenario_picker,
             |this, _, selected: &solo::design::SelectionChanged, cx| {

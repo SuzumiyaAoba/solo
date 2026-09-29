@@ -132,7 +132,13 @@ fn assistant_markdown(
     let mut style = TextViewStyle::default()
         // 本文の 22px 行間より狭い段落間隔にし、連続する見出し・段落を詰める。
         .paragraph_gap(rems(0.5))
-        .heading_font_size(|level, _| px((19. - f32::from(level.min(6))).max(13.)))
+        .heading_font_size(|level, _| {
+            px(if level <= 2 {
+                typography::HEADING
+            } else {
+                typography::LEAD
+            })
+        })
         .code_block(code_block)
         .inline_code(HighlightStyle {
             background_color: Some(ds::glass(p.hover, ds::GLASS_HOVER).into()),
@@ -178,10 +184,10 @@ impl Workspace {
         if session.model.chat().is_empty() {
             let p = ds::theme(cx);
             return div().size_full().flex().flex_col().justify_end().p(px(space::XL)).gap_4()
-                .child(div().size(px(52.)).rounded(px(12.)).bg(rgb(p.accent_soft)).text_color(rgb(p.accent_text))
-                    .flex().items_center().justify_center().text_size(px(32.)).child("#"))
-                .child(div().text_size(px(24.)).font_weight(FontWeight::SEMIBOLD).child("ここから、作業をはじめましょう"))
-                .child(div().text_color(rgb(p.secondary)).line_height(px(22.)).child(format!("{} の新しいセッションです。依頼と返答はこのチャンネルに、ツールやサブエージェントの実行はスレッドにまとまります。", self.workspace_name)))
+                .child(div().size(px(52.)).rounded(px(ds::radius::DIALOG)).bg(rgb(p.accent_soft)).text_color(rgb(p.accent_text))
+                    .flex().items_center().justify_center().text_size(px(typography::TITLE)).child("#"))
+                .child(div().text_size(px(typography::HEADING)).font_weight(FontWeight::SEMIBOLD).child("ここから、作業をはじめましょう"))
+                .child(div().text_color(rgb(p.secondary)).line_height(px(20.)).child(format!("{} の新しいセッションです。依頼と返答はこのチャンネルに、ツールやサブエージェントの実行はスレッドにまとまります。", self.workspace_name)))
                 .child(div().flex().flex_wrap().gap_2().children([
                     ("調査する", "このプロジェクトの構成と、改善できる点を調べてください。"),
                     ("変更をレビュー", "現在の変更をレビューして、問題点を説明してください。"),
@@ -293,7 +299,7 @@ impl Workspace {
                 };
                 let body = if block.speaker == Speaker::Notice {
                     div()
-                        .pl(px(44.))
+                        .pl(px(space::SECTION))
                         .flex()
                         .items_center()
                         .gap_2()
@@ -304,7 +310,7 @@ impl Workspace {
                 } else {
                     let content = MessageContent::new()
                         .w_full()
-                        .text_size(px(14.))
+                        .text_size(px(typography::LEAD))
                         .font_weight(FontWeight::NORMAL)
                         .line_height(px(22.))
                         .text_color(rgb(p.text));
@@ -401,7 +407,7 @@ impl Workspace {
                                     MessageHeader::new()
                                         .content_inset(false)
                                         .w_full()
-                                        .text_size(px(13.))
+                                        .text_size(px(typography::BODY))
                                         .text_color(rgb(p.text))
                                         .justify_between()
                                         .child(
@@ -446,7 +452,7 @@ impl Workspace {
                                 let id = thread.id;
                                 let count = thread.activity_count();
                                 v.child(
-                                    div().pl(px(44.)).pt_2().child(
+                                    div().pl(px(space::SECTION)).pt_2().child(
                                         Button::new(
                                             ("message-thread", row),
                                             if count == 0 {

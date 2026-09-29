@@ -43,8 +43,6 @@ impl Workspace {
             .h(px(52.))
             .flex_shrink_0()
             .px_4()
-            .border_b_1()
-            .border_color(rgb(p.border))
             .flex()
             .items_center()
             .justify_between()
@@ -72,7 +70,7 @@ impl Workspace {
         let root = div()
             .size_full()
             .min_w_0()
-            .bg(ds::glass(p.surface, ds::GLASS_SURFACE))
+            .bg(ds::glass(p.sidebar, ds::GLASS_SIDEBAR))
             .flex()
             .flex_col()
             .child(header);
@@ -99,8 +97,6 @@ impl Workspace {
             div()
                 .flex_shrink_0()
                 .p_4()
-                .border_b_1()
-                .border_color(rgb(p.border))
                 .flex()
                 .flex_col()
                 .gap_2()
@@ -123,7 +119,7 @@ impl Workspace {
                         .id("thread-prompt")
                         .max_h(px(96.))
                         .overflow_y_scroll()
-                        .text_size(px(13.))
+                        .text_size(px(typography::BODY))
                         .child(thread.prompt.clone()),
                 )
                 .child(caption(thread_meta(thread), cx)),
@@ -177,29 +173,17 @@ impl Workspace {
                         .map(|activity| self.activity_row(thread, activity, cx)),
                 )
                 .when(!thread.reason.is_empty(), |v| {
-                    v.child(
-                        div()
-                            .pt_3()
-                            .border_t_1()
-                            .border_color(rgb(p.border))
-                            .child(caption(thread.reason.clone(), cx)),
-                    )
+                    v.child(div().pt_3().child(caption(thread.reason.clone(), cx)))
                 }),
         )
         .child(
-            div()
-                .flex_shrink_0()
-                .border_t_1()
-                .border_color(rgb(p.border))
-                .px_4()
-                .py_2()
-                .child(
-                    Button::new("thread-logs", "チャンネルのログを開く")
-                        .with_icon(Icon::Terminal)
-                        .variant(ButtonVariant::Ghost)
-                        .control_size(ControlSize::Small)
-                        .on_click(cx.listener(|this, _, _, cx| this.show_tab(Tab::Logs, cx))),
-                ),
+            div().flex_shrink_0().px_4().py_2().child(
+                Button::new("thread-logs", "チャンネルのログを開く")
+                    .with_icon(Icon::Terminal)
+                    .variant(ButtonVariant::Ghost)
+                    .control_size(ControlSize::Small)
+                    .on_click(cx.listener(|this, _, _, cx| this.show_tab(Tab::Logs, cx))),
+            ),
         )
         .into_any_element()
     }
@@ -317,13 +301,13 @@ impl Workspace {
                         .gap_2()
                         .child(
                             div()
-                                .text_size(px(12.))
+                                .text_size(px(typography::LABEL))
                                 .font_family(typography::MONO)
                                 .child(activity.title.clone()),
                         )
                         .child(
                             div()
-                                .text_size(px(12.))
+                                .text_size(px(typography::LABEL))
                                 .text_color(rgb(p.secondary))
                                 .child(activity.detail.clone()),
                         )
@@ -378,7 +362,7 @@ impl Workspace {
                         div()
                             .id(SharedString::from(format!("{key}-file-{index}")))
                             .px_2()
-                            .py(px(1.))
+                            .py_1()
                             .rounded(px(ds::radius::CONTROL))
                             .bg(ds::glass(p.accent_soft, 0.6))
                             .text_color(rgb(p.accent_text))

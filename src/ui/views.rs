@@ -8,7 +8,9 @@ mod thread;
 
 use super::*;
 use gpui_kit::component::{
-    Sizable, h_resizable, resizable_panel,
+    Sizable, h_resizable,
+    menu::PopupMenuItem,
+    resizable_panel,
     status_bar::StatusBar,
     tab::{Tab as KitTab, TabBar},
 };
@@ -47,8 +49,6 @@ impl Workspace {
             .items_center()
             .justify_between()
             .gap(px(space::MD))
-            .border_b_1()
-            .border_color(rgb(p.border))
             .window_control_area(WindowControlArea::Drag)
             .child(
                 div()
@@ -57,7 +57,12 @@ impl Workspace {
                     .flex()
                     .items_center()
                     .gap(px(space::SM))
-                    .child(div().text_size(px(24.)).text_color(rgb(p.muted)).child("#"))
+                    .child(
+                        div()
+                            .text_size(px(typography::HEADING))
+                            .text_color(rgb(p.muted))
+                            .child("#"),
+                    )
                     .child(
                         div()
                             .min_w_0()
@@ -85,23 +90,7 @@ impl Workspace {
                             ),
                     )
                     .child(self.approval_mode_button(cx))
-                    .child(
-                        Button::icon(
-                            "export-session",
-                            Icon::ExternalLink,
-                            "会話とイベントを書き出す",
-                        )
-                        .control_size(ControlSize::Small)
-                        .disabled(view.model.accepted() == 0)
-                        .on_click(cx.listener(|this, _, _, cx| this.export_session(cx))),
-                    )
-                    .child(
-                        Button::icon("command-rules", Icon::Sliders, "コマンド実行ルール")
-                            .control_size(ControlSize::Small)
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.open_command_rules(window, cx)
-                            })),
-                    )
+                    .child(self.tools_menu(cx))
                     .child(
                         Button::icon(
                             "toggle-theme",
@@ -126,7 +115,6 @@ impl Workspace {
     }
 
     fn toolbar(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let p = ds::theme(cx);
         let session = self.session();
         let demo = !self.picker_uses_workspace(session.selected_backend);
         div()
@@ -138,8 +126,6 @@ impl Workspace {
             .items_center()
             .justify_between()
             .gap_2()
-            .border_b_1()
-            .border_color(rgb(p.border))
             .child(
                 TabBar::new("workspace-tabs")
                     .underline()
@@ -163,15 +149,6 @@ impl Workspace {
                         this.show_tab(TAB_ORDER[*index], cx);
                     })),
             )
-            .child(
-                Button::icon("show-metrics", Icon::Activity, "実行の計測値を表示")
-                    .control_size(ControlSize::Small)
-                    .toggled(self.show_metrics)
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.show_metrics = !this.show_metrics;
-                        cx.notify();
-                    })),
-            )
             .when(demo, |v| {
                 v.child(
                     Button::icon("replay", Icon::Play, "デモを再生")
@@ -184,6 +161,59 @@ impl Workspace {
                                 this.scenario(scenario, cx);
                             }
                         })),
+                )
+            })
+    }
+
+    /// ヘッダー右端のツールメニュー。ログイン・ルール・書き出し・計測表示をまとめる。
+    fn tools_menu(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let login_ready = self.can_start_login();
+        let exportable = self.session().model.accepted() > 0;
+        let metrics = self.show_metrics;
+        let weak = cx.weak_entity();
+        Button::icon("tools-menu", Icon::Wrench, "ツール")
+            .control_size(ControlSize::Small)
+            .dropdown_menu_with_anchor(Anchor::TopRight, move |menu, _, _| {
+                let login = weak.clone();
+                let rules = weak.clone();
+                let export = weak.clone();
+                let toggle = weak.clone();
+                menu.item(
+                    PopupMenuItem::new("ChatGPT でログイン")
+                        .icon(Icon::OpenAi.kit())
+                        .disabled(!login_ready)
+                        .on_click(move |_, window, cx| {
+                            let _ = login.update(cx, |this, cx| this.open_login(window, cx));
+                        }),
+                )
+                .separator()
+                .item(
+                    PopupMenuItem::new("コマンド実行ルール")
+                        .icon(Icon::Sliders.kit())
+                        .on_click(move |_, window, cx| {
+                            let _ =
+                                rules.update(cx, |this, cx| this.open_command_rules(window, cx));
+                        }),
+                )
+                .item(
+                    PopupMenuItem::new("会話とイベントを書き出す")
+                        .icon(Icon::ExternalLink.kit())
+                        .disabled(!exportable)
+                        .on_click(move |_, _, cx| {
+                            let _ = export.update(cx, |this, cx| this.export_session(cx));
+                        }),
+                )
+                .separator()
+                .item(
+                    PopupMenuItem::new("実行の計測値を表示")
+                        .icon(Icon::Activity.kit())
+                        .checked(metrics)
+                        .on_click(move |_, _, cx| {
+                            let _ = toggle.update(cx, |this, cx| {
+                                this.show_metrics = !this.show_metrics;
+                                cx.notify();
+                            });
+                        }),
                 )
             })
     }
@@ -332,6 +362,7 @@ impl Workspace {
 impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.rendered += 1;
+        let p = ds::theme(cx);
         let session = self.session();
         let thread_open = session.view.tab == Tab::Chat && session.view.selected_thread.is_some();
         let compact_thread = thread_open && window.viewport_size().width < px(1120.);
@@ -361,6 +392,7 @@ impl Render for Workspace {
             self.execution_thread(cx).into_any_element()
         } else if thread_open {
             h_resizable("conversation-thread-layout")
+                .with_handle_appearance(ds::split_handle(cx))
                 .child(
                     resizable_panel()
                         .size_range(px(340.)..px(5000.))
@@ -377,6 +409,7 @@ impl Render for Workspace {
             channel.into_any_element()
         };
         ds::root(cx)
+            .bg(ds::glass(p.surface, ds::GLASS_STRONG))
             .track_focus(&self.focus)
             .relative()
             .flex()
@@ -436,7 +469,7 @@ fn notice(icon: Icon, text: impl Into<SharedString>, tone: Tone, cx: &App) -> Di
             div()
                 .flex_1()
                 .min_w_0()
-                .text_size(px(12.))
+                .text_size(px(typography::LABEL))
                 .child(text.into()),
         )
 }

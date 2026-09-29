@@ -14,9 +14,6 @@ impl ProjectManager {
             .flex_shrink_0()
             .pl(px(96.))
             .pr_4()
-            .bg(ds::glass(p.sidebar, ds::GLASS_SIDEBAR))
-            .border_b_1()
-            .border_color(rgb(p.border))
             .flex()
             .items_center()
             .gap_2()
@@ -57,8 +54,8 @@ impl ProjectManager {
                 div()
                     .id(id)
                     .relative()
-                    .w(px(40.))
-                    .h(px(34.))
+                    .w(px(32.))
+                    .h(px(32.))
                     .flex_shrink_0()
                     .flex()
                     .items_center()
@@ -72,18 +69,7 @@ impl ProjectManager {
                     .tooltip(move |window, cx| {
                         gpui_kit::component::tooltip::Tooltip::new(tooltip).build(window, cx)
                     })
-                    .when(active, |v| {
-                        v.child(
-                            div()
-                                .absolute()
-                                .left(px(-6.))
-                                .top(px(6.))
-                                .bottom(px(6.))
-                                .w(px(2.))
-                                .rounded(px(1.))
-                                .bg(rgb(p.accent)),
-                        )
-                    })
+                    .when(active, |v| v.bg(ds::glass(p.accent_soft, 0.5)))
                     .hover(move |style| style.bg(ds::glass(p.hover, ds::GLASS_HOVER)))
             };
         let on_action = |id, icon, tooltip, active, action: Box<dyn gpui_kit::Action>| {
@@ -93,15 +79,12 @@ impl ProjectManager {
         div()
             .w(px(46.))
             .flex_shrink_0()
-            .bg(ds::glass(p.sidebar, ds::GLASS_SIDEBAR))
-            .border_r_1()
-            .border_color(ds::glass(p.border, 0.6))
             .flex()
             .flex_col()
             .items_center()
-            .pt(px(6.))
+            .pt_2()
             .pb_2()
-            .gap(px(6.))
+            .gap_1()
             .children([
                 on_action(
                     "rail-chat",
@@ -349,7 +332,6 @@ impl ProjectManager {
         div()
             .id("project-channel-sidebar")
             .size_full()
-            .bg(ds::glass(p.sidebar, ds::GLASS_SIDEBAR))
             .flex()
             .flex_col()
             .overflow_hidden()
@@ -369,7 +351,7 @@ impl ProjectManager {
                             .justify_between()
                             .child(
                                 div()
-                                    .text_size(px(18.))
+                                    .text_size(px(typography::HEADING))
                                     .font_weight(FontWeight::SEMIBOLD)
                                     .child("チャンネル"),
                             )
@@ -417,8 +399,6 @@ impl ProjectManager {
                 div()
                     .w_full()
                     .p_2()
-                    .border_t_1()
-                    .border_color(rgb(p.border))
                     .flex()
                     .flex_col()
                     .gap_2()

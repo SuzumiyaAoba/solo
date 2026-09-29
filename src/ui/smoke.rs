@@ -78,6 +78,24 @@ pub(super) fn start(window: &Window, cx: &mut Context<Workspace>) {
             assert!(this.session_at(0).composer.focus_handle(cx).is_focused(window));
         }).unwrap();
 
+        // macOS 標準の ctrl 編集キーが action dispatch 経路でコンポーザーに届くことを確認する。
+        this.update_in(cx, |this, window, cx| {
+            let composer = this.session_at_mut(0).composer.clone();
+            composer.update(cx, |input, cx| {
+                input.replace_text_in_range(Some(0..usize::MAX), "abcd", window, cx);
+            });
+            composer.focus_handle(cx).focus(window, cx);
+        }).unwrap();
+        for key in ["ctrl-b", "ctrl-d", "ctrl-b", "ctrl-h", "ctrl-k"] {
+            key_down(cx, key);
+            cx.background_executor().timer(Duration::from_millis(30)).await;
+        }
+        this.update_in(cx, |this, _, cx| {
+            let composer = &this.session_at_mut(0).composer;
+            assert_eq!(composer.read(cx).value(cx), "a", "ctrl 編集キー（b/d/h/k）が入力に効いていません");
+            composer.update(cx, |input, cx| input.set_value("保持する下書き🙂", cx));
+        }).unwrap();
+
         // UI の停止要求と停止確認を区別し、開始前の cancel も通す。
         for expected in [Status::Cancelled, Status::Disconnected] {
             this.update_in(cx, |this, window, cx| {

@@ -383,7 +383,6 @@ impl Workspace {
                 .flex_1()
                 .min_h_0(),
             )
-            .bg(glass(p.canvas, ds::GLASS_STRONG))
             .into_any_element()
     }
 }

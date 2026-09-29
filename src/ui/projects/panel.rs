@@ -66,7 +66,7 @@ impl Render for ProjectPanel {
                     .justify_between()
                     .child(
                         div()
-                            .text_size(px(12.))
+                            .text_size(px(typography::LABEL))
                             .text_color(rgb(p.muted))
                             .child(format!("{} / {MAX_PROJECTS}", rows.len())),
                     )
@@ -185,7 +185,7 @@ impl Render for ProjectPanel {
                                 div()
                                     .min_w_0()
                                     .truncate()
-                                    .text_size(px(11.))
+                                    .text_size(px(typography::CAPTION))
                                     .text_color(rgb(p.muted))
                                     .child(project.path.display().to_string()),
                             )

@@ -29,6 +29,7 @@ pub struct Select {
     pub options: Vec<SharedString>,
     pub selected: usize,
     pub disabled: bool,
+    appearance: bool,
     state: Entity<SelectState<Choices>>,
     reset: bool,
     subscription: Subscription,
@@ -53,6 +54,7 @@ impl Select {
             options,
             selected,
             disabled: false,
+            appearance: true,
             state,
             reset: false,
             subscription,
@@ -93,6 +95,11 @@ impl Select {
     }
     pub fn disabled(mut self, disabled: bool) -> Self {
         self.disabled = disabled;
+        self
+    }
+    /// トリガーの枠と背景を消してテキストとキャレットだけにする。
+    pub fn appearance(mut self, appearance: bool) -> Self {
+        self.appearance = appearance;
         self
     }
     /// 新しいセッションでは検索語と開いたメニューを持ち越さない。
@@ -142,6 +149,7 @@ impl Render for Select {
         }
         KitSelect::new(&self.state)
             .w_full()
+            .appearance(self.appearance)
             .menu_width(px(300.))
             .disabled(self.disabled || self.options.is_empty())
             .placeholder("選択肢がありません")
