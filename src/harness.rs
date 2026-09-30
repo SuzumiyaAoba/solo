@@ -9,6 +9,8 @@ use std::{
 };
 use tokio_util::sync::CancellationToken;
 
+mod context;
+mod schema;
 pub mod workspace;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -147,6 +149,12 @@ pub struct Limits {
     pub max_model_requests: usize,
     pub max_tool_calls: usize,
     pub max_result_bytes: usize,
+    /// モデルへ送る履歴の概算バイト上限。超える場合は古い tool 結果から
+    /// 省略して収め、それでも収まらなければ ContextLimit で停止する。
+    pub max_context_bytes: usize,
+    /// usage を報告した応答の累計 (input + output) トークン上限。
+    /// usage が一度も報告されなければ発動しない。None は制限なし。
+    pub max_total_tokens: Option<u64>,
 }
 
 impl Default for Limits {
@@ -155,6 +163,8 @@ impl Default for Limits {
             max_model_requests: 64,
             max_tool_calls: 256,
             max_result_bytes: 64 * 1024,
+            max_context_bytes: 1024 * 1024,
+            max_total_tokens: None,
         }
     }
 }
@@ -182,6 +192,12 @@ pub enum StopReason {
     Cancelled,
     ModelLimit,
     ToolLimit,
+    /// 履歴を省略してもコンテキスト上限に収まらない。継続しても同じ上限に
+    /// 達するため、続きは新しいチャンネルが必要になる。
+    ContextLimit,
+    /// 累計トークン使用量が上限に達した。使用量は turn ごとに数えるため、
+    /// 続きの依頼は新しい予算で実行できる。
+    TokenLimit,
     ModelError(String),
     InvalidResponse(String),
 }
@@ -200,6 +216,16 @@ impl StopReason {
                 "ツール呼び出しが上限の {} 回に達したため停止しました。続ける場合は、続きを依頼してください",
                 limits.max_tool_calls
             ),
+            Self::ContextLimit => format!(
+                "コンテキストが上限の {} に達したため停止しました。新しいチャンネルで続けてください",
+                format_bytes(limits.max_context_bytes)
+            ),
+            Self::TokenLimit => match limits.max_total_tokens {
+                Some(limit) => format!(
+                    "トークン使用量が上限の {limit} に達したため停止しました。続ける場合は、続きを依頼してください"
+                ),
+                None => "トークン使用量が上限に達したため停止しました".into(),
+            },
             Self::ModelError(error) => format!("モデルの呼び出しに失敗しました: {error}"),
             Self::InvalidResponse(error) => {
                 format!("モデルの応答が不正なため停止しました: {error}")
@@ -208,13 +234,33 @@ impl StopReason {
     }
 }
 
+/// バイト数を人が読みやすい単位で表示する。
+fn format_bytes(bytes: usize) -> String {
+    if bytes >= 1024 * 1024 {
+        format!("{} MiB", bytes / (1024 * 1024))
+    } else if bytes >= 1024 {
+        format!("{} KiB", bytes / 1024)
+    } else {
+        format!("{bytes} バイト")
+    }
+}
+
 #[derive(Clone, Debug)]
 pub enum Update {
     ModelRequested,
     Assistant(String),
     AssistantDelta(String),
+    /// コンテキスト上限に収めるため、古い tool 結果を省略して送信した。
+    /// results は省略した件数、bytes は削れた概算量。履歴本体は省略しない。
+    ContextTrimmed {
+        results: usize,
+        bytes: usize,
+    },
     ToolProposed(ToolCall),
-    ToolFinished { call_id: String, result: ToolResult },
+    ToolFinished {
+        call_id: String,
+        result: ToolResult,
+    },
     Stopped(StopReason),
 }
 
@@ -232,6 +278,10 @@ pub struct Run {
 /// blocking な呼出しを即時停止する必要がある場合はアダプター自身も中止を実装する。
 /// 拡張側(model/policy/tool)の panic は実行ごと落とさない。モデルの panic は
 /// ModelError、policy の panic は拒否、tool の panic はエラー結果として処理する。
+/// モデルへ渡す履歴が max_context_bytes を超える場合は、最後の応答より前の
+/// tool 結果から省略して送る（`messages` 自体は省略しない）。それでも収まらない
+/// 場合や、報告された累計 usage が max_total_tokens を超えた場合は新しい要求を
+/// 送らず停止する。schema に合わない tool 呼出しは policy に回さずエラーを返す。
 pub fn run<M, T, P, F>(
     model: &mut M,
     tools: &mut T,
@@ -249,7 +299,7 @@ where
 {
     let mut requests = 0;
     let mut calls: usize = 0;
-    let mut usage = None;
+    let mut usage: Option<TokenUsage> = None;
     let mut seen_ids = HashSet::new();
     let stop = loop {
         if cancellation.is_cancelled() {
@@ -258,6 +308,21 @@ where
         if requests >= limits.max_model_requests {
             break StopReason::ModelLimit;
         }
+        if let Some(limit) = limits.max_total_tokens
+            && let Some(usage) = usage
+            && usage.input_tokens.saturating_add(usage.output_tokens) > limit
+        {
+            break StopReason::TokenLimit;
+        }
+        let Some(fitted) = context::fit_context(&messages, limits.max_context_bytes) else {
+            break StopReason::ContextLimit;
+        };
+        if fitted.pruned_results > 0 {
+            on_update(Update::ContextTrimmed {
+                results: fitted.pruned_results,
+                bytes: fitted.saved_bytes,
+            });
+        }
         requests += 1;
         on_update(Update::ModelRequested);
         if cancellation.is_cancelled() {
@@ -265,7 +330,7 @@ where
         }
         let mut streamed_text = String::new();
         let output = match catch_unwind(AssertUnwindSafe(|| {
-            model.complete_with_updates(&messages, tools.specs(), &mut |delta| {
+            model.complete_with_updates(&fitted.messages, tools.specs(), &mut |delta| {
                 streamed_text.push_str(delta);
                 on_update(Update::AssistantDelta(delta.into()));
             })
@@ -296,18 +361,27 @@ where
             );
         }
         let done = output.tool_calls.is_empty();
+        // 最終 text を返さない adapter では、stream 済みの本文を履歴へ保存する。
+        let text = if output.text.is_empty() {
+            streamed_text.clone()
+        } else {
+            output.text
+        };
+        if done && text.is_empty() {
+            break StopReason::InvalidResponse("モデルの応答が空です".into());
+        }
         if !done && calls.saturating_add(output.tool_calls.len()) > limits.max_tool_calls {
             break StopReason::ToolLimit;
         }
-        if streamed_text.is_empty() && !output.text.is_empty() {
-            on_update(Update::Assistant(output.text.clone()));
-        } else if let Some(suffix) = output.text.strip_prefix(&streamed_text)
+        if streamed_text.is_empty() && !text.is_empty() {
+            on_update(Update::Assistant(text.clone()));
+        } else if let Some(suffix) = text.strip_prefix(&streamed_text)
             && !suffix.is_empty()
         {
             on_update(Update::AssistantDelta(suffix.into()));
         }
         messages.push(Message::Assistant {
-            text: output.text,
+            text,
             tool_calls: output.tool_calls.clone(),
         });
         if done {
@@ -317,39 +391,54 @@ where
             on_update(Update::ToolProposed(call.clone()));
             let mut result = if cancellation.is_cancelled() {
                 ToolResult::error("中止されたため実行しませんでした")
-            } else if !tools.specs().iter().any(|spec| spec.name == call.name) {
-                calls += 1;
-                ToolResult::error(format!("未知の tool: {}", call.name))
-            } else {
-                let verdict = match catch_unwind(AssertUnwindSafe(|| policy.decide(&call))) {
-                    Ok(verdict) => verdict,
-                    Err(payload) => PolicyVerdict::deny(format!(
-                        "承認判定が異常終了しました: {}",
-                        panic_message(&payload)
-                    )),
-                };
-                match verdict {
-                    PolicyVerdict::Deny(reason) => {
+            } else if let Some(spec) = tools.specs().iter().find(|spec| spec.name == call.name) {
+                // schema に合わない呼出しは承認確認を挟まずモデルへ差し戻す。
+                match schema::check_arguments(&spec.parameters, &call.arguments) {
+                    Err(reason) => {
                         calls += 1;
-                        ToolResult::error(
-                            reason.unwrap_or_else(|| "tool の実行は許可されませんでした".into()),
-                        )
+                        ToolResult::error(format!(
+                            "tool `{}` の引数が不正です: {reason}",
+                            call.name
+                        ))
                     }
-                    PolicyVerdict::Allow if cancellation.is_cancelled() => {
-                        ToolResult::error("承認待ちの間に中止されたため実行しませんでした")
-                    }
-                    PolicyVerdict::Allow => {
-                        calls += 1;
-                        match catch_unwind(AssertUnwindSafe(|| tools.execute(&call))) {
-                            Ok(result) => result,
-                            Err(payload) => ToolResult::error(format!(
-                                "tool `{}` の実行が異常終了しました: {}",
-                                call.name,
+                    Ok(()) => {
+                        let verdict = match catch_unwind(AssertUnwindSafe(|| policy.decide(&call)))
+                        {
+                            Ok(verdict) => verdict,
+                            Err(payload) => PolicyVerdict::deny(format!(
+                                "承認判定が異常終了しました: {}",
                                 panic_message(&payload)
                             )),
+                        };
+                        match verdict {
+                            PolicyVerdict::Deny(reason) => {
+                                calls += 1;
+                                ToolResult::error(
+                                    reason.unwrap_or_else(|| {
+                                        "tool の実行は許可されませんでした".into()
+                                    }),
+                                )
+                            }
+                            PolicyVerdict::Allow if cancellation.is_cancelled() => {
+                                ToolResult::error("承認待ちの間に中止されたため実行しませんでした")
+                            }
+                            PolicyVerdict::Allow => {
+                                calls += 1;
+                                match catch_unwind(AssertUnwindSafe(|| tools.execute(&call))) {
+                                    Ok(result) => result,
+                                    Err(payload) => ToolResult::error(format!(
+                                        "tool `{}` の実行が異常終了しました: {}",
+                                        call.name,
+                                        panic_message(&payload)
+                                    )),
+                                }
+                            }
                         }
                     }
                 }
+            } else {
+                calls += 1;
+                ToolResult::error(format!("未知の tool: {}", call.name))
             };
             result.content = truncate_utf8(result.content, limits.max_result_bytes);
             result.summary = result

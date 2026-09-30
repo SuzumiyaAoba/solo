@@ -725,15 +725,380 @@ fn stop_reason_messages_include_the_configured_limits() {
     let limits = Limits {
         max_model_requests: 64,
         max_tool_calls: 256,
+        max_total_tokens: Some(400_000),
         ..Limits::default()
     };
     assert_eq!(StopReason::Completed.message(&limits), "実行完了");
     assert_eq!(StopReason::Cancelled.message(&limits), "実行を中止しました");
     assert!(StopReason::ModelLimit.message(&limits).contains("64"));
     assert!(StopReason::ToolLimit.message(&limits).contains("256"));
+    assert!(StopReason::ContextLimit.message(&limits).contains("1 MiB"));
+    assert!(StopReason::TokenLimit.message(&limits).contains("400000"));
     assert!(
         StopReason::ModelError("down".into())
             .message(&limits)
             .contains("down")
+    );
+}
+
+#[test]
+fn schema_violations_are_returned_to_the_model_without_asking_policy() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("a.txt"), "data").unwrap();
+    let mut tools = WorkspaceTools::new(dir.path()).unwrap();
+    let mut policy_calls = 0;
+    let mut model = ScriptedModel(VecDeque::from([
+        ModelOutput {
+            usage: None,
+            text: String::new(),
+            tool_calls: vec![
+                call("1", "read", json!({})),         // 必須の path が無い
+                call("2", "read", json!({"path":1})), // 型違い
+                call("3", "read", json!({"path":"a.txt","extra":true})), // 未知の引数
+                call("4", "read", json!({"path":"a.txt"})), // 有効
+            ],
+        },
+        ModelOutput {
+            usage: None,
+            text: "done".into(),
+            tool_calls: vec![],
+        },
+    ]));
+    let result = run(
+        &mut model,
+        &mut tools,
+        &mut |_: &ToolCall| {
+            policy_calls += 1;
+            true
+        },
+        vec![Message::User { text: "run".into() }],
+        &Limits::default(),
+        &Cancellation::default(),
+        |_| {},
+    );
+    assert_eq!(result.stop, StopReason::Completed);
+    assert_eq!(
+        policy_calls, 1,
+        "schema に合わない呼出しは承認判定へ回さない"
+    );
+    let tool_error = |index: usize| match &result.messages[index] {
+        Message::Tool { result, .. } if result.is_error => result.content.as_str(),
+        other => panic!("index {index} はエラーの tool 結果ではありません: {other:?}"),
+    };
+    assert!(tool_error(2).contains("path"), "必須引数の欠落");
+    assert!(tool_error(3).contains("型"), "型違い");
+    assert!(tool_error(4).contains("extra"), "未知の引数");
+    assert!(matches!(
+        &result.messages[5],
+        Message::Tool { result: ToolResult { content, is_error: false, .. }, .. } if content == "data"
+    ));
+    assert_eq!(result.tool_calls, 4, "不正な呼出しも枠を消費する");
+}
+
+/// 各モデル呼出しで渡された履歴を記録するモデル。
+struct RecordingModel {
+    scripts: VecDeque<ModelOutput>,
+    seen: Vec<Vec<Message>>,
+}
+
+impl Model for RecordingModel {
+    fn complete(&mut self, messages: &[Message], _: &[ToolSpec]) -> Result<ModelOutput, String> {
+        self.seen.push(messages.to_vec());
+        self.scripts
+            .pop_front()
+            .ok_or_else(|| "応答がありません".into())
+    }
+}
+
+/// 固定長の内容を返す tool。
+struct FillTool(Vec<ToolSpec>, usize);
+
+impl ToolExecutor for FillTool {
+    fn specs(&self) -> &[ToolSpec] {
+        &self.0
+    }
+    fn execute(&mut self, _: &ToolCall) -> ToolResult {
+        ToolResult::ok("x".repeat(self.1))
+    }
+}
+
+fn fill_call(id: &str) -> ToolCall {
+    ToolCall {
+        id: id.into(),
+        name: "fill".into(),
+        arguments: json!({}),
+    }
+}
+
+fn fill_spec() -> ToolSpec {
+    ToolSpec {
+        name: "fill".into(),
+        description: "固定長の内容を返す".into(),
+        parameters: json!({"type":"object","properties":{},"additionalProperties":false}),
+    }
+}
+
+fn tool_content(messages: &[Message], index: usize) -> &str {
+    match &messages[index] {
+        Message::Tool { result, .. } => &result.content,
+        other => panic!("index {index} は tool 結果ではありません: {other:?}"),
+    }
+}
+
+#[test]
+fn over_budget_context_prunes_old_tool_results_only_for_the_model() {
+    let mut tools = FillTool(vec![fill_spec()], 1500);
+    let mut model = RecordingModel {
+        scripts: VecDeque::from([
+            ModelOutput {
+                usage: None,
+                text: String::new(),
+                tool_calls: vec![fill_call("1")],
+            },
+            ModelOutput {
+                usage: None,
+                text: String::new(),
+                tool_calls: vec![fill_call("2")],
+            },
+            ModelOutput {
+                usage: None,
+                text: String::new(),
+                tool_calls: vec![fill_call("3")],
+            },
+            ModelOutput {
+                usage: None,
+                text: "done".into(),
+                tool_calls: vec![],
+            },
+        ]),
+        seen: Vec::new(),
+    };
+    let mut trims = Vec::new();
+    let result = run(
+        &mut model,
+        &mut tools,
+        &mut |_: &ToolCall| true,
+        vec![Message::User { text: "run".into() }],
+        &Limits {
+            max_context_bytes: 2400,
+            ..Limits::default()
+        },
+        &Cancellation::default(),
+        |update| {
+            if let Update::ContextTrimmed { results, .. } = update {
+                trims.push(results);
+            }
+        },
+    );
+    assert_eq!(result.stop, StopReason::Completed);
+    assert_eq!(model.seen.len(), 4);
+    // 3 回目の要求: 直前 batch(3 件目の呼出しを含む)より前の結果だけ省略される。
+    assert!(
+        tool_content(&model.seen[2], 2).contains("省略"),
+        "古い tool 結果は省略マーカーになる"
+    );
+    assert_eq!(
+        tool_content(&model.seen[2], 4).len(),
+        1500,
+        "最新の batch はそのまま送る"
+    );
+    // 4 回目の要求: さらに古い結果も省略対象になる。
+    assert!(tool_content(&model.seen[3], 2).contains("省略"));
+    assert!(tool_content(&model.seen[3], 4).contains("省略"));
+    assert_eq!(tool_content(&model.seen[3], 6).len(), 1500);
+    assert_eq!(trims, vec![1, 2], "要求ごとに省略した件数を報告する");
+    // 返す履歴（保存される記録）は省略前の完全な内容を保つ。
+    assert_eq!(tool_content(&result.messages, 2).len(), 1500);
+    assert_eq!(tool_content(&result.messages, 4).len(), 1500);
+}
+
+#[test]
+fn unfittable_context_stops_before_the_next_request() {
+    let mut tools = FillTool(vec![fill_spec()], 2000);
+    // 最新 batch だけで上限を超えるため、省略では収まらない。
+    let mut model = RecordingModel {
+        scripts: VecDeque::from([
+            ModelOutput {
+                usage: None,
+                text: String::new(),
+                tool_calls: vec![fill_call("1")],
+            },
+            ModelOutput {
+                usage: None,
+                text: "done".into(),
+                tool_calls: vec![],
+            },
+        ]),
+        seen: Vec::new(),
+    };
+    let result = run(
+        &mut model,
+        &mut tools,
+        &mut |_: &ToolCall| true,
+        vec![Message::User { text: "run".into() }],
+        &Limits {
+            max_context_bytes: 256,
+            ..Limits::default()
+        },
+        &Cancellation::default(),
+        |_| {},
+    );
+    assert_eq!(result.stop, StopReason::ContextLimit);
+    assert_eq!(model.seen.len(), 1, "上限を超えた後は要求を送らない");
+    assert_eq!(result.model_requests, 1);
+    // tool 呼出しと結果の対応は履歴に残る（dangling にしない）。
+    assert_eq!(result.messages.len(), 3);
+}
+
+#[test]
+fn reported_usage_beyond_the_token_budget_blocks_the_next_request() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut tools = WorkspaceTools::new(dir.path()).unwrap();
+    let usage = |input: u64, output: u64| solo::harness::TokenUsage {
+        input_tokens: input,
+        output_tokens: output,
+    };
+    let mut model = ScriptedModel(VecDeque::from([
+        ModelOutput {
+            usage: Some(usage(120, 80)),
+            text: String::new(),
+            tool_calls: vec![call("1", "list", json!({}))],
+        },
+        ModelOutput {
+            usage: None,
+            text: "done".into(),
+            tool_calls: vec![],
+        },
+    ]));
+    let result = run(
+        &mut model,
+        &mut tools,
+        &mut |_: &ToolCall| true,
+        vec![Message::User { text: "run".into() }],
+        &Limits {
+            max_total_tokens: Some(150),
+            ..Limits::default()
+        },
+        &Cancellation::default(),
+        |_| {},
+    );
+    assert_eq!(result.stop, StopReason::TokenLimit);
+    // 超過が分かったのは応答後なので、その応答の tool 呼出しは実行済み。
+    assert_eq!(result.tool_calls, 1);
+    assert_eq!(result.model_requests, 1, "次の要求は送らない");
+    assert_eq!(result.usage, Some(usage(120, 80)));
+    assert!(matches!(
+        &result.messages[2],
+        Message::Tool {
+            result: ToolResult {
+                is_error: false,
+                ..
+            },
+            ..
+        }
+    ));
+}
+
+#[test]
+fn unreported_usage_never_triggers_the_token_budget() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut tools = WorkspaceTools::new(dir.path()).unwrap();
+    let mut model = ScriptedModel(VecDeque::from([
+        ModelOutput {
+            usage: None,
+            text: String::new(),
+            tool_calls: vec![call("1", "list", json!({}))],
+        },
+        ModelOutput {
+            usage: None,
+            text: "done".into(),
+            tool_calls: vec![],
+        },
+    ]));
+    let result = run(
+        &mut model,
+        &mut tools,
+        &mut |_: &ToolCall| true,
+        vec![Message::User { text: "run".into() }],
+        &Limits {
+            max_total_tokens: Some(1),
+            ..Limits::default()
+        },
+        &Cancellation::default(),
+        |_| {},
+    );
+    assert_eq!(result.stop, StopReason::Completed);
+    assert_eq!(result.model_requests, 2);
+}
+
+#[test]
+fn an_empty_response_is_rejected_instead_of_completing_silently() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut tools = WorkspaceTools::new(dir.path()).unwrap();
+    let mut model = ScriptedModel(VecDeque::from([ModelOutput {
+        usage: None,
+        text: String::new(),
+        tool_calls: vec![],
+    }]));
+    let result = run(
+        &mut model,
+        &mut tools,
+        &mut |_: &ToolCall| true,
+        vec![Message::User { text: "run".into() }],
+        &Limits::default(),
+        &Cancellation::default(),
+        |_| {},
+    );
+    assert_eq!(
+        result.stop,
+        StopReason::InvalidResponse("モデルの応答が空です".into())
+    );
+    assert_eq!(result.messages.len(), 1, "空の応答は履歴に残さない");
+}
+
+#[test]
+fn streamed_text_is_kept_in_history_when_the_final_text_is_empty() {
+    struct DeltaOnlyModel;
+    impl Model for DeltaOnlyModel {
+        fn complete(&mut self, _: &[Message], _: &[ToolSpec]) -> Result<ModelOutput, String> {
+            unreachable!()
+        }
+        fn complete_with_updates(
+            &mut self,
+            _: &[Message],
+            _: &[ToolSpec],
+            on_delta: &mut dyn FnMut(&str),
+        ) -> Result<ModelOutput, String> {
+            on_delta("途中");
+            on_delta("の本文");
+            Ok(ModelOutput {
+                usage: None,
+                text: String::new(),
+                tool_calls: vec![],
+            })
+        }
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let mut tools = WorkspaceTools::new(dir.path()).unwrap();
+    let mut updates = Vec::new();
+    let result = run(
+        &mut DeltaOnlyModel,
+        &mut tools,
+        &mut |_: &ToolCall| true,
+        vec![Message::User { text: "run".into() }],
+        &Limits::default(),
+        &Cancellation::default(),
+        |update| updates.push(update),
+    );
+    assert_eq!(result.stop, StopReason::Completed);
+    assert!(
+        matches!(&result.messages[1], Message::Assistant { text, .. } if text == "途中の本文"),
+        "stream 済みの本文を履歴へ残す"
+    );
+    assert!(
+        !updates
+            .iter()
+            .any(|update| matches!(update, Update::Assistant(_))),
+        "stream 済みの本文を二重に通知しない"
     );
 }

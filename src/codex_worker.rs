@@ -227,6 +227,19 @@ fn run(
                     text,
                 })
             }
+            Update::ContextTrimmed { results, bytes } => {
+                let preview = format!(
+                    "コンテキスト上限のため、古いツール結果 {results} 件を省略して送信しました（約 {bytes} バイト）"
+                );
+                let preview_len = preview.len() as u64;
+                emitter.borrow_mut().emit(Event::Log {
+                    level: "info".into(),
+                    bytes: preview_len,
+                    offset: log_offset,
+                    preview,
+                });
+                log_offset += preview_len;
+            }
             Update::ToolProposed(call) => {
                 emitter.borrow_mut().emit(Event::ToolStarted {
                     agent_id: None,

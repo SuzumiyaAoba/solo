@@ -187,6 +187,9 @@ fn run() -> io::Result<()> {
                 print!("{text}");
                 let _ = io::stdout().flush();
             }
+            Update::ContextTrimmed { results, bytes } => eprintln!(
+                "\nコンテキスト上限のため、古いツール結果 {results} 件を省略して送信しました（約 {bytes} バイト）"
+            ),
             Update::ToolProposed(call) => {
                 eprintln!("\nツール要求: {} {}", call.name, call.arguments)
             }
