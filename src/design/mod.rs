@@ -58,18 +58,18 @@ pub fn set_theme(scheme: ColorScheme, cx: &mut App) {
     t.colors.button_primary_active = rgb(p.accent_pressed).into();
     t.colors.button_primary_foreground = rgb(p.on_accent).into();
     t.colors.button = glass(p.elevated, GLASS_SURFACE).into();
-    t.colors.button_hover = glass(p.hover, GLASS_HOVER).into();
-    t.colors.button_active = glass(p.pressed, GLASS_HOVER).into();
+    t.colors.button_hover = rgb(p.hover).into();
+    t.colors.button_active = rgb(p.pressed).into();
     t.colors.button_foreground = rgb(p.text).into();
     t.colors.button_secondary = glass(p.elevated, GLASS_SURFACE).into();
-    t.colors.button_secondary_hover = glass(p.hover, GLASS_HOVER).into();
-    t.colors.button_secondary_active = glass(p.pressed, GLASS_HOVER).into();
+    t.colors.button_secondary_hover = rgb(p.hover).into();
+    t.colors.button_secondary_active = rgb(p.pressed).into();
     t.colors.button_secondary_foreground = rgb(p.text).into();
     t.colors.secondary = glass(p.elevated, GLASS_SURFACE).into();
-    t.colors.secondary_hover = glass(p.hover, GLASS_HOVER).into();
-    t.colors.secondary_active = glass(p.pressed, GLASS_HOVER).into();
+    t.colors.secondary_hover = rgb(p.hover).into();
+    t.colors.secondary_active = rgb(p.pressed).into();
     t.colors.secondary_foreground = rgb(p.text).into();
-    t.colors.accent = glass(p.hover, GLASS_HOVER).into();
+    t.colors.accent = rgb(p.hover).into();
     t.colors.accent_foreground = rgb(p.text).into();
     t.colors.muted = glass(p.hover, GLASS_SURFACE).into();
     t.colors.muted_foreground = rgb(p.muted).into();
@@ -77,11 +77,11 @@ pub fn set_theme(scheme: ColorScheme, cx: &mut App) {
     t.colors.popover_foreground = rgb(p.text).into();
     t.colors.sidebar = glass(p.sidebar, GLASS_SIDEBAR).into();
     t.colors.sidebar_foreground = rgb(p.secondary).into();
-    t.colors.sidebar_accent = glass(p.hover, GLASS_HOVER).into();
+    t.colors.sidebar_accent = rgb(p.hover).into();
     t.colors.sidebar_accent_foreground = rgb(p.text).into();
     t.colors.sidebar_border = glass(p.border, 0.6).into();
     t.colors.list = glass(p.surface, GLASS_SURFACE).into();
-    t.colors.list_hover = glass(p.hover, GLASS_HOVER).into();
+    t.colors.list_hover = rgb(p.hover).into();
     t.colors.list_active = glass(p.accent_soft, 0.5).into();
     t.colors.list_active_border = rgb(p.accent).into();
     t.colors.caret = rgb(p.accent_text).into();
@@ -103,11 +103,12 @@ pub fn init(cx: &mut App) {
 }
 
 /// Liquid Glass 用の不透明度。範囲外はクランプする。
-pub const GLASS_SURFACE: f32 = 0.62;
-pub const GLASS_ELEVATED: f32 = 0.72;
-pub const GLASS_SIDEBAR: f32 = 0.55;
-pub const GLASS_HOVER: f32 = 0.45;
-pub const GLASS_STRONG: f32 = 0.85;
+/// 背景の透けが強いと壁紙の明るさに文字コントラストが依存するため、
+/// 文字を載せる面は高めの不透明度にする。
+pub const GLASS_SURFACE: f32 = 0.85;
+pub const GLASS_ELEVATED: f32 = 0.9;
+pub const GLASS_SIDEBAR: f32 = 0.85;
+pub const GLASS_STRONG: f32 = 0.93;
 
 /// トークン色を半透明化して `Rgba` を返す。Liquid Glass の層ごとの透け感。
 pub fn glass(color: u32, alpha: f32) -> gpui_kit::Rgba {

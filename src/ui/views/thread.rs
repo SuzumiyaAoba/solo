@@ -379,7 +379,7 @@ impl Workspace {
                             .font_family(typography::MONO)
                             .cursor_pointer()
                             .child(name)
-                            .hover(move |style| style.bg(ds::glass(p.hover, ds::GLASS_HOVER)))
+                            .hover(move |style| style.bg(rgb(p.hover)))
                             .tooltip(move |window, cx| {
                                 gpui_kit::component::tooltip::Tooltip::new(tip.clone())
                                     .build(window, cx)

@@ -9,7 +9,7 @@ use gpui_kit::component::{
     tab::{Tab as KitTab, TabBar},
 };
 use gpui_kit::{
-    Context, Div, FontWeight, Stateful, Window, WindowControlArea, div, prelude::*, px,
+    Context, Div, FontWeight, Stateful, Window, WindowControlArea, div, prelude::*, px, rgb,
 };
 use solo::{
     design::{self as ds, Button, ButtonVariant, ColorScheme, ControlSize, Icon, Tone, typography},
@@ -80,7 +80,7 @@ impl ProjectManager {
                         gpui_kit::component::tooltip::Tooltip::new(tooltip).build(window, cx)
                     })
                     .when(active, |v| v.bg(ds::glass(p.accent_soft, 0.5)))
-                    .hover(move |style| style.bg(ds::glass(p.hover, ds::GLASS_HOVER)))
+                    .hover(move |style| style.bg(rgb(p.hover)))
             };
         let on_action = |id, icon, tooltip, active, action: Box<dyn gpui_kit::Action>| {
             row(id, icon, tooltip, active)

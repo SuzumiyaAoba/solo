@@ -154,7 +154,7 @@ fn assistant_markdown(
         })
         .code_block(code_block)
         .inline_code(HighlightStyle {
-            background_color: Some(ds::glass(p.hover, ds::GLASS_HOVER).into()),
+            background_color: Some(rgb(p.hover).into()),
             ..Default::default()
         })
         .table(table)

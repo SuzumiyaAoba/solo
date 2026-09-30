@@ -184,7 +184,7 @@ impl Workspace {
                                         .bg(rgb(p.accent)),
                                 )
                             })
-                            .hover(move |style| style.bg(ds::glass(p.hover, ds::GLASS_HOVER)))
+                            .hover(move |style| style.bg(rgb(p.hover)))
                             .child(
                                 div()
                                     .flex()
