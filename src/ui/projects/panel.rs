@@ -1,4 +1,7 @@
-use super::*;
+use super::ProjectManager;
+use gpui_kit::component::WindowExt;
+use gpui_kit::{Context, Subscription, WeakEntity, Window, div, prelude::*, px, rgb};
+use solo::design::{self as ds, Button, ButtonVariant, ControlSize, Icon, Tone, typography};
 use solo::projects::MAX_PROJECTS;
 
 impl ProjectManager {

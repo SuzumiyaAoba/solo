@@ -1,7 +1,8 @@
 //! ログタブと入力欄の検証: フィルタ・レベル・選択/詳細・一括コピーと、
 //! composer の ↑ 呼び出し・変換中バッジを実画面で確認する。
-use super::smoke::key_down;
-use super::*;
+use super::super::{Tab, Workspace, views};
+use super::key_down;
+use gpui_kit::{AsyncWindowContext, Focusable, WeakEntity};
 use solo::event::{Event, Sequencer};
 use std::time::Duration;
 

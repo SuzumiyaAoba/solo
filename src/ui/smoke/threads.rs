@@ -1,8 +1,14 @@
 //! 実モデルを呼ばず、実画面で依頼・チャンネル・スレッドの対応を確認する。
-use super::smoke::{env_pause_ms, key_down, preview_cycle, until};
-use super::*;
+use super::super::{Tab, Workspace};
+use super::{env_pause_ms, key_down, preview_cycle, until};
 use gpui_kit::component::WindowExt;
+use gpui_kit::{AsyncWindowContext, WeakEntity, px, size};
 use solo::projection::ActivityApproval;
+use solo::{
+    design::{self as ds, ColorScheme},
+    mock::Scenario,
+    projection::Status,
+};
 use std::time::Duration;
 
 pub(super) async fn run(this: &WeakEntity<Workspace>, cx: &mut AsyncWindowContext) {
@@ -11,7 +17,7 @@ pub(super) async fn run(this: &WeakEntity<Workspace>, cx: &mut AsyncWindowContex
             this.new_session(window, cx);
             assert!(this.session().view.tab == Tab::Chat);
             this.start_mock(
-                this.selected,
+                this.sessions.selected,
                 Scenario::Threads,
                 "チャンネルと実行スレッドの UI を設計する".into(),
                 cx,
@@ -93,7 +99,7 @@ pub(super) async fn run(this: &WeakEntity<Workspace>, cx: &mut AsyncWindowContex
             "スレッドを見ながら保持する下書き"
         );
         this.start_mock(
-            this.selected,
+            this.sessions.selected,
             Scenario::Threads,
             "前回の調査をもとに検証を続ける".into(),
             cx,

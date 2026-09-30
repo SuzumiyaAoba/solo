@@ -1,9 +1,19 @@
-use super::super::views::{caption, status_icon};
-use super::*;
+use super::super::{
+    ShowChat, ShowDiff, ShowLogs, ShowOverview, ShowThread, Tab, ToggleTheme,
+    views::{caption, status_icon},
+};
+use super::{AddProject, ProjectManager, ShowProjects};
 use gpui_kit::component::{
     Sizable,
     sidebar::{SidebarItem, SidebarMenu, SidebarMenuItem},
     tab::{Tab as KitTab, TabBar},
+};
+use gpui_kit::{
+    Context, Div, FontWeight, Stateful, Window, WindowControlArea, div, prelude::*, px,
+};
+use solo::{
+    design::{self as ds, Button, ButtonVariant, ColorScheme, ControlSize, Icon, Tone, typography},
+    event::SessionId,
 };
 
 impl ProjectManager {
@@ -215,7 +225,7 @@ impl ProjectManager {
                 if let Some(workspace) = &workspace {
                     let workspace = workspace.read(cx);
                     for (index, session) in workspace.sessions.iter().enumerate() {
-                        let selected = active && index == workspace.selected;
+                        let selected = active && index == workspace.sessions.selected;
                         if self.attention_only && !session.needs_attention() && !selected {
                             continue;
                         }

@@ -184,7 +184,7 @@ impl Transport {
         let process = ProcessCleanup(child.clone());
         let (reader, writer, io_worker) = stdio::channel();
         let (prompts, input) = async_channel::bounded(1);
-        let (output, receiver) = async_channel::bounded(256);
+        let (output, receiver) = async_channel::bounded(crate::worker::CHANNEL_CAPACITY);
         let connection = Arc::new(Connection {
             child,
             state: Mutex::new(State::Starting),

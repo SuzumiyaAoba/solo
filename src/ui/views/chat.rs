@@ -1,11 +1,24 @@
-use super::*;
+use super::super::Workspace;
+use super::caption;
 use gpui_kit::component::{
     highlighter::HighlightTheme,
     message::{Message as KitMessage, MessageContent, MessageFooter, MessageHeader},
     message_scroller::MessageScroller,
     text::{SelectionFormat, TextView, TextViewStyle},
 };
+use gpui_kit::{
+    AnyElement, App, ClipboardItem, Context, ElementId, Focusable, FontWeight, HighlightStyle,
+    Overflow, SharedString, StyleRefinement, div, prelude::*, px, rems, rgb,
+};
 use solo::projection::ChatBlock;
+use solo::{
+    design::{
+        self as ds, Button, ButtonVariant, ColorScheme, ControlSize, Icon, Tone, glass, space,
+        typography,
+    },
+    event::SessionId,
+    projection::Speaker,
+};
 use std::{collections::VecDeque, ops::Range};
 
 /// この行数を超える応答は先頭だけを描き、「すべて表示」で全文に戻す。

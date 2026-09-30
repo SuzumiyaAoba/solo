@@ -1,10 +1,11 @@
 use super::*;
-use crate::event::TurnId;
+use crate::event::{Sequencer, TurnId};
 use crate::projection::{ActivityApproval, Apply, SessionProjection, Speaker, Status};
 #[cfg(unix)]
 use std::{
     fs,
     os::unix::fs::PermissionsExt,
+    thread,
     time::{Duration, Instant},
 };
 

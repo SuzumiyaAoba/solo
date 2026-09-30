@@ -1,4 +1,7 @@
-use super::*;
+use super::super::Workspace;
+use super::{caption, empty};
+use gpui_kit::{AnyElement, Context, ScrollStrategy, div, prelude::*, px, rgb, uniform_list};
+use solo::design::{self as ds, Button, ControlSize, Icon, Tone, glass, space, typography};
 use solo::projection::LogRow;
 use std::collections::{BTreeMap, VecDeque};
 

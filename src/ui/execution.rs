@@ -1,6 +1,15 @@
 //! 実行先の選択、ワーカーの起動、セッションとの接続。
-use super::*;
-use solo::{acp_worker, codex_worker, mock};
+use super::{SessionView, Workspace, stream::UiDelivery};
+use gpui_kit::Context;
+use solo::{
+    acp::AgentProfile,
+    acp_worker,
+    backend::BackendKind,
+    codex_worker,
+    mock::{self, Scenario},
+    text::task_title,
+};
+use std::{path::PathBuf, time::Instant};
 
 /// 会話を開始した実行先。選択中の項目やワーカーの接続寿命とは独立して保持する。
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -51,7 +60,22 @@ impl UiController {
 
 impl SessionView {
     pub(super) fn uses_workspace(&self) -> bool {
-        self.login_only || self.backend.as_ref().is_some_and(Backend::uses_workspace)
+        self.login.only
+            || self
+                .backend
+                .active
+                .as_ref()
+                .is_some_and(Backend::uses_workspace)
+    }
+
+    /// config.title 用のタイトル解決: 初回はプロンプトから生成し、続行は既存タイトルを維持する。
+    /// SessionCreated イベントで投影へ反映されるため worker の config にだけ入れる。
+    fn start_title(&self, prompt: &str) -> String {
+        if self.model.last_sequence() == 0 {
+            task_title(prompt)
+        } else {
+            self.model.title().to_owned()
+        }
     }
 
     /// 実行開始。ドメイン status はイベントで進むため、ここでは UI 側の接続中表示だけ立てる。
@@ -69,9 +93,9 @@ impl SessionView {
 
     /// 実行 backend・永続化 kind・選択 index を一括で確定する(片方だけ更新する漏れを防ぐ)。
     fn assign_backend(&mut self, backend: Backend, kind: BackendKind, selected: usize) {
-        self.backend = Some(backend);
+        self.backend.active = Some(backend);
         self.persist.meta.backend = Some(kind);
-        self.selected_backend = selected;
+        self.backend.selected = selected;
     }
 
     fn attach_stream<D: Send + 'static>(
@@ -105,11 +129,11 @@ impl Workspace {
             return;
         }
         let backend_kind = self
-            .backend_kind_at(self.session_at(index).selected_backend)
+            .backend_kind_at(self.session_at(index).backend.selected)
             .unwrap_or(BackendKind::Subscription);
         let requested = Backend::from_kind(&backend_kind).unwrap_or(Backend::Subscription);
         if self.session_at(index).model.last_sequence() > 0
-            && self.session_at(index).backend.as_ref() != Some(&requested)
+            && self.session_at(index).backend.active.as_ref() != Some(&requested)
         {
             self.start_failed(
                 index,
@@ -120,7 +144,7 @@ impl Workspace {
             return;
         }
         // タイトルは各 start_* が config.title へ入れ、SessionCreated イベントで投影される。
-        if self.picker_uses_workspace(self.session_at(index).selected_backend)
+        if self.picker_uses_workspace(self.session_at(index).backend.selected)
             && (self.workspace_busy() || !self.queue.is_empty() || self.queue.paused())
         {
             self.enqueue(index, prompt, cx);
@@ -143,6 +167,7 @@ impl Workspace {
             BackendKind::Subscription => self.start_subscription(index, prompt, cx),
             BackendKind::Acp { id } => {
                 match self
+                    .backends
                     .acp_agents
                     .iter()
                     .find(|agent| &agent.id == id)
@@ -179,13 +204,20 @@ impl Workspace {
 
     /// 表示中のセッションが対象なら picker の選択を確定した実行先へ合わせて閉じる。
     fn sync_picker(&mut self, index: usize, cx: &mut Context<Self>) {
-        if index == self.selected {
-            let selected = self.session_at(index).selected_backend;
-            self.scenario_picker.update(cx, |picker, cx| {
+        if index == self.sessions.selected {
+            let selected = self.session_at(index).backend.selected;
+            self.backends.picker.update(cx, |picker, cx| {
                 picker.selected = selected;
                 picker.close(cx);
             });
         }
+    }
+
+    /// picker の選択を実行先へ合わせてから起動を確定する。acp 経路は sync_picker を
+    /// 挟まず finish_start だけを呼ぶ。
+    fn finish_started(&mut self, index: usize, cx: &mut Context<Self>) {
+        self.sync_picker(index, cx);
+        self.finish_start(index, cx);
     }
 
     pub(super) fn start_mock(
@@ -209,12 +241,7 @@ impl Workspace {
         // scenario() など run_backend を通らず直接呼ばれる経路があるため、last_prompt はここで設定する。
         session.last_prompt = prompt.clone();
         let mut config = mock::Config::new(session.model.id.clone(), scenario);
-        // タイトルは SessionCreated イベントで投影へ反映されるため、config.title へだけ入れる。
-        if session.model.last_sequence() == 0 {
-            config.title = task_title(&prompt);
-        } else {
-            config.title = session.model.title().to_owned();
-        }
+        config.title = session.start_title(&prompt);
         config.prompt = prompt.clone();
         config.start_sequence = session.model.last_sequence();
         config.workspace = self.workspace_path.clone();
@@ -247,8 +274,7 @@ impl Workspace {
             UiDelivery::Mock,
             cx,
         );
-        self.sync_picker(index, cx);
-        self.finish_start(index, cx);
+        self.finish_started(index, cx);
     }
 
     fn start_subscription(&mut self, index: usize, prompt: String, cx: &mut Context<Self>) {
@@ -260,11 +286,7 @@ impl Workspace {
         }
         let config = codex_worker::Config {
             session_id: session.model.id.clone(),
-            title: if session.model.last_sequence() == 0 {
-                task_title(&prompt)
-            } else {
-                session.model.title().to_owned()
-            },
+            title: session.start_title(&prompt),
             workspace,
             prompt: prompt.clone(),
             history: session.history.clone(),
@@ -284,9 +306,9 @@ impl Workspace {
             }
         };
         session.begin_run(cx);
-        session.login = None;
-        session.login_only = false;
-        session.approval = None;
+        session.login.pending = None;
+        session.login.only = false;
+        session.approval.pending = None;
         session.exec.provider_hint = Some("Codex / ChatGPT Subscription".into());
         session.assign_backend(Backend::Subscription, BackendKind::Subscription, 0);
         session.attach_stream(
@@ -295,8 +317,7 @@ impl Workspace {
             UiDelivery::Subscription,
             cx,
         );
-        self.sync_picker(index, cx);
-        self.finish_start(index, cx);
+        self.finish_started(index, cx);
     }
 
     /// ChatGPT ログインを開始できる状態か。ツールメニューの項目の有効化と start_login のガードで共有する。
@@ -304,9 +325,10 @@ impl Workspace {
         let session = self.session();
         !session.display_status().is_active()
             && self.queue.position(&session.model.id).is_none()
-            && session.selected_backend == 0
+            && session.backend.selected == 0
             && session
                 .backend
+                .active
                 .as_ref()
                 .is_none_or(|backend| *backend == Backend::Subscription)
     }
@@ -326,8 +348,8 @@ impl Workspace {
         let session = self.session_mut();
         session.begin_run(cx);
         session.exec.provider_hint = Some("ChatGPT ログイン待ち".into());
-        session.login = None;
-        session.login_only = true;
+        session.login.pending = None;
+        session.login.only = true;
         session.attach_stream(
             UiController::Subscription(controller),
             receiver,
@@ -374,11 +396,7 @@ impl Workspace {
             }
             let config = acp_worker::Config {
                 local_session_id: session.model.id.clone(),
-                title: if session.model.last_sequence() == 0 {
-                    task_title(&prompt)
-                } else {
-                    session.model.title().to_owned()
-                },
+                title: session.start_title(&prompt),
                 workspace,
                 profile: agent.clone(),
                 start_sequence: session.model.last_sequence(),
@@ -425,7 +443,7 @@ impl Workspace {
             return;
         }
         self.start_mock(
-            self.selected,
+            self.sessions.selected,
             scenario,
             format!("{}の表示と操作を検証します。", scenario.label()),
             cx,

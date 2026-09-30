@@ -1,5 +1,7 @@
-use super::*;
+use super::ProjectManager;
 use gpui_kit::component::{WindowExt, dialog::DialogButtonProps};
+use gpui_kit::{Context, FontWeight, PathPromptOptions, Window, div, prelude::*, px, rgb};
+use solo::design::{self as ds, Icon, TextInput as Composer, typography};
 
 impl ProjectManager {
     pub(super) fn choose_folder(&mut self, window: &mut Window, cx: &mut Context<Self>) {

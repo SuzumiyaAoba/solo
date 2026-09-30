@@ -6,13 +6,26 @@ mod diff;
 pub(in crate::ui) mod logs;
 mod thread;
 
-use super::*;
+use super::{
+    CloseWindow, NextAttention, SessionView, ShowChat, ShowDiff, ShowLogs, ShowOverview, Tab,
+    ToggleTheme, Workspace, execution::Backend,
+};
 use gpui_kit::component::{
     Sizable, h_resizable,
     menu::PopupMenuItem,
     resizable_panel,
     status_bar::StatusBar,
     tab::{Tab as KitTab, TabBar},
+};
+use gpui_kit::{
+    Anchor, App, Context, Div, Focusable, FontWeight, SharedString, Window, WindowControlArea, div,
+    prelude::*, px, rgb,
+};
+use solo::{
+    design::{
+        self as ds, Button, ButtonVariant, ColorScheme, ControlSize, Icon, Tone, space, typography,
+    },
+    projection::Status,
 };
 
 const CHANNEL_HEADER_HEIGHT: f32 = 60.;
@@ -21,9 +34,9 @@ const TAB_ORDER: [Tab; 4] = [Tab::Chat, Tab::Diff, Tab::Overview, Tab::Logs];
 
 impl SessionView {
     fn uses_openai_icon(&self) -> bool {
-        match &self.backend {
+        match &self.backend.active {
             Some(backend) => *backend == Backend::Subscription,
-            None => self.login_only || self.selected_backend == 0,
+            None => self.login.only || self.backend.selected == 0,
         }
     }
 
@@ -116,7 +129,7 @@ impl Workspace {
 
     fn toolbar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let session = self.session();
-        let demo = !self.picker_uses_workspace(session.selected_backend);
+        let demo = !self.picker_uses_workspace(session.backend.selected);
         div()
             .flex_shrink_0()
             .px(px(space::LG))
@@ -156,7 +169,7 @@ impl Workspace {
                         .control_size(ControlSize::Small)
                         .disabled(session.display_status().is_active())
                         .on_click(cx.listener(|this, _, _, cx| {
-                            let selected = this.session().selected_backend;
+                            let selected = this.session().backend.selected;
                             if let Some(scenario) = this.mock_scenario(selected) {
                                 this.scenario(scenario, cx);
                             }
@@ -248,7 +261,7 @@ impl Workspace {
                 )
             })
             .when(
-                (session.approval.is_some() || session.login.is_some())
+                (session.approval.pending.is_some() || session.login.pending.is_some())
                     && session.view.tab != Tab::Overview,
                 |v| {
                     v.child(

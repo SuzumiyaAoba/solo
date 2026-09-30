@@ -1,12 +1,19 @@
-use super::smoke::{approval_preview_pause, inject_approval, start_smoke_turn, until};
-use super::*;
+use super::super::Workspace;
+use super::{approval_preview_pause, inject_approval, rule_editor, start_smoke_turn, until};
+use gpui_kit::{AsyncWindowContext, WeakEntity};
 use solo::auto_approval::{ReviewInput, Verdict};
+use solo::{
+    approval::{ApprovalReply, ApprovalRequest},
+    auto_approval::{Assessment, Reviewer},
+    command_rules::RuleList,
+    config::{ApprovalMode, ApprovalSettings, AutoSettings},
+};
 use std::{
     sync::{
-        Mutex,
+        Arc, Mutex,
         atomic::{AtomicBool, Ordering},
     },
-    time::Duration,
+    time::{Duration, Instant},
 };
 use tokio_util::sync::CancellationToken;
 
@@ -88,6 +95,7 @@ async fn wait_manual(this: &WeakEntity<Workspace>, cx: &mut AsyncWindowContext) 
             this.update_in(cx, |this, _, _| {
                 this.session()
                     .approval
+                    .pending
                     .as_ref()
                     .is_some_and(|request| !request.is_reviewing())
             })
@@ -102,8 +110,8 @@ pub(super) async fn check(this: &WeakEntity<Workspace>, cx: &mut AsyncWindowCont
     let fake = Arc::new(FakeReviewer::default());
     let (store, request, original_reviewer) = this
         .update_in(cx, |this, window, cx| {
-            let old = this.approval_reviewer.clone();
-            this.approval_reviewer = fake.clone();
+            let old = this.approval.reviewer.clone();
+            this.approval.reviewer = fake.clone();
             this.new_session(window, cx);
             start_smoke_turn(this.session_mut());
             this.session_mut().last_prompt = "テストを実行してください".into();
@@ -115,7 +123,7 @@ pub(super) async fn check(this: &WeakEntity<Workspace>, cx: &mut AsyncWindowCont
                 },
                 std::path::Path::new(&this.workspace_path),
             );
-            (this.command_rules.as_ref().unwrap().clone(), request, old)
+            (this.rules.store.as_ref().unwrap().clone(), request, old)
         })
         .unwrap();
     let cfg = store.config_store().unwrap().clone();
@@ -155,6 +163,7 @@ pub(super) async fn check(this: &WeakEntity<Workspace>, cx: &mut AsyncWindowCont
             assert!(
                 this.session()
                     .approval
+                    .pending
                     .as_ref()
                     .unwrap()
                     .review_note
@@ -217,14 +226,14 @@ pub(super) async fn check(this: &WeakEntity<Workspace>, cx: &mut AsyncWindowCont
     ));
     fake.release.store(true, Ordering::Release);
     this.update_in(cx, |this, _, cx| {
-        command_rules_smoke::settings_smoke(&this.rule_editor, cx)
+        rule_editor::settings_smoke(&this.rules.editor, cx)
     })
     .unwrap();
     cfg.set_approval(config(ApprovalMode::Auto, "allow-model"))
         .unwrap();
     this.update_in(cx, |this, window, cx| {
-        this.rule_editor.update(cx, |editor, cx| {
-            editor.page = super::command_rules::Page::Settings;
+        this.rules.editor.update(cx, |editor, cx| {
+            editor.page = super::super::rule_editor::Page::Settings;
             cx.notify();
         });
         this.open_command_rules(window, cx);
@@ -238,15 +247,15 @@ pub(super) async fn check(this: &WeakEntity<Workspace>, cx: &mut AsyncWindowCont
     this.update_in(cx, |this, window, cx| {
         use gpui_kit::component::WindowExt;
         window.close_sheet(cx);
-        this.rule_editor.update(cx, |editor, cx| {
-            editor.page = super::command_rules::Page::Commands;
+        this.rules.editor.update(cx, |editor, cx| {
+            editor.page = super::super::rule_editor::Page::Commands;
             cx.notify();
         });
     })
     .unwrap();
     cfg.set_approval(ApprovalSettings::default()).unwrap();
     this.update_in(cx, |this, _, cx| {
-        this.approval_reviewer = original_reviewer;
+        this.approval.reviewer = original_reviewer;
         this.reconsider_approvals(cx);
     })
     .unwrap();

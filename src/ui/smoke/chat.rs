@@ -1,6 +1,8 @@
 //! 会話タブの表示検証: 分割ブロックの連結・Markdown・折りたたみを実画面で確認する。
-use super::smoke::{env_pause_ms, finish_smoke_turn, preview_cycle, start_smoke_turn};
-use super::*;
+use super::super::{Tab, Workspace, views};
+use super::{env_pause_ms, finish_smoke_turn, preview_cycle, start_smoke_turn};
+use gpui_kit::{AsyncWindowContext, WeakEntity, px, size};
+use solo::design::{self as ds, ColorScheme};
 use solo::event::{Event, Sequencer};
 use std::time::Duration;
 

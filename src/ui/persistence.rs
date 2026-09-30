@@ -1,6 +1,17 @@
 //! セッションのイベント・属性・順番待ちを WorkspaceStore へ保存し、起動時に復元する。
-use super::*;
-use std::time::Duration;
+use super::{SessionView, Workspace, execution::Backend};
+use gpui_kit::{App, Context, Window};
+use solo::{
+    backend::BackendKind,
+    event::{SCHEMA_VERSION, SessionId},
+    mock::{SCENARIOS, Scenario},
+    orchestration::QueuedRun,
+    session_store::{
+        QueueEntry, RestoredSession, SessionFile, SessionMeta, StoredQueue, WorkspaceState,
+        WorkspaceStore,
+    },
+};
+use std::{sync::Arc, time::Duration};
 
 /// 下書き保存のデバウンス間隔。キー入力ごとの FileTransaction を避ける。
 const META_SAVE_DELAY: Duration = Duration::from_millis(600);
@@ -92,13 +103,13 @@ impl Workspace {
     pub(super) fn backend_kind_at(&self, index: usize) -> Option<BackendKind> {
         if index == 0 {
             Some(BackendKind::Subscription)
-        } else if let Some(agent) = self.acp_agents.get(index - 1) {
+        } else if let Some(agent) = self.backends.acp_agents.get(index - 1) {
             Some(BackendKind::Acp {
                 id: agent.id.clone(),
             })
         } else {
             SCENARIOS
-                .get(index.wrapping_sub(1 + self.acp_agents.len()))
+                .get(index.wrapping_sub(1 + self.backends.acp_agents.len()))
                 .map(|scenario| BackendKind::Mock {
                     key: scenario.key().to_owned(),
                 })
@@ -110,26 +121,27 @@ impl Workspace {
         match backend {
             BackendKind::Subscription => Some(0),
             BackendKind::Acp { id } => self
+                .backends
                 .acp_agents
                 .iter()
                 .position(|agent| &agent.id == id)
                 .map(|index| index + 1),
             BackendKind::Mock { key } => Scenario::from_key(key)
                 .and_then(|scenario| SCENARIOS.iter().position(|item| *item == scenario))
-                .map(|index| 1 + self.acp_agents.len() + index),
+                .map(|index| 1 + self.backends.acp_agents.len() + index),
         }
     }
 
     /// picker の index がワークスペースを使う実行先（Subscription/ACP）を指すか。
     /// Mock シナリオは workspace に触れない。
     pub(super) fn picker_uses_workspace(&self, index: usize) -> bool {
-        index <= self.acp_agents.len()
+        index <= self.backends.acp_agents.len()
     }
 
     /// picker の index から Mock シナリオを取る。範囲外は None。
     pub(super) fn mock_scenario(&self, index: usize) -> Option<Scenario> {
         index
-            .checked_sub(1 + self.acp_agents.len())
+            .checked_sub(1 + self.backends.acp_agents.len())
             .and_then(|index| SCENARIOS.get(index))
             .copied()
     }
@@ -213,7 +225,7 @@ impl Workspace {
             version: SCHEMA_VERSION,
             selected: self
                 .sessions
-                .get(self.selected)
+                .get(self.sessions.selected)
                 .map(|session| session.model.id.clone()),
             queue: StoredQueue {
                 paused: self.queue.paused(),
@@ -274,7 +286,7 @@ impl Workspace {
             .and_then(|id| self.session_index(&id))
             .or((!self.sessions.is_empty()).then_some(0))
         {
-            self.selected = selected;
+            self.sessions.selected = selected;
         }
         self.serial = self
             .sessions
@@ -352,8 +364,8 @@ impl Workspace {
         });
         view.persist.meta = meta;
         view.history = history;
-        view.backend = backend;
-        view.selected_backend = selected_backend;
+        view.backend.active = backend;
+        view.backend.selected = selected_backend;
         view.unread_result = view.persist.meta.unread_result;
         view.artifacts = log_paths.into_iter().map(Arc::new).collect();
         for path in &view.persist.meta.reviewed {

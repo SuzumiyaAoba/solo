@@ -1,7 +1,9 @@
 //! 実際のモデル、shell、workspace の書込みは一切呼び出さない。
 //! worker がログ I/O を所有し、bounded channel で UI と接続する。
-use crate::event::{Emitter, Envelope, Event, Sequencer, SessionId, Usage};
+use crate::event::{Emitter, Envelope, Event, SessionId, Usage};
 use crate::text::preview;
+use crate::worker;
+pub use crate::worker::CHANNEL_CAPACITY;
 use async_channel::{Receiver, Sender, TrySendError};
 use std::{
     fs,
@@ -15,8 +17,6 @@ use std::{
     time::Duration,
 };
 use unicode_segmentation::UnicodeSegmentation;
-
-pub const CHANNEL_CAPACITY: usize = 256;
 
 /// UI のシナリオピッカーが並べる一覧。backend::MOCK_SCENARIO_KEYS と同順。
 pub const SCENARIOS: [Scenario; 6] = [
@@ -126,71 +126,105 @@ impl From<Envelope> for Delivery {
     }
 }
 
-/// 0=実行中、1=cancel、2=切断注入、3=window/session 廃棄。
+/// Producer が参照する制御状態。Running からの一方向遷移だけを許す。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[repr(u8)]
+enum SignalState {
+    /// 実行中。
+    #[default]
+    Running = 0,
+    /// 実行の中止要求。
+    Cancel = 1,
+    /// 切断の注入(結果未確認の扱いを検証する)。
+    Disconnect = 2,
+    /// window/session の廃棄。中断イベントも送らず即終了する。
+    Shutdown = 3,
+}
+
+/// AtomicU8 上の型付き制御シグナル。Controller と Producer が共有する。
+#[derive(Default)]
+struct Signal(AtomicU8);
+
+impl Signal {
+    fn load(&self) -> SignalState {
+        match self.0.load(Ordering::SeqCst) {
+            1 => SignalState::Cancel,
+            2 => SignalState::Disconnect,
+            3 => SignalState::Shutdown,
+            _ => SignalState::Running,
+        }
+    }
+    /// Running 状態からだけ遷移する。先行する要求を上書きしない。
+    fn transition(&self, to: SignalState) {
+        let _ = self.0.compare_exchange(
+            SignalState::Running as u8,
+            to as u8,
+            Ordering::SeqCst,
+            Ordering::SeqCst,
+        );
+    }
+    /// どの状態からでも止める。Producer は中断通知を出さずに抜ける。
+    fn shutdown(&self) {
+        self.0.store(SignalState::Shutdown as u8, Ordering::SeqCst);
+    }
+}
+
 pub struct Controller {
-    signal: Arc<AtomicU8>,
+    signal: Arc<Signal>,
     worker: Option<JoinHandle<()>>,
 }
 
 impl Controller {
     pub fn cancel(&self) {
-        let _ = self
-            .signal
-            .compare_exchange(0, 1, Ordering::SeqCst, Ordering::SeqCst);
+        self.signal.transition(SignalState::Cancel);
     }
     pub fn disconnect(&self) {
-        let _ = self
-            .signal
-            .compare_exchange(0, 2, Ordering::SeqCst, Ordering::SeqCst);
+        self.signal.transition(SignalState::Disconnect);
     }
     pub fn is_finished(&self) -> bool {
         self.worker.as_ref().is_none_or(JoinHandle::is_finished)
     }
     /// テスト/CLI 専用。UI thread では join しない。
     pub fn shutdown_and_join(mut self) -> thread::Result<()> {
-        self.signal.store(3, Ordering::SeqCst);
+        self.signal.shutdown();
         self.worker.take().expect("worker exists").join()
     }
 }
 
 impl Drop for Controller {
     fn drop(&mut self) {
-        self.signal.store(3, Ordering::SeqCst);
+        self.signal.shutdown();
     }
 }
 
 pub fn start(config: Config) -> io::Result<(Controller, Receiver<Delivery>)> {
     let (sender, receiver) = async_channel::bounded(CHANNEL_CAPACITY);
-    let signal = Arc::new(AtomicU8::new(0));
+    let signal = Arc::new(Signal::default());
     let worker_signal = signal.clone();
-    let worker = thread::Builder::new()
-        .name(format!("solo-mock-{}", config.session_id))
-        .spawn(move || {
-            let mut producer = Producer {
-                emitter: Emitter::new(
-                    Sequencer::new(
-                        config.session_id.clone(),
-                        config.start_sequence,
-                        format!("turn-{}", config.start_sequence + 1),
-                    ),
-                    sender,
-                ),
-                config,
-                signal: worker_signal,
-            };
-            if let Err(error) = producer.run() {
-                Producer::deliver(
-                    &producer.signal,
-                    producer.emitter.sender(),
-                    Delivery::Error(format!("疑似ストリームの I/O エラー: {error}")),
-                    false,
-                );
-            }
-        })?;
+    let handle = worker::spawn("mock", config.session_id.clone(), move || {
+        let mut producer = Producer {
+            emitter: worker::emitter(
+                config.session_id.clone(),
+                config.start_sequence,
+                format!("turn-{}", config.start_sequence + 1),
+                sender,
+            ),
+            config,
+            signal: worker_signal,
+        };
+        if let Err(error) = producer.run() {
+            Producer::deliver(
+                &producer.signal,
+                producer.emitter.sender(),
+                Delivery::Error(format!("疑似ストリームの I/O エラー: {error}")),
+                false,
+            );
+        }
+    })?;
     Ok((
         Controller {
             signal,
-            worker: Some(worker),
+            worker: Some(handle),
         },
         receiver,
     ))
@@ -199,20 +233,20 @@ pub fn start(config: Config) -> io::Result<(Controller, Receiver<Delivery>)> {
 struct Producer {
     emitter: Emitter<Delivery>,
     config: Config,
-    signal: Arc<AtomicU8>,
+    signal: Arc<Signal>,
 }
 
 impl Producer {
-    /// signal を監視しながら送信する。終了(3)、または interruptible 中の要求で打ち切る。
+    /// signal を監視しながら送信する。Shutdown、または interruptible 中の要求で打ち切る。
     fn deliver(
-        signal: &AtomicU8,
+        signal: &Signal,
         sender: &Sender<Delivery>,
         mut delivery: Delivery,
         interruptible: bool,
     ) -> bool {
         loop {
-            let state = signal.load(Ordering::SeqCst);
-            if state == 3 || (interruptible && state != 0) {
+            let state = signal.load();
+            if state == SignalState::Shutdown || (interruptible && state != SignalState::Running) {
                 return false;
             }
             match sender.try_send(delivery) {
@@ -270,11 +304,11 @@ impl Producer {
     }
 
     fn interrupted(&mut self) {
-        let event = match self.signal.load(Ordering::SeqCst) {
-            1 => Event::TurnCancelled {
+        let event = match self.signal.load() {
+            SignalState::Cancel => Event::TurnCancelled {
                 reason: "疑似ストリームの停止を確認しました".into(),
             },
-            2 => Event::Disconnected {
+            SignalState::Disconnect => Event::Disconnected {
                 reason: "接続の切断を注入しました。実行結果は未確認です".into(),
             },
             _ => return,
@@ -366,7 +400,7 @@ impl Producer {
             " ".repeat(4096 - chunk_end)
         );
         for index in 0..self.config.scenario.count() {
-            if self.signal.load(Ordering::SeqCst) != 0 {
+            if self.signal.load() != SignalState::Running {
                 writer.flush()?;
                 self.interrupted();
                 return Ok(());

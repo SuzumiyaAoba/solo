@@ -1,6 +1,16 @@
 use super::views::{caption, status_icon};
-use super::*;
+use super::{Tab, Workspace, review_indicator};
 use gpui_kit::component::{WindowExt, dialog::DialogButtonProps};
+use gpui_kit::{
+    AnyElement, App, Context, Div, Focusable, FontWeight, WeakEntity, Window, div, prelude::*, px,
+    rgb,
+};
+use solo::{
+    codex::DeviceLogin,
+    design::{self as ds, Button, ButtonVariant, ControlSize, Icon, Tone, space, typography},
+    mock::Scenario,
+    projection::Status,
+};
 
 impl Workspace {
     pub(super) fn overview(&self, cx: &mut Context<Self>) -> AnyElement {
@@ -31,7 +41,7 @@ impl Workspace {
                 .into_any_element();
         }
         div()
-            .id(("task-overview", self.selected))
+            .id(("task-overview", self.sessions.selected))
             .size_full()
             .overflow_y_scroll()
             .child(
@@ -56,7 +66,7 @@ impl Workspace {
                             )
                             .child(caption(s.provider_display().unwrap_or_default(), cx)),
                     )
-                    .when_some(s.approval_note.clone(), |v, note| {
+                    .when_some(s.approval.note.clone(), |v, note| {
                         v.child(
                             div()
                                 .text_size(px(typography::LABEL))
@@ -64,7 +74,7 @@ impl Workspace {
                                 .child(note),
                         )
                     })
-                    .when_some(s.login.as_ref(), |v, login| {
+                    .when_some(s.login.pending.as_ref(), |v, login| {
                         v.child(self.login_card(login, cx))
                     })
                     .child(self.run_summary(cx))
@@ -169,7 +179,7 @@ impl Workspace {
         let p = ds::theme(cx);
         let session = self.session();
         let hint = session.exec.provider_hint.as_deref();
-        let body: AnyElement = if let Some(login) = session.login.as_ref() {
+        let body: AnyElement = if let Some(login) = session.login.pending.as_ref() {
             div()
                 .flex()
                 .flex_col()
@@ -180,7 +190,7 @@ impl Workspace {
                 ))
                 .child(self.login_actions("modal-login", login, weak))
                 .into_any_element()
-        } else if session.login_only {
+        } else if session.login.only {
             div()
                 .flex()
                 .items_center()
@@ -449,7 +459,7 @@ impl Workspace {
                                     s.state_label().into()
                                 },
                             ))
-                            .when(!self.picker_uses_workspace(s.selected_backend), |v| {
+                            .when(!self.picker_uses_workspace(s.backend.selected), |v| {
                                 v.child(ds::badge("デモ", Tone::Neutral, cx))
                             }),
                     )

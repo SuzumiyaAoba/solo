@@ -19,6 +19,7 @@ pub mod projects;
 pub mod session_store;
 mod storage;
 pub mod text;
+pub mod worker;
 
 #[cfg(all(feature = "gui", target_os = "macos"))]
 pub mod design;

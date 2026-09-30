@@ -1,6 +1,7 @@
-use super::command_rules::CommandRuleEditor;
-use super::*;
-use solo::command_rules::{CommandInvocation, Matching};
+use super::super::rule_editor::CommandRuleEditor;
+use gpui_kit::{App, Entity};
+use solo::command_rules::{CommandInvocation, Decision, Matching, RuleList};
+use solo::config::ApprovalMode;
 
 /// Exercise the actual editor callbacks using the smoke test's temporary store.
 pub(super) fn smoke(editor: &Entity<CommandRuleEditor>, cx: &mut App) {
@@ -64,7 +65,7 @@ pub(super) fn smoke(editor: &Entity<CommandRuleEditor>, cx: &mut App) {
         );
 
         // ツールタブの実描画まで通す。
-        editor.page = super::command_rules::Page::Tools;
+        editor.page = super::super::rule_editor::Page::Tools;
         cx.notify();
 
         editor

@@ -1,57 +1,38 @@
-#[cfg(debug_assertions)]
-mod approval_modes_smoke;
-mod approvals;
-#[cfg(debug_assertions)]
-mod chat_smoke;
-mod command_rules;
-#[cfg(debug_assertions)]
-mod command_rules_smoke;
+mod approval_flow;
+mod cli;
 mod execution;
-#[cfg(debug_assertions)]
-mod logs_smoke;
 mod overview;
 mod persistence;
 mod projects;
-#[cfg(debug_assertions)]
-mod projects_smoke;
+mod rule_editor;
 #[cfg(debug_assertions)]
 mod smoke;
 mod stream;
-#[cfg(debug_assertions)]
-mod threads_smoke;
 mod views;
 #[cfg(feature = "gui-visual")]
 mod visual;
 mod workflow;
-#[cfg(debug_assertions)]
-mod workflow_smoke;
 
-use approvals::PendingApproval;
+use approval_flow::PendingApproval;
 use execution::{Backend, UiController};
 use gpui_kit::component::message_scroller::MessageScrollerState;
 use gpui_kit::{prelude::*, *};
 use solo::design::{
-    self as ds, Button, ButtonVariant, ColorScheme, ControlSize, DesignAssets, Icon, Select,
-    Submitted, TextInput as Composer, ToastHost, Tone, glass, space, typography,
+    self as ds, ColorScheme, ControlSize, DesignAssets, Icon, Select, Submitted,
+    TextInput as Composer, ToastHost, Tone,
 };
 use solo::{
     acp::{self, AgentProfile},
-    approval::{ApprovalPlan, ApprovalReply, ApprovalRequest},
-    auto_approval::{self, Assessment, CodexReviewer, Reviewer},
-    backend::BackendKind,
+    auto_approval::{CodexReviewer, Reviewer},
     codex::DeviceLogin,
-    command_rules::{Decision, RuleList, RuleStore},
-    config::{ApprovalMode, ApprovalSettings, AutoSettings},
-    event::{SCHEMA_VERSION, SessionId},
+    command_rules::RuleStore,
+    config::ApprovalSettings,
+    event::SessionId,
     harness::Message,
-    mock::{SCENARIOS, Scenario},
-    orchestration::{QueuedRun, RunQueue},
-    projection::{DiffKind, SessionProjection, Speaker, Status},
-    session_store::{
-        QueueEntry, RestoredSession, SessionFile, SessionMeta, StoredQueue, WorkspaceState,
-        WorkspaceStore,
-    },
-    text::task_title,
+    mock::SCENARIOS,
+    orchestration::RunQueue,
+    projection::SessionProjection,
+    session_store::{SessionFile, SessionMeta, WorkspaceStore},
 };
 use std::{
     collections::HashSet,
@@ -59,7 +40,6 @@ use std::{
     sync::Arc,
     time::{Duration, Instant},
 };
-use stream::UiDelivery;
 
 actions!(
     solo_app,
@@ -78,51 +58,25 @@ actions!(
 );
 
 pub fn run() {
-    let args: Vec<_> = std::env::args().skip(1).collect();
-    if args.iter().any(|arg| arg == "--help") {
-        println!(
-            "Solo\n  --light     ライトテーマで起動\n  --compact   小さいウィンドウで起動\n  --smoke     実画面の検証後に終了\n  --visual D  PNG で実描画を出力して終了（要 feature gui-visual）"
-        );
-        return;
-    }
-    let visual = args
-        .iter()
-        .position(|arg| arg == "--visual")
-        .and_then(|i| args.get(i + 1).map(PathBuf::from))
-        .or_else(|| {
-            args.iter()
-                .find_map(|arg| arg.strip_prefix("--visual=").map(PathBuf::from))
-        });
-    #[cfg(feature = "gui-visual")]
-    if let Some(dir) = visual {
-        visual::run(&dir);
-        return;
-    }
-    #[cfg(not(feature = "gui-visual"))]
-    if visual.is_some() {
-        eprintln!(
+    match cli::parse(&std::env::args().skip(1).collect::<Vec<_>>()) {
+        cli::CliMode::Help => println!("{}", cli::USAGE),
+        #[cfg(feature = "gui-visual")]
+        cli::CliMode::Visual(dir) => visual::run(&dir),
+        #[cfg(not(feature = "gui-visual"))]
+        cli::CliMode::Visual(_) => eprintln!(
             "--visual には feature gui-visual が必要です: cargo run --features gui-visual -- --visual DIR"
-        );
-        return;
+        ),
+        cli::CliMode::Unsupported(message) => eprintln!("{message}"),
+        cli::CliMode::App(options) => run_app(options),
     }
-    // smoke 系モジュールは debug ビルドだけに含める。
-    #[cfg(debug_assertions)]
-    let smoke = args.iter().any(|arg| arg == "--smoke");
-    #[cfg(not(debug_assertions))]
-    let smoke = {
-        if args.iter().any(|arg| arg == "--smoke") {
-            eprintln!("--smoke は debug ビルドでのみ有効です");
-            return;
-        }
-        false
-    };
-    let light = args.iter().any(|arg| arg == "--light");
-    let compact = args.iter().any(|arg| arg == "--compact");
+}
+
+fn run_app(options: cli::AppOptions) {
     gpui_kit::application()
         .with_assets(DesignAssets)
         .run(move |cx| {
             ds::init(cx);
-            if light {
+            if options.light {
                 ds::set_theme(ColorScheme::Light, cx);
             }
             cx.bind_keys([
@@ -146,7 +100,7 @@ pub fn run() {
                 }
             })
             .detach();
-            let window_size = if compact {
+            let window_size = if options.compact {
                 size(px(820.), px(620.))
             } else {
                 size(px(1240.), px(840.))
@@ -174,7 +128,8 @@ pub fn run() {
                     ..Default::default()
                 },
                 |window, cx| {
-                    let view = cx.new(|cx| projects::ProjectManager::new(smoke, window, cx));
+                    let view =
+                        cx.new(|cx| projects::ProjectManager::new(options.smoke, window, cx));
                     cx.new(|cx| gpui_kit::component::Root::new(view, window, cx))
                 },
             )
@@ -246,6 +201,28 @@ struct Metrics {
     elapsed: Option<Duration>,
 }
 
+/// セッションのログイン状態。pending は進行中のデバイスフロー、
+/// only は「ログインのためだけに作られたセッション」の印。
+#[derive(Default)]
+struct Login {
+    pending: Option<DeviceLogin>,
+    only: bool,
+}
+
+/// 承認カードの状態。pending は回答待ちの要求、note は判定結果の表示メモ。
+#[derive(Default)]
+struct SessionApproval {
+    pending: Option<PendingApproval>,
+    note: Option<String>,
+}
+
+/// セッションの実行先。selected はピッカーの index、active は開始時に確定した実行先。
+#[derive(Default)]
+struct BackendChoice {
+    selected: usize,
+    active: Option<Backend>,
+}
+
 struct SessionView {
     model: SessionProjection,
     composer: Entity<Composer>,
@@ -255,17 +232,14 @@ struct SessionView {
     /// 全文ログのパス。ストアありの実行ではセッションの logs/ を指し、再起動後も残る。
     artifacts: Vec<Arc<PathBuf>>,
     history: Vec<Message>,
-    login: Option<DeviceLogin>,
-    login_only: bool,
-    approval: Option<PendingApproval>,
-    backend: Option<Backend>,
-    selected_backend: usize,
+    login: Login,
+    approval: SessionApproval,
+    backend: BackendChoice,
     _input_subscription: Subscription,
     _log_search_subscription: Subscription,
     unread_result: bool,
     input_composing: bool,
     last_prompt: String,
-    approval_note: Option<String>,
     _change_subscription: Subscription,
     view: ViewState,
     exec: ExecState,
@@ -273,10 +247,83 @@ struct SessionView {
     metrics: Metrics,
 }
 
+/// セッション一覧と選択位置。一覧と選択を同じ構造に置き、
+/// Workspace の他フィールドと分けて借用できるようにする。
+#[derive(Default)]
+struct Sessions {
+    entries: Vec<SessionView>,
+    selected: usize,
+}
+impl Sessions {
+    /// model.id → entries の index。コールバックで頻出する検索。
+    fn index_of(&self, id: &SessionId) -> Option<usize> {
+        self.entries
+            .iter()
+            .position(|session| session.model.id == *id)
+    }
+    fn current(&self) -> &SessionView {
+        &self.entries[self.selected]
+    }
+    fn current_mut(&mut self) -> &mut SessionView {
+        &mut self.entries[self.selected]
+    }
+    fn at(&self, index: usize) -> &SessionView {
+        &self.entries[index]
+    }
+    fn at_mut(&mut self, index: usize) -> &mut SessionView {
+        &mut self.entries[index]
+    }
+    fn push(&mut self, view: SessionView) {
+        self.entries.push(view);
+    }
+    /// 選択中のセッションを取り出し、選択を一つ前へ戻す。
+    fn remove_current(&mut self) -> SessionView {
+        let removed = self.entries.remove(self.selected);
+        self.selected = self.selected.saturating_sub(1);
+        removed
+    }
+}
+impl std::ops::Deref for Sessions {
+    type Target = [SessionView];
+    fn deref(&self) -> &[SessionView] {
+        &self.entries
+    }
+}
+impl std::ops::DerefMut for Sessions {
+    fn deref_mut(&mut self) -> &mut [SessionView] {
+        &mut self.entries
+    }
+}
+
+/// 実行先ピッカー。選択肢は Subscription + ACP エージェント + mock シナリオ。
+struct BackendOptions {
+    picker: Entity<Select>,
+    acp_agents: Vec<AgentProfile>,
+    _subscription: Subscription,
+}
+
+/// コマンドルールの保存先と編集エディタ。
+struct RuleState {
+    store: Result<RuleStore, String>,
+    editor: Entity<rule_editor::CommandRuleEditor>,
+    /// smoke 用の一時領域。drop で削除する。
+    _temp: Option<tempfile::TempDir>,
+}
+
+/// 承認ポリシーと Auto 判定の状態。
+struct ApprovalController {
+    /// config.yml 由来の承認設定。store が開けない場合はエラーを保持する。
+    settings: Result<ApprovalSettings, String>,
+    /// PendingApproval と紐付ける発行番号。遅延応答の陳腐化を検出する。
+    serial: u64,
+    /// Auto 判定のレビュアー。テストではモックに差し替える。
+    reviewer: Arc<dyn Reviewer>,
+    _settings_subscription: Subscription,
+}
+
 struct Workspace {
     focus: FocusHandle,
-    sessions: Vec<SessionView>,
-    selected: usize,
+    sessions: Sessions,
     serial: u64,
     message: String,
     workspace_path: String,
@@ -285,17 +332,10 @@ struct Workspace {
     store: Option<WorkspaceStore>,
     /// store の一時領域。smoke 用。
     _store_temp: Option<tempfile::TempDir>,
-    scenario_picker: Entity<Select>,
-    acp_agents: Vec<AgentProfile>,
-    _picker_subscription: Subscription,
+    backends: BackendOptions,
     toast: Entity<ToastHost>,
-    command_rules: Result<RuleStore, String>,
-    rule_editor: Entity<command_rules::CommandRuleEditor>,
-    _rule_temp: Option<tempfile::TempDir>,
-    approval_settings: Result<ApprovalSettings, String>,
-    approval_serial: u64,
-    approval_reviewer: Arc<dyn Reviewer>,
-    _approval_settings_subscription: Subscription,
+    rules: RuleState,
+    approval: ApprovalController,
     show_metrics: bool,
     rendered: usize,
     queue: RunQueue,
@@ -335,7 +375,7 @@ impl Workspace {
         let picker_subscription = cx.subscribe(
             &scenario_picker,
             |this, _, selected: &solo::design::SelectionChanged, cx| {
-                this.session_mut().selected_backend = selected.index;
+                this.session_mut().backend.selected = selected.index;
                 cx.notify();
             },
         );
@@ -346,32 +386,39 @@ impl Workspace {
             RuleStore::for_workspace(&path)
         }
         .map_err(|error| error.to_string());
-        approvals::init(cx);
-        let approval_settings = approvals::settings(&command_rules);
-        let approval_settings_subscription = cx
-            .observe_global::<approvals::PolicyRevision>(|this, cx| this.reconsider_approvals(cx));
+        approval_flow::init(cx);
+        let approval_settings = approval_flow::settings(&command_rules);
+        let approval_settings_subscription =
+            cx.observe_global::<approval_flow::PolicyRevision>(|this, cx| {
+                this.reconsider_approvals(cx)
+            });
         let rule_editor =
-            cx.new(|cx| command_rules::CommandRuleEditor::new(command_rules.clone(), window, cx));
+            cx.new(|cx| rule_editor::CommandRuleEditor::new(command_rules.clone(), window, cx));
         let mut this = Self {
             focus: cx.focus_handle(),
-            command_rules,
-            rule_editor,
-            _rule_temp: rule_temp,
-            approval_settings,
-            approval_serial: 0,
-            approval_reviewer: Arc::new(CodexReviewer),
-            _approval_settings_subscription: approval_settings_subscription,
-            sessions: Vec::new(),
-            selected: 0,
+            rules: RuleState {
+                store: command_rules,
+                editor: rule_editor,
+                _temp: rule_temp,
+            },
+            approval: ApprovalController {
+                settings: approval_settings,
+                serial: 0,
+                reviewer: Arc::new(CodexReviewer),
+                _settings_subscription: approval_settings_subscription,
+            },
+            sessions: Sessions::default(),
             serial: 0,
             message: String::new(),
             workspace_name,
             workspace_path: path.display().to_string(),
             store,
             _store_temp: store_temp,
-            scenario_picker,
-            acp_agents,
-            _picker_subscription: picker_subscription,
+            backends: BackendOptions {
+                picker: scenario_picker,
+                acp_agents,
+                _subscription: picker_subscription,
+            },
             toast,
             show_metrics: false,
             rendered: 0,
@@ -416,31 +463,29 @@ impl Workspace {
 
     /// model.id → sessions の index。コールバックで頻出する検索。
     pub(super) fn session_index(&self, id: &SessionId) -> Option<usize> {
-        self.sessions
-            .iter()
-            .position(|session| session.model.id == *id)
+        self.sessions.index_of(id)
     }
 
     /// 選択中のセッション。
     pub(super) fn session(&self) -> &SessionView {
-        &self.sessions[self.selected]
+        self.sessions.current()
     }
 
     /// 選択中のセッション(可変)。
     /// `&mut self` 全体を借用するため、借用中に self の他フィールドへ触れる箇所は
-    /// `let sessions = &mut self.sessions` で分割するか直接 index する。
+    /// `self.sessions.current_mut()` / `self.sessions.at_mut(index)` で分割する。
     pub(super) fn session_mut(&mut self) -> &mut SessionView {
-        &mut self.sessions[self.selected]
+        self.sessions.current_mut()
     }
 
     /// index 指定のセッション。
     pub(super) fn session_at(&self, index: usize) -> &SessionView {
-        &self.sessions[index]
+        self.sessions.at(index)
     }
 
     /// index 指定のセッション(可変)。session_mut と同じ借用上の注意。
     pub(super) fn session_at_mut(&mut self, index: usize) -> &mut SessionView {
-        &mut self.sessions[index]
+        self.sessions.at_mut(index)
     }
 
     /// 通知領域が空のときだけメッセージを載せる(既存の通知を潰さない)。
@@ -475,17 +520,14 @@ impl Workspace {
             chat_list: cx.new(|cx| MessageScrollerState::new(0, cx)),
             artifacts: Vec::new(),
             history: Vec::new(),
-            login: None,
-            login_only: false,
-            approval: None,
-            backend: None,
-            selected_backend: 0,
+            login: Login::default(),
+            approval: SessionApproval::default(),
+            backend: BackendChoice::default(),
             _input_subscription: subscription,
             _log_search_subscription: log_search_subscription,
             unread_result: false,
             input_composing: false,
             last_prompt: String::new(),
-            approval_note: None,
             _change_subscription: change_subscription,
             view: ViewState {
                 tab: Tab::Chat,
@@ -597,8 +639,8 @@ impl Workspace {
         // provider は ModelRequestStarted が来るまでフォールバックのヒントを表示する。
         view.exec.provider_hint = Some("Codex / ChatGPT Subscription".into());
         self.sessions.push(view);
-        self.selected = self.sessions.len() - 1;
-        self.scenario_picker.update(cx, |picker, cx| {
+        self.sessions.selected = self.sessions.len() - 1;
+        self.backends.picker.update(cx, |picker, cx| {
             picker.selected = 0;
             picker.close(cx);
         });
@@ -612,8 +654,8 @@ impl Workspace {
         let locked = session.display_status().is_active()
             || self.queue.position(&session.model.id).is_some()
             || session.uses_workspace();
-        if self.scenario_picker.read(cx).disabled != locked {
-            self.scenario_picker.update(cx, |picker, cx| {
+        if self.backends.picker.read(cx).disabled != locked {
+            self.backends.picker.update(cx, |picker, cx| {
                 picker.disabled = locked;
                 picker.close(cx);
             });
@@ -624,14 +666,14 @@ impl Workspace {
         let Some(index) = self.session_index(id) else {
             return;
         };
-        if index != self.selected {
+        if index != self.sessions.selected {
             // 離れるセッションの下書きを確定させてから切り替える。
-            self.save_session_meta(self.selected, cx);
+            self.save_session_meta(self.sessions.selected, cx);
             self.session_mut().persist.meta_save_gen += 1;
         }
-        self.selected = index;
-        self.scenario_picker.update(cx, |picker, cx| {
-            picker.selected = self.session_at(index).selected_backend;
+        self.sessions.selected = index;
+        self.backends.picker.update(cx, |picker, cx| {
+            picker.selected = self.session_at(index).backend.selected;
             picker.close(cx);
         });
         self.sync_controls(cx);
@@ -661,7 +703,7 @@ impl Workspace {
             self.queue.set_paused(true);
         }
         // チャンネルを閉じる = 会話・下書き・全文ログごと削除する。
-        let mut removed = self.sessions.remove(self.selected);
+        let mut removed = self.sessions.remove_current();
         removed.persist.file = None; // 先にライターを閉じて flush させる
         if let Some(store) = self.store.clone() {
             // 途中で消えた場合に sweep 対象へ進めるよう、closed 印を書いてから削除する。
@@ -674,7 +716,6 @@ impl Workspace {
                 self.report(format!("保存済みセッションを削除できません: {error}"));
             }
         }
-        self.selected = self.selected.saturating_sub(1);
         if self.sessions.is_empty() {
             self.new_session(window, cx);
         }
@@ -686,7 +727,8 @@ impl Workspace {
 
     fn show_tab(&mut self, tab: Tab, cx: &mut Context<Self>) {
         self.session_mut().view.tab = tab;
-        self.scenario_picker
+        self.backends
+            .picker
             .update(cx, |picker, cx| picker.close(cx));
         cx.notify();
     }
@@ -697,7 +739,7 @@ impl Workspace {
             && let Some(controller) = &session.exec.controller
         {
             controller.cancel();
-            if let Some(approval) = session.approval.take() {
+            if let Some(approval) = session.approval.pending.take() {
                 approval.respond(false);
             }
             session.model.request_cancel();

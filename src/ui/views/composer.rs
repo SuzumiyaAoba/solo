@@ -1,4 +1,10 @@
-use super::*;
+use super::super::Workspace;
+use super::caption;
+use gpui_kit::{Context, Focusable, Hsla, Window, div, prelude::*, px, rgb};
+use solo::{
+    design::{self as ds, Button, ButtonVariant, ControlSize, Icon, Tone, glass, space},
+    projection::Status,
+};
 
 impl Workspace {
     /// 入力欄・実行先・操作ボタンを一枚のカードにまとめるプロンプト入力。
@@ -8,7 +14,7 @@ impl Workspace {
         let active = session.display_status().is_active();
         let cancelling = session.model.status() == Status::Cancelling;
         let queued = self.queue.position(&session.model.id).is_some();
-        let will_queue = self.picker_uses_workspace(session.selected_backend)
+        let will_queue = self.picker_uses_workspace(session.backend.selected)
             && (self.workspace_busy() || !self.queue.is_empty() || self.queue.paused());
         let composer = session.composer.clone();
         let empty = composer.read(cx).value(cx).trim().is_empty();
@@ -93,7 +99,7 @@ impl Workspace {
                                     .pb(px(space::MD))
                                     .gap_2()
                                     .child(session.agent_avatar(cx))
-                                    .child(div().w(px(200.)).child(self.scenario_picker.clone()))
+                                    .child(div().w(px(200.)).child(self.backends.picker.clone()))
                                     .child(div().flex_1())
                                     .when(can_recall, |v| {
                                         v.child(
@@ -125,7 +131,7 @@ impl Workspace {
                                                         .rounded(round)
                                                         .on_click(cx.listener(|this, _, _, _| {
                                                             if let Some(controller) = &this.sessions
-                                                                [this.selected]
+                                                                [this.sessions.selected]
                                                                 .exec
                                                                 .controller
                                                             {

@@ -1,9 +1,18 @@
 //! ワーカーからの受信をフレーム単位でまとめ、表示と実行待ちキューへ反映する。
-use super::*;
+use super::{SessionView, Workspace, execution::Backend, views};
+use gpui_kit::{App, ClipboardItem, Context, ScrollStrategy, Task};
 use solo::{
     acp_worker::Delivery as AcpDelivery, codex_worker::Delivery as SubscriptionDelivery,
     mock::Delivery as MockDelivery,
 };
+use solo::{
+    approval::{ApprovalReply, ApprovalRequest},
+    design::Tone,
+    event::SessionId,
+    projection::{Speaker, Status},
+    session_store::WorkspaceStore,
+};
+use std::time::{Duration, Instant};
 
 /// UI スレッドでのバッチ取り込み間隔と1バッチ上限。
 const FRAME_BATCH: usize = 128;
@@ -17,8 +26,8 @@ pub(super) enum UiDelivery {
 
 impl SessionView {
     fn finish_login(&mut self) {
-        self.login = None;
-        self.login_only = false;
+        self.login.pending = None;
+        self.login.only = false;
         self.exec.controller = None;
         self.exec.connecting = false;
     }
@@ -44,7 +53,7 @@ impl SessionView {
             UiDelivery::Mock(MockDelivery::LogOpened(path)) => self.artifacts.push(path),
             UiDelivery::Subscription(SubscriptionDelivery::History(messages)) => {
                 self.history = messages;
-                self.login = None;
+                self.login.pending = None;
                 if let Some(store) = store {
                     self.save_history(store);
                 }
@@ -53,22 +62,22 @@ impl SessionView {
                 if self.display_status().is_active() && self.model.status() != Status::Cancelling {
                     cx.write_to_clipboard(ClipboardItem::new_string(login.user_code.clone()));
                     cx.open_url(&login.verification_url);
-                    self.login = Some(login);
+                    self.login.pending = Some(login);
                     self.exec.provider_hint = Some("Codex / ChatGPT ログイン待ち".into());
                 }
             }
             UiDelivery::Subscription(SubscriptionDelivery::Authenticated) => {
-                if self.login_only {
+                if self.login.only {
                     self.exec.provider_hint = Some("ChatGPT ログイン済み".into());
                     self.model.reset_idle();
                     self.finish_login();
                 } else {
-                    self.login = None;
+                    self.login.pending = None;
                     self.exec.provider_hint = Some("OpenAI Codex".into());
                 }
             }
             UiDelivery::Subscription(SubscriptionDelivery::LoginCancelled) => {
-                if self.login_only {
+                if self.login.only {
                     self.exec.provider_hint = Some("OpenAI Codex".into());
                     self.model.reset_idle();
                     self.finish_login();
@@ -83,7 +92,7 @@ impl SessionView {
             | UiDelivery::Subscription(SubscriptionDelivery::Error(error)) => {
                 self.model.transport_failed(error);
                 self.exec.connecting = false;
-                if self.login_only {
+                if self.login.only {
                     self.finish_login();
                 }
             }
@@ -329,7 +338,7 @@ impl Workspace {
                     .disconnect_pending("完了イベントを受信する前に接続が閉じました");
             }
             session.exec.connecting = false;
-            if matches!(session.backend, Some(Backend::Acp(_))) {
+            if matches!(session.backend.active, Some(Backend::Acp(_))) {
                 session.exec.controller = None;
             }
         }
@@ -362,8 +371,8 @@ impl Workspace {
         if session.display_status().is_active() {
             return false;
         }
-        session.login = None;
-        session.approval = None;
+        session.login.pending = None;
+        session.approval.pending = None;
         session.exec.connecting = false;
         if !was_active || session.model.status() == Status::Idle {
             return false;

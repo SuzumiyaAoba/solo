@@ -1,8 +1,16 @@
-use super::smoke::{env_pause_ms, preview_cycle, start_smoke_turn, until};
-use super::*;
+use super::super::{Tab, Workspace, execution::Backend, stream::UiDelivery};
+use super::{env_pause_ms, preview_cycle, start_smoke_turn, until};
 use gpui_kit::component::WindowExt;
+use gpui_kit::{AsyncWindowContext, Context, WeakEntity, Window, px, size};
 use solo::codex_worker::Delivery as SubscriptionDelivery;
 use solo::event::{Event, Sequencer};
+use solo::{
+    acp::AgentProfile,
+    codex::DeviceLogin,
+    design::{self as ds, ColorScheme},
+    mock::Scenario,
+    projection::Status,
+};
 use std::time::Duration;
 
 pub(super) async fn run(this: &WeakEntity<Workspace>, cx: &mut AsyncWindowContext) {
@@ -12,14 +20,15 @@ pub(super) async fn run(this: &WeakEntity<Workspace>, cx: &mut AsyncWindowContex
     let (blocker, queued) = this
         .update_in(cx, |this, window, cx| {
             this.new_session(window, cx);
-            let blocker = this.selected;
+            let blocker = this.sessions.selected;
             start_smoke_turn(this.session_at_mut(blocker));
-            this.session_at_mut(blocker).backend = Some(Backend::Subscription);
+            this.session_at_mut(blocker).backend.active = Some(Backend::Subscription);
             this.new_session(window, cx);
-            let queued = this.selected;
+            let queued = this.sessions.selected;
             // 表示用 picker と異なっても、依頼元セッションの実行先を使う。
-            this.scenario_picker
-                .update(cx, |picker, _| picker.selected = 1 + this.acp_agents.len());
+            this.backends.picker.update(cx, |picker, _| {
+                picker.selected = 1 + this.backends.acp_agents.len()
+            });
             this.start_selected(
                 queued,
                 "順番待ちの日本語の依頼🙂\n完了条件を保持".into(),
@@ -31,7 +40,7 @@ pub(super) async fn run(this: &WeakEntity<Workspace>, cx: &mut AsyncWindowContex
             );
             assert!(this.session_at(queued).composer.read(cx).read_only);
             assert!(!this.session_at(queued).composer.read(cx).can_submit);
-            assert!(this.scenario_picker.read(cx).disabled);
+            assert!(this.backends.picker.read(cx).disabled);
             this.cancel_queued(cx);
             assert!(this.queue.is_empty());
             assert_eq!(
@@ -47,7 +56,7 @@ pub(super) async fn run(this: &WeakEntity<Workspace>, cx: &mut AsyncWindowContex
                     .value(cx)
                     .contains("保持\n\n追加の完了条件")
             );
-            this.session_at_mut(queued).selected_backend = 1 + this.acp_agents.len();
+            this.session_at_mut(queued).backend.selected = 1 + this.backends.acp_agents.len();
             this.enqueue(queued, "順番待ちから開始するデモ".into(), cx);
             let id = this.session_at(blocker).model.id.clone();
             let generation = this.session_at(blocker).exec.stream_generation;
@@ -65,18 +74,18 @@ pub(super) async fn run(this: &WeakEntity<Workspace>, cx: &mut AsyncWindowContex
             assert!(!this.session_at(queued).display_status().is_active());
             // Error で Failed になっているため、再開にはキューの停止解除だけ要る。
             this.session_at_mut(blocker).model.reset_idle();
-            this.session_at_mut(blocker).backend = None;
+            this.session_at_mut(blocker).backend.active = None;
             this.session_at_mut(blocker).unread_result = false;
             this.queue.set_paused(false);
             this.select_session(&this.session_at(blocker).model.id.clone(), window, cx);
             this.dispatch_queue(cx);
             assert!(this.session_at(queued).display_status().is_active());
             assert!(matches!(
-                this.session_at(queued).backend,
+                this.session_at(queued).backend.active,
                 Some(Backend::Mock(_))
             ));
             assert_eq!(
-                this.scenario_picker.read(cx).selected,
+                this.backends.picker.read(cx).selected,
                 0,
                 "background dispatch changed the foreground picker"
             );
@@ -105,7 +114,7 @@ pub(super) async fn run(this: &WeakEntity<Workspace>, cx: &mut AsyncWindowContex
         );
         this.select_session(&this.session_at(blocker).model.id.clone(), window, cx);
         this.next_attention(window, cx);
-        assert_eq!(this.selected, queued);
+        assert_eq!(this.sessions.selected, queued);
         assert!(this.session_at(queued).view.tab == Tab::Overview);
         this.review_next(cx);
         assert!(this.session_at(queued).view.tab == Tab::Diff);
@@ -156,7 +165,7 @@ pub(super) async fn run(this: &WeakEntity<Workspace>, cx: &mut AsyncWindowContex
     .await;
     this.update_in(cx, |this, window, cx| {
         this.close_session(window, cx);
-        assert_eq!(this.selected, blocker);
+        assert_eq!(this.sessions.selected, blocker);
         this.close_session(window, cx);
         assert_eq!(this.sessions.len(), 1);
         assert!(this.queue.is_empty());
@@ -168,7 +177,7 @@ pub(super) async fn run(this: &WeakEntity<Workspace>, cx: &mut AsyncWindowContex
 fn closed_acp_conversation(this: &mut Workspace, window: &mut Window, cx: &mut Context<Workspace>) {
     let missing_agent = tempfile::tempdir().unwrap();
     let id = "closed-acp-regression";
-    this.acp_agents.push(AgentProfile {
+    this.backends.acp_agents.push(AgentProfile {
         id: id.into(),
         name: "Closed ACP".into(),
         command: missing_agent
@@ -179,12 +188,12 @@ fn closed_acp_conversation(this: &mut Workspace, window: &mut Window, cx: &mut C
         args: vec![],
     });
     this.new_session(window, cx);
-    let index = this.selected;
+    let index = this.sessions.selected;
     // acp_agents を読むため sessions の借用をフィールド分割する。
     let sessions = &mut this.sessions;
     let session = &mut sessions[index];
-    session.selected_backend = this.acp_agents.len();
-    session.backend = Some(Backend::Acp(id.into()));
+    session.backend.selected = this.backends.acp_agents.len();
+    session.backend.active = Some(Backend::Acp(id.into()));
     // 終了済みターンの履歴(last_sequence/turn_id)をイベント注入で再現する。
     // 新規セッションなので sequence は 1 から始める(先頭欠落は incomplete 扱いになる)。
     let mut seq = Sequencer::new(session.model.id.clone(), 0, "previous-turn".to_owned());
@@ -203,7 +212,7 @@ fn closed_acp_conversation(this: &mut Workspace, window: &mut Window, cx: &mut C
         this.session_at(index).composer.read(cx).value(cx),
         "続きの依頼を保持"
     );
-    this.acp_agents.pop();
+    this.backends.acp_agents.pop();
     this.close_session(window, cx);
     println!(
         "ACP conversation smoke OK: disconnected conversations preserve their drafts and require a new task"
@@ -221,13 +230,13 @@ fn login_lifecycle(this: &mut Workspace, window: &mut Window, cx: &mut Context<W
     {
         let session = this.session_mut();
         session.exec.connecting = true;
-        session.login_only = true;
+        session.login.only = true;
     }
     assert!(!this.can_start_login(), "実行中はログインを開始できない");
     {
         let session = this.session_mut();
         session.exec.connecting = false;
-        session.login_only = false;
+        session.login.only = false;
     }
     assert!(this.can_start_login());
     for (delivery, expected) in [
@@ -241,13 +250,13 @@ fn login_lifecycle(this: &mut Workspace, window: &mut Window, cx: &mut Context<W
         let session = this.session_mut();
         // 「接続中」はドメイン status ではなく UI の表示状態なので exec 側で立てる。
         session.exec.connecting = true;
-        session.login_only = true;
+        session.login.only = true;
         session.exec.stream_generation += 1;
         let id = session.model.id.clone();
         let generation = session.exec.stream_generation;
         this.sync_controls(cx);
         assert!(this.workspace_busy());
-        assert!(this.scenario_picker.read(cx).disabled);
+        assert!(this.backends.picker.read(cx).disabled);
         this.consume(
             &id,
             generation - 1,
@@ -271,13 +280,13 @@ fn login_lifecycle(this: &mut Workspace, window: &mut Window, cx: &mut Context<W
         let session = this.session();
         assert_eq!(session.model.status(), expected);
         assert_eq!(
-            session.backend, None,
+            session.backend.active, None,
             "logging in must not bind a new conversation"
         );
-        assert!(!session.login_only);
+        assert!(!session.login.only);
         assert!(!this.workspace_busy());
         assert!(session.composer.read(cx).can_submit);
-        assert!(!this.scenario_picker.read(cx).disabled);
+        assert!(!this.backends.picker.read(cx).disabled);
     }
 
     for expected in [Status::Cancelling, Status::Completed] {
@@ -325,16 +334,16 @@ fn login_lifecycle(this: &mut Workspace, window: &mut Window, cx: &mut Context<W
         );
         let session = this.session();
         assert!(
-            session.login.is_none(),
+            session.login.pending.is_none(),
             "late login must not reopen a cancelled or completed task"
         );
         assert_eq!(session.model.provider(), Some("previous / provider"));
     }
 
     let session = this.session_mut();
-    session.backend = Some(Backend::Subscription);
+    session.backend.active = Some(Backend::Subscription);
     session.exec.connecting = true;
-    session.login_only = true;
+    session.login.only = true;
     let id = session.model.id.clone();
     let generation = session.exec.stream_generation;
     this.consume(
@@ -346,14 +355,14 @@ fn login_lifecycle(this: &mut Workspace, window: &mut Window, cx: &mut Context<W
         true,
         cx,
     );
-    assert_eq!(this.session().backend, Some(Backend::Subscription));
+    assert_eq!(this.session().backend.active, Some(Backend::Subscription));
     assert!(
-        this.scenario_picker.read(cx).disabled,
+        this.backends.picker.read(cx).disabled,
         "login must preserve an existing conversation backend"
     );
     this.scenario(Scenario::Demo, cx);
     assert_eq!(this.session().model.status(), Status::Idle);
-    assert_eq!(this.session().backend, Some(Backend::Subscription));
+    assert_eq!(this.session().backend.active, Some(Backend::Subscription));
     this.close_session(window, cx);
     println!(
         "Login smoke OK: completion, cancellation, failure, stale stream, late login and conversation backend"

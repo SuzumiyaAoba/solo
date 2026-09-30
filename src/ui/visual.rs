@@ -1,12 +1,13 @@
 //! `--visual DIR` 用の実描画キャプチャ。feature `gui-visual` でのみ有効。
 //! 実ウィンドウを開かず Metal でオフスクリーン描画し、PNG を DIR へ出力する。
 //! メインスレッド必須（`MacPlatform`）。`cargo run --features gui-visual -- --visual /tmp/solo`。
-use super::*;
+use super::{Tab, Workspace, projects, rule_editor};
 use gpui_kit::component::WindowExt;
-use gpui_kit::{HeadlessAppContext, WindowHandle};
-use std::{path::Path, sync::Arc};
-
+use gpui_kit::{HeadlessAppContext, WindowHandle, prelude::*, px, size};
+use solo::design::{self as ds, ColorScheme, DesignAssets, ToastHost};
 use solo::event::{Event, Sequencer};
+use solo::mock::Scenario;
+use std::{path::Path, sync::Arc};
 
 pub(super) fn run(dir: &Path) {
     std::fs::create_dir_all(dir).expect("visual output dir");
@@ -58,7 +59,7 @@ pub(super) fn run(dir: &Path) {
         window
             .update(&mut cx, |workspace, window, cx| {
                 workspace.start_mock(
-                    workspace.selected,
+                    workspace.sessions.selected,
                     Scenario::Events100k,
                     "ストリーム中の表示確認".into(),
                     cx,
@@ -73,7 +74,7 @@ pub(super) fn run(dir: &Path) {
         window
             .update(&mut cx, |workspace, window, cx| {
                 workspace.start_mock(
-                    workspace.selected,
+                    workspace.sessions.selected,
                     Scenario::Demo,
                     "差分レビューの表示確認".into(),
                     cx,
@@ -128,8 +129,8 @@ pub(super) fn run(dir: &Path) {
                     .expect("active workspace is open")
                     .update(cx, |workspace, cx| {
                         workspace.open_command_rules(window, cx);
-                        workspace.rule_editor.update(cx, |editor, cx| {
-                            editor.page = command_rules::Page::Tools;
+                        workspace.rules.editor.update(cx, |editor, cx| {
+                            editor.page = rule_editor::Page::Tools;
                             cx.notify();
                         });
                     });

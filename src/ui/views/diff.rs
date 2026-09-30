@@ -1,5 +1,14 @@
-use super::*;
+use super::super::{SessionView, Tab, Workspace, review_indicator};
+use super::{caption, empty, notice};
+use gpui_kit::{
+    AnyElement, Context, Div, FontWeight, HighlightStyle, ScrollStrategy, SharedString, Stateful,
+    StyledText, UniformListScrollHandle, Window, div, prelude::*, px, rgb, uniform_list,
+};
 use solo::projection::{ActivityKind, Diff};
+use solo::{
+    design::{self as ds, Button, ControlSize, Icon, Tone, space, typography},
+    projection::DiffKind,
+};
 
 impl SessionView {
     /// 差分の選択を切り替える。diff_index・diff_hunk・diff_scroll は一体で更新する

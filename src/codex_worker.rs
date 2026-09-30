@@ -3,7 +3,7 @@ mod workspace_diff;
 use crate::{
     approval::{self, ApprovalReply, ApprovalRequest},
     codex::{Authentication, DEFAULT_MODEL, DeviceLogin},
-    event::{Emitter, Envelope, Event, Sequencer, SessionId, Usage},
+    event::{Emitter, Envelope, Event, SessionId, Usage},
     harness::{
         self, Cancellation, Limits, Message, Policy, PolicyVerdict, StopReason, ToolCall,
         ToolResult, Update,
@@ -13,6 +13,7 @@ use crate::{
         },
     },
     text::preview,
+    worker,
 };
 use async_channel::{Receiver, Sender};
 use serde_json::{Value, json};
@@ -80,49 +81,45 @@ pub fn start(config: Config) -> io::Result<(Controller, Receiver<Delivery>)> {
     let controller = Controller {
         cancellation: cancellation.clone(),
     };
-    let (sender, receiver) = async_channel::bounded(256);
-    thread::Builder::new()
-        .name(format!("solo-model-{}", config.session_id))
-        .spawn(move || {
-            let mut emitter = Emitter::new(
-                Sequencer::new(
-                    config.session_id.clone(),
-                    config.start_sequence,
-                    format!("solo-turn-{}", config.start_sequence + 1),
-                ),
-                sender.clone(),
-            );
-            if config.start_sequence == 0 {
-                emitter.emit(Event::SessionCreated {
-                    title: config.title.clone(),
-                    workspace_id: workspace.display().to_string(),
-                    settings: json!({"backend":"codex","provider":"openai-codex"}),
+    let (sender, receiver) = async_channel::bounded(worker::CHANNEL_CAPACITY);
+    worker::spawn("model", config.session_id.clone(), move || {
+        let mut emitter = worker::emitter(
+            config.session_id.clone(),
+            config.start_sequence,
+            format!("solo-turn-{}", config.start_sequence + 1),
+            sender.clone(),
+        );
+        worker::emit_session_created(
+            &mut emitter,
+            config.start_sequence,
+            &config.title,
+            workspace.display().to_string(),
+            json!({"backend":"codex","provider":"openai-codex"}),
+        );
+        emitter.emit(Event::TurnStarted {
+            prompt: config.prompt.clone(),
+        });
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            run(config, workspace, &sender, &mut emitter, &cancellation)
+        }));
+        match result {
+            Ok(Ok(())) => {}
+            Ok(Err(_)) if cancellation.is_cancelled() => {
+                emitter.emit(Event::TurnCancelled {
+                    reason: "実行を中止しました".into(),
                 });
             }
-            emitter.emit(Event::TurnStarted {
-                prompt: config.prompt.clone(),
-            });
-            let result = catch_unwind(AssertUnwindSafe(|| {
-                run(config, workspace, &sender, &mut emitter, &cancellation)
-            }));
-            match result {
-                Ok(Ok(())) => {}
-                Ok(Err(_)) if cancellation.is_cancelled() => {
-                    emitter.emit(Event::TurnCancelled {
-                        reason: "実行を中止しました".into(),
-                    });
-                }
-                Ok(Err(error)) => emitter.emit(Event::TurnFailed {
-                    reason: error.to_string(),
-                }),
-                Err(payload) => emitter.emit(Event::TurnFailed {
-                    reason: format!(
-                        "実行ワーカーが異常終了しました: {}",
-                        harness::panic_message(&payload)
-                    ),
-                }),
-            }
-        })?;
+            Ok(Err(error)) => emitter.emit(Event::TurnFailed {
+                reason: error.to_string(),
+            }),
+            Err(payload) => emitter.emit(Event::TurnFailed {
+                reason: format!(
+                    "実行ワーカーが異常終了しました: {}",
+                    harness::panic_message(&payload)
+                ),
+            }),
+        }
+    })?;
     Ok((controller, receiver))
 }
 
@@ -409,7 +406,7 @@ fn finish_turn(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::approval::wait_for_reply;
+    use crate::{approval::wait_for_reply, event::Sequencer};
 
     #[test]
     fn approval_answers_are_preserved_and_closed_or_cancelled_waits_decline() {

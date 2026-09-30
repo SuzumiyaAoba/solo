@@ -7,9 +7,10 @@ use crate::{
     acp::{self, AgentProfile, Client},
     approval::{self, ApprovalReply, ApprovalRequest},
     diffgen::unified_diff,
-    event::{Emitter, Envelope, Event, Sequencer, SessionId, Usage},
+    event::{Emitter, Envelope, Event, SessionId, Usage},
     harness::Cancellation,
     text::preview,
+    worker,
 };
 use async_channel::{Receiver, Sender};
 pub use connection::Controller;
@@ -18,7 +19,6 @@ use std::{
     collections::HashMap,
     io::{self, BufReader},
     path::{Path, PathBuf},
-    thread,
 };
 use writer::Writer;
 
@@ -53,17 +53,15 @@ pub fn start(config: Config) -> io::Result<(Controller, Receiver<Delivery>)> {
         input,
         cleanup,
     } = connection::Transport::start(&config)?;
-    thread::Builder::new()
-        .name(format!("solo-acp-{}", config.local_session_id))
-        .spawn(move || {
-            let guard = cleanup;
-            let connection = &guard.connection;
-            if let Err(error) = run(config, &mut client, input, connection) {
-                let _ = connection
-                    .output
-                    .send_blocking(Delivery::Error(error.to_string()));
-            }
-        })?;
+    worker::spawn("acp", config.local_session_id.clone(), move || {
+        let guard = cleanup;
+        let connection = &guard.connection;
+        if let Err(error) = run(config, &mut client, input, connection) {
+            let _ = connection
+                .output
+                .send_blocking(Delivery::Error(error.to_string()));
+        }
+    })?;
     Ok((controller, receiver))
 }
 
@@ -74,21 +72,19 @@ fn run(
     connection: &connection::Connection,
 ) -> io::Result<()> {
     let sender = &connection.output;
-    let mut emitter = Emitter::new(
-        Sequencer::new(
-            config.local_session_id,
-            config.start_sequence,
-            String::new(),
-        ),
+    let mut emitter = worker::emitter(
+        config.local_session_id.clone(),
+        config.start_sequence,
+        String::new(),
         sender.clone(),
     );
-    if config.start_sequence == 0 {
-        emitter.emit(Event::SessionCreated {
-            title: config.title,
-            workspace_id: config.workspace.display().to_string(),
-            settings: json!({"backend":"acp","agent":config.profile.id}),
-        });
-    }
+    worker::emit_session_created(
+        &mut emitter,
+        config.start_sequence,
+        &config.title,
+        config.workspace.display().to_string(),
+        json!({"backend":"acp","agent":config.profile.id}),
+    );
     let initialized = client.initialize()?;
     let methods = initialized["authMethods"].as_array();
     let mut session = client.new_session(&config.workspace, &mut |_| None);

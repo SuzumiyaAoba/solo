@@ -381,7 +381,8 @@ impl SessionProjection {
         invalid.then_some("サブエージェントの開始・終了記録が一致しません")
     }
 
-    /// 受理済みイベントを表示モデルへ反映する。
+    /// 受理済みイベントを表示モデルへ反映する。各 arm は対応するハンドラへの
+    /// ディスパッチだけを行う。
     fn apply_event(
         &mut self,
         event: Event,
@@ -400,29 +401,7 @@ impl SessionProjection {
                 self.workspace = workspace_id;
             }
             Event::TurnStarted { prompt } => {
-                if self.status != Status::Cancelling {
-                    self.status = Status::Running;
-                }
-                self.turn_open = true;
-                self.reason.clear();
-                self.usage = Usage::default();
-                self.incomplete = gap;
-                self.tools.clear();
-                self.agents.clear();
-                self.tool_activity.clear();
-                self.turn_id = turn_id;
-                if self.threads.len() == MAX_EXECUTION_THREADS {
-                    self.threads.pop_front();
-                    self.threads_discarded += 1;
-                }
-                self.threads.push_back(ExecutionThread::new(
-                    sequence,
-                    self.turn_id.clone().expect("validated turn id"),
-                    &prompt,
-                    timestamp_ms,
-                ));
-                self.thread_revision += 1;
-                self.append(Speaker::User, &format!("prompt-{sequence}"), &prompt);
+                self.start_turn(prompt, sequence, turn_id, gap, timestamp_ms)
             }
             Event::ModelRequestStarted {
                 provider, model, ..
@@ -460,34 +439,12 @@ impl SessionProjection {
                 command,
                 cwd,
                 ..
-            } => {
-                self.tools.insert(invocation_id.clone(), None);
-                if self.tool_activity.len() == MAX_TOOL_ACTIVITIES {
-                    self.tool_activity.pop_front();
-                }
-                self.tool_activity.push_back(ToolActivity {
-                    invocation_id,
-                    command: preview(&command, 512),
-                    cwd: preview(&cwd, 512),
-                    exit_code: None,
-                });
-                self.notice(format!("実行開始: {command}  ({cwd})"));
-            }
+            } => self.start_tool(invocation_id, command, cwd),
             Event::ToolFinished {
                 invocation_id,
                 exit_code,
                 ..
-            } => {
-                self.tools.insert(invocation_id.clone(), Some(exit_code));
-                if let Some(activity) = self
-                    .tool_activity
-                    .iter_mut()
-                    .find(|activity| activity.invocation_id == invocation_id)
-                {
-                    activity.exit_code = Some(exit_code);
-                }
-                self.notice(format!("実行終了: {invocation_id} / exit {exit_code}"));
-            }
+            } => self.finish_tool(invocation_id, exit_code),
             Event::AgentStarted { agent_id, name, .. } => {
                 self.agents.insert(agent_id, false);
                 self.notice(format!("サブエージェント開始: {name}"));
@@ -496,50 +453,128 @@ impl SessionProjection {
                 agent_id,
                 success,
                 summary,
-            } => {
-                self.agents.insert(agent_id.clone(), true);
-                self.notice(format!(
-                    "サブエージェント終了: {agent_id} / {} / {summary}",
-                    if success { "完了" } else { "失敗" }
-                ));
-            }
+            } => self.finish_agent(agent_id, success, summary),
             Event::DiffUpdated {
                 path,
                 unified_diff,
                 invocation_id,
-            } => {
-                let mut diff = Diff::parse(path.clone(), &unified_diff);
-                diff.origin = turn_id.map(|turn_id| DiffOrigin {
-                    turn_id,
-                    invocation_id,
-                });
-                if let Some(existing) = self.diffs.iter_mut().find(|diff| diff.path == path) {
-                    *existing = diff;
-                } else {
-                    self.diffs.push(diff);
-                }
-            }
+            } => self.update_diff(path, unified_diff, invocation_id, turn_id),
             Event::TurnCompleted { reason, usage } => {
-                self.usage = usage;
-                if self.tools.values().any(Option::is_none)
-                    || self.agents.values().any(|done| !done)
-                    || self.incomplete
-                {
-                    self.finish(
-                        Status::Disconnected,
-                        "完了通知を受信しましたが、未完了の実行またはイベントの欠落があります"
-                            .into(),
-                        timestamp_ms,
-                    );
-                } else {
-                    self.finish(Status::Completed, reason, timestamp_ms);
-                }
+                self.complete_turn(reason, usage, timestamp_ms)
             }
             Event::TurnCancelled { reason } => self.finish(Status::Cancelled, reason, timestamp_ms),
             Event::TurnFailed { reason } => self.finish(Status::Failed, reason, timestamp_ms),
             Event::Disconnected { reason } => {
                 self.finish(Status::Disconnected, reason, timestamp_ms)
             }
+        }
+    }
+
+    /// TurnStarted: 状態を実行中へ戻し、実行スレッドと User 発言を開く。
+    fn start_turn(
+        &mut self,
+        prompt: String,
+        sequence: u64,
+        turn_id: Option<TurnId>,
+        gap: bool,
+        timestamp_ms: u64,
+    ) {
+        if self.status != Status::Cancelling {
+            self.status = Status::Running;
+        }
+        self.turn_open = true;
+        self.reason.clear();
+        self.usage = Usage::default();
+        self.incomplete = gap;
+        self.tools.clear();
+        self.agents.clear();
+        self.tool_activity.clear();
+        self.turn_id = turn_id;
+        if self.threads.len() == MAX_EXECUTION_THREADS {
+            self.threads.pop_front();
+            self.threads_discarded += 1;
+        }
+        self.threads.push_back(ExecutionThread::new(
+            sequence,
+            self.turn_id.clone().expect("validated turn id"),
+            &prompt,
+            timestamp_ms,
+        ));
+        self.thread_revision += 1;
+        self.append(Speaker::User, &format!("prompt-{sequence}"), &prompt);
+    }
+
+    /// ToolStarted: 実行中ツールとして記録し、活動履歴へ積む。
+    fn start_tool(&mut self, invocation_id: String, command: String, cwd: String) {
+        self.tools.insert(invocation_id.clone(), None);
+        if self.tool_activity.len() == MAX_TOOL_ACTIVITIES {
+            self.tool_activity.pop_front();
+        }
+        self.tool_activity.push_back(ToolActivity {
+            invocation_id,
+            command: preview(&command, 512),
+            cwd: preview(&cwd, 512),
+            exit_code: None,
+        });
+        self.notice(format!("実行開始: {command}  ({cwd})"));
+    }
+
+    /// ToolFinished: 終了コードを記録し、活動履歴の該当行を更新する。
+    fn finish_tool(&mut self, invocation_id: String, exit_code: i32) {
+        self.tools.insert(invocation_id.clone(), Some(exit_code));
+        if let Some(activity) = self
+            .tool_activity
+            .iter_mut()
+            .find(|activity| activity.invocation_id == invocation_id)
+        {
+            activity.exit_code = Some(exit_code);
+        }
+        self.notice(format!("実行終了: {invocation_id} / exit {exit_code}"));
+    }
+
+    /// AgentFinished: サブエージェントの完了を記録する。
+    fn finish_agent(&mut self, agent_id: String, success: bool, summary: String) {
+        self.agents.insert(agent_id.clone(), true);
+        self.notice(format!(
+            "サブエージェント終了: {agent_id} / {} / {summary}",
+            if success { "完了" } else { "失敗" }
+        ));
+    }
+
+    /// DiffUpdated: path 単位で差分を新規追加または置き換える。
+    fn update_diff(
+        &mut self,
+        path: String,
+        unified_diff: String,
+        invocation_id: Option<String>,
+        turn_id: Option<TurnId>,
+    ) {
+        let mut diff = Diff::parse(path.clone(), &unified_diff);
+        diff.origin = turn_id.map(|turn_id| DiffOrigin {
+            turn_id,
+            invocation_id,
+        });
+        if let Some(existing) = self.diffs.iter_mut().find(|diff| diff.path == path) {
+            *existing = diff;
+        } else {
+            self.diffs.push(diff);
+        }
+    }
+
+    /// TurnCompleted: 未完了の tool/agent や欠落があれば結果未確認として閉じる。
+    fn complete_turn(&mut self, reason: String, usage: Usage, timestamp_ms: u64) {
+        self.usage = usage;
+        if self.tools.values().any(Option::is_none)
+            || self.agents.values().any(|done| !done)
+            || self.incomplete
+        {
+            self.finish(
+                Status::Disconnected,
+                "完了通知を受信しましたが、未完了の実行またはイベントの欠落があります".into(),
+                timestamp_ms,
+            );
+        } else {
+            self.finish(Status::Completed, reason, timestamp_ms);
         }
     }
 

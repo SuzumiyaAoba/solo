@@ -192,6 +192,93 @@ fn collect_log_paths(dir: &Path) -> Vec<PathBuf> {
     paths
 }
 
+/// meta(state.json) を読む。無い dir は None、壊れた meta は Err のまま返し、
+/// 次の保存で読めないファイルを上書きしない。
+fn meta_or_none(dir: &Path) -> io::Result<Option<SessionMeta>> {
+    match read_meta(dir) {
+        Ok(meta) => Ok(Some(meta)),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
+/// events.jsonl の読み取り結果。
+struct ParsedEvents {
+    envelopes: Vec<Envelope>,
+    /// 途中の壊れた行数(末尾の不完全な行とは別に数える)。
+    corrupted_lines: usize,
+    /// 末尾行が途中で切れていた。
+    truncated_tail: bool,
+    /// 保存上限を超えて読み切らなかった分がある。
+    store_capped: bool,
+}
+
+/// events.jsonl を上限+1バイトまで読み、Envelope 行へ分解する。
+/// 上限超過は store_capped として返す(cap 境界でマルチバイト文字を割ることがある)。
+fn read_events(dir: &Path) -> io::Result<ParsedEvents> {
+    let file = File::open(events_path(dir))?;
+    let mut bytes = Vec::new();
+    io::Read::take(&file, MAX_EVENT_STORE_BYTES.saturating_add(1)).read_to_end(&mut bytes)?;
+    let (envelopes, corrupted_lines, truncated_tail) = parse_events(&bytes);
+    Ok(ParsedEvents {
+        envelopes,
+        corrupted_lines,
+        truncated_tail,
+        store_capped: bytes.len() as u64 > MAX_EVENT_STORE_BYTES,
+    })
+}
+
+/// 復元するセッションの id/title。meta 優先、壊れたストアではイベント先頭の ID、
+/// それも無ければ dir 名(apply は ID 不一致を拒否するため)。title が無ければ id。
+fn session_identity(
+    meta: Option<&SessionMeta>,
+    envelopes: &[Envelope],
+    fallback: &SessionId,
+) -> (SessionId, String) {
+    let id = meta
+        .map(|meta| meta.session_id.clone())
+        .filter(|id| !id.is_empty())
+        .or_else(|| {
+            envelopes
+                .first()
+                .map(|envelope| envelope.session_id.clone())
+                .filter(|id| !id.is_empty())
+        })
+        .unwrap_or_else(|| fallback.clone());
+    let title = meta
+        .map(|meta| meta.title.clone())
+        .filter(|title| !title.is_empty())
+        .unwrap_or_else(|| id.to_string());
+    (id, title)
+}
+
+/// sweep の対象判定: closed meta は即削除。meta が無い dir は mtime が grace を
+/// 過ぎ、かつ events.jsonl が無い/空のものだけ消す。読めない meta は残す
+/// (復元側が Err として報告する)。
+fn is_orphan(entry: &fs::DirEntry, grace: std::time::Duration) -> bool {
+    let dir = entry.path();
+    match read_meta(&dir) {
+        Ok(meta) => meta.closed,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            let stale = entry
+                .metadata()
+                .and_then(|meta| meta.modified())
+                .is_ok_and(|modified| {
+                    SystemTime::now()
+                        .duration_since(modified)
+                        .is_ok_and(|age| age >= grace)
+                });
+            // events.jsonl は「無い/空」のときだけ空とみなす。他のエラーは残す。
+            stale
+                && match fs::metadata(events_path(&dir)) {
+                    Ok(meta) => meta.len() == 0,
+                    Err(error) => error.kind() == io::ErrorKind::NotFound,
+                }
+        }
+        Err(_) => false,
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct WorkspaceStore {
     root: PathBuf,
@@ -276,31 +363,7 @@ impl WorkspaceStore {
                 continue;
             }
             let dir = entry.path();
-            let orphan =
-                match read_meta(&dir) {
-                    // closed=true は明示的に閉じられたので即削除する。
-                    Ok(meta) => meta.closed,
-                    Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                        // meta の無い残骸は mtime が grace を過ぎ、かつ events.jsonl が
-                        // 無い/空のときだけ消す(他ウィンドウの途中作成や記録残しを残す)。
-                        let stale = entry.metadata().and_then(|meta| meta.modified()).is_ok_and(
-                            |modified| {
-                                SystemTime::now()
-                                    .duration_since(modified)
-                                    .is_ok_and(|age| age >= grace)
-                            },
-                        );
-                        // events.jsonl は「無い/空」のときだけ空とみなす。他のエラーは残す。
-                        stale
-                            && match fs::metadata(events_path(&dir)) {
-                                Ok(meta) => meta.len() == 0,
-                                Err(error) => error.kind() == io::ErrorKind::NotFound,
-                            }
-                    }
-                    // 読めない state.json は残す(復元側が Err として報告する)。
-                    Err(_) => false,
-                };
-            if !orphan {
+            if !is_orphan(&entry, grace) {
                 continue;
             }
             // 別ウィンドウが開いているセッション(events.jsonl への shared lock)は消さない。
@@ -384,42 +447,15 @@ impl WorkspaceStore {
     /// どちらも再生は続行する。
     pub fn load(&self, session_id: &SessionId) -> io::Result<RestoredSession> {
         let dir = self.session_dir(session_id)?;
-        // meta が無い dir は events 側だけで復元する。読めない meta は Err として返し、
-        // 次の meta 保存で読めないファイルを上書きしない。
-        let meta = match read_meta(&dir) {
-            Ok(meta) => Some(meta),
-            Err(error) if error.kind() == io::ErrorKind::NotFound => None,
-            Err(error) => return Err(error),
-        };
+        let meta = meta_or_none(&dir)?;
 
-        // 上限を超えた追記は読み切らず、切り詰めた分を不完全として記録する。
-        let file = File::open(events_path(&dir))?;
-        let mut bytes = Vec::new();
-        io::Read::take(&file, MAX_EVENT_STORE_BYTES.saturating_add(1)).read_to_end(&mut bytes)?;
-        let store_capped = bytes.len() as u64 > MAX_EVENT_STORE_BYTES;
-        let (envelopes, corrupted_lines, mut truncated_tail) = parse_events(&bytes);
-        truncated_tail |= store_capped;
-
-        // セッション ID は meta 優先。壊れたストアではイベント側の ID を採用し、
-        // それも無ければ dir 名にする(apply は ID 不一致を拒否するため)。
-        let id = meta
-            .as_ref()
-            .map(|meta| meta.session_id.clone())
-            .filter(|id| !id.is_empty())
-            .or_else(|| {
-                envelopes
-                    .first()
-                    .map(|envelope| envelope.session_id.clone())
-                    .filter(|id| !id.is_empty())
-            })
-            .unwrap_or_else(|| session_id.clone());
-        let title = meta
-            .as_ref()
-            .map(|meta| meta.title.clone())
-            .filter(|title| !title.is_empty())
-            .unwrap_or_else(|| id.to_string());
+        // 切り詰めた分は不完全として記録する(行単位の不完全と上限超過を区別しない)。
+        let events = read_events(&dir)?;
+        let corrupted_lines = events.corrupted_lines;
+        let truncated_tail = events.truncated_tail || events.store_capped;
+        let (id, title) = session_identity(meta.as_ref(), &events.envelopes, session_id);
         let mut session = SessionProjection::new(id, title);
-        for envelope in envelopes {
+        for envelope in events.envelopes {
             session.apply(envelope);
         }
         // turn_open は「実行中のはず」に限るので、活性 status の検査で十分。
@@ -432,7 +468,8 @@ impl WorkspaceStore {
                 "保存イベントのうち {corrupted_lines} 行が破損していました"
             ));
         }
-        let store_capped = store_capped || meta.as_ref().is_some_and(|meta| meta.store_capped);
+        let store_capped =
+            events.store_capped || meta.as_ref().is_some_and(|meta| meta.store_capped);
         if store_capped {
             session.flag_incomplete("イベント保存が上限に達し、一部は復元対象外です");
         }

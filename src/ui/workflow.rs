@@ -1,10 +1,17 @@
-use super::*;
+use super::{SessionView, Tab, Workspace};
 use gpui_kit::component::{WindowExt, dialog::DialogButtonProps};
+use gpui_kit::{App, Context, Focusable, FontWeight, SharedString, Window, div, prelude::*, px};
+use solo::{
+    backend::BackendKind,
+    design::{self as ds, Icon, Tone},
+    orchestration::QueuedRun,
+    projection::Status,
+};
 
 impl SessionView {
     pub(super) fn needs_attention(&self) -> bool {
-        self.approval.is_some()
-            || self.login.is_some()
+        self.approval.pending.is_some()
+            || self.login.pending.is_some()
             || (!self.display_status().is_active()
                 && (self.unread_result || self.model.unreviewed_count() > 0))
     }
@@ -46,9 +53,9 @@ impl SessionView {
 
     pub(super) fn state_label(&self) -> &'static str {
         let status = self.display_status();
-        if self.approval.is_some() {
+        if self.approval.pending.is_some() {
             "承認待ち"
-        } else if self.login.is_some() {
+        } else if self.login.pending.is_some() {
             "ログイン待ち"
         } else if self.exec.connecting {
             "接続中"
@@ -60,7 +67,7 @@ impl SessionView {
     }
 
     pub(super) fn state_tone(&self) -> Tone {
-        if self.approval.is_some() || self.login.is_some() {
+        if self.approval.pending.is_some() || self.login.pending.is_some() {
             Tone::Warning
         } else {
             super::views::status_tone(self.display_status())
@@ -85,7 +92,7 @@ impl Workspace {
         }
         // queue.push は &mut self.queue を取るため、選択 index→BackendKind は先に確定させる。
         let backend = self
-            .backend_kind_at(self.sessions[index].selected_backend)
+            .backend_kind_at(self.sessions[index].backend.selected)
             .unwrap_or(BackendKind::Subscription);
         let sessions = &mut self.sessions;
         let session = &mut sessions[index];
@@ -133,7 +140,7 @@ impl Workspace {
 
     pub(super) fn next_attention(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let next = (1..=self.sessions.len())
-            .map(|offset| (self.selected + offset) % self.sessions.len())
+            .map(|offset| (self.sessions.selected + offset) % self.sessions.len())
             .find(|&index| self.session_at(index).needs_attention());
         if let Some(index) = next {
             let id = self.session_at(index).model.id.clone();
@@ -163,7 +170,7 @@ impl Workspace {
                 .filter(|diff| diff.reviewed)
                 .map(|diff| diff.path.clone())
                 .collect();
-            self.save_session_meta(self.selected, cx);
+            self.save_session_meta(self.sessions.selected, cx);
             cx.notify();
         }
     }
@@ -238,7 +245,7 @@ impl Workspace {
                 .on_ok(move |_, window, cx| {
                     let _ = weak.update(cx, |this, cx| {
                         if let Some(index) = this.session_index(&id) {
-                            this.selected = index;
+                            this.sessions.selected = index;
                             this.close_session(window, cx);
                         }
                     });

@@ -1,12 +1,29 @@
-use super::*;
+mod approval_modes;
+mod chat;
+mod logs;
+mod rule_editor;
+mod threads;
+mod workflow;
+// projects.rs(debug 時の入口)から到達するため crate 可視にする。
+pub(crate) mod projects;
+
+use super::{SessionView, Tab, Workspace, stream::UiDelivery};
+use gpui_kit::{AsyncWindowContext, Context, Focusable, Keystroke, WeakEntity, Window, px, size};
 use solo::codex_worker::Delivery as SubscriptionDelivery;
 use solo::event::{Event, Sequencer};
-use std::time::Duration;
+use solo::{
+    approval::{ApprovalReply, ApprovalRequest},
+    command_rules::RuleList,
+    design::{self as ds, ColorScheme},
+    mock::{SCENARIOS, Scenario},
+    projection::Status,
+};
+use std::time::{Duration, Instant};
 
 pub(super) fn start(window: &Window, cx: &mut Context<Workspace>) {
     cx.spawn_in(window, async move |this, cx| {
         this.update_in(cx, |this, _, cx| {
-            assert_eq!(this.scenario_picker.read(cx).options.len(), 1 + this.acp_agents.len() + SCENARIOS.len());
+            assert_eq!(this.backends.picker.read(cx).options.len(), 1 + this.backends.acp_agents.len() + SCENARIOS.len());
         }).unwrap();
         for (index, scenario) in [Scenario::Demo, Scenario::Events100k, Scenario::Log100MiB, Scenario::Faults].into_iter().enumerate() {
             this.update_in(cx, |this, _, cx| {
@@ -18,7 +35,7 @@ pub(super) fn start(window: &Window, cx: &mut Context<Workspace>) {
                 let done = this.update_in(cx, |this, window, cx| {
                     // scenario_picker/rendered を読むため sessions の借用を分割する。
                     let sessions = &mut this.sessions;
-                    let s = &mut sessions[this.selected];
+                    let s = sessions.current_mut();
                     s.view.tab = [Tab::Overview, Tab::Chat, Tab::Logs, Tab::Diff][tick % 4];
                     s.composer.update(cx, |input, cx| {
                         input.set_value("", cx);
@@ -32,7 +49,7 @@ pub(super) fn start(window: &Window, cx: &mut Context<Workspace>) {
                     });
                     let done = !s.display_status().is_active();
                     assert_eq!(s.chat_list.read(cx).item_count(), s.model.chat().len(), "visible conversation rows must follow the projection");
-                    assert_eq!(this.scenario_picker.read(cx).disabled, !done);
+                    assert_eq!(this.backends.picker.read(cx).disabled, !done);
                     if done {
                         assert_eq!(s.model.status(), if scenario == Scenario::Faults { Status::Disconnected } else { Status::Completed });
                         assert!(!s.model.diffs().is_empty());
@@ -74,7 +91,7 @@ pub(super) fn start(window: &Window, cx: &mut Context<Workspace>) {
             this.select_session(&empty_id, window, cx);
             this.close_session(window, cx);
             assert_eq!(this.sessions.len(), 1);
-            assert_eq!(this.scenario_picker.read(cx).selected, this.session_at(0).selected_backend, "closing a session must restore its neighbor backend");
+            assert_eq!(this.backends.picker.read(cx).selected, this.session_at(0).backend.selected, "closing a session must restore its neighbor backend");
             assert!(this.session_at(0).composer.focus_handle(cx).is_focused(window));
         }).unwrap();
 
@@ -107,7 +124,7 @@ pub(super) fn start(window: &Window, cx: &mut Context<Workspace>) {
                 } else {
                     this.session().exec.controller.as_ref().unwrap().disconnect();
                 }
-                assert!(this.scenario_picker.read(cx).disabled);
+                assert!(this.backends.picker.read(cx).disabled);
             }).unwrap();
             until(cx, Duration::from_secs(5), Duration::from_millis(100), "stop confirmation timed out", |cx| {
                 this.update_in(cx, |this, _, cx| {
@@ -115,7 +132,7 @@ pub(super) fn start(window: &Window, cx: &mut Context<Workspace>) {
                     if s.display_status().is_active() { return None; }
                     assert_eq!(s.model.status(), expected);
                     assert_eq!(s.model.rejected(), 0);
-                    assert!(!this.scenario_picker.read(cx).disabled);
+                    assert!(!this.backends.picker.read(cx).disabled);
                     Some(())
                 }).unwrap()
             }).await;
@@ -162,11 +179,11 @@ pub(super) fn start(window: &Window, cx: &mut Context<Workspace>) {
         key_down(cx, "cmd-shift-l");
         cx.background_executor().timer(Duration::from_millis(120)).await;
         approval_checks(&this, cx).await;
-        approval_modes_smoke::check(&this, cx).await;
-        workflow_smoke::run(&this, cx).await;
-        threads_smoke::run(&this, cx).await;
-        chat_smoke::run(&this, cx).await;
-        logs_smoke::run(&this, cx).await;
+        approval_modes::check(&this, cx).await;
+        workflow::run(&this, cx).await;
+        threads::run(&this, cx).await;
+        chat::run(&this, cx).await;
+        logs::run(&this, cx).await;
         // 永続化: 同じストアから読み直し、会話・状態・下書き・全文ログが復元されることを確認する。
         this.update_in(cx, |this, _, cx| {
             let store = this.store.clone().expect("smoke store must exist");
@@ -209,9 +226,7 @@ async fn approval_checks(this: &WeakEntity<Workspace>, cx: &mut AsyncWindowConte
             std::path::Path::new(&this.workspace_path))
     }).unwrap();
     let store = this
-        .update_in(cx, |this, _, _| {
-            this.command_rules.as_ref().unwrap().clone()
-        })
+        .update_in(cx, |this, _, _| this.rules.store.as_ref().unwrap().clone())
         .unwrap();
     let command = request.command.clone().unwrap();
     let answer = inject_approval(this, request.clone(), cx);
@@ -223,7 +238,7 @@ async fn approval_checks(this: &WeakEntity<Workspace>, cx: &mut AsyncWindowConte
             (ColorScheme::Dark, 820., 620.),
         ],
         |this, window, cx, &(scheme, width, height)| {
-            assert!(this.session().approval.is_some());
+            assert!(this.session().approval.pending.is_some());
             ds::set_theme(scheme, cx);
             window.resize(size(px(width), px(height)));
             cx.notify();
@@ -283,8 +298,10 @@ async fn approval_checks(this: &WeakEntity<Workspace>, cx: &mut AsyncWindowConte
             .accepted,
         "allow rule did not auto-allow"
     );
-    this.update_in(cx, |this, _, _| assert!(this.session().approval.is_none()))
-        .unwrap();
+    this.update_in(cx, |this, _, _| {
+        assert!(this.session().approval.pending.is_none())
+    })
+    .unwrap();
     store.add(RuleList::Deny, command.clone()).unwrap();
     let answer = inject_approval(this, request.clone(), cx);
     assert!(
@@ -340,6 +357,7 @@ async fn approval_checks(this: &WeakEntity<Workspace>, cx: &mut AsyncWindowConte
         assert!(
             this.session()
                 .approval
+                .pending
                 .as_ref()
                 .unwrap()
                 .policy_error
@@ -363,10 +381,8 @@ async fn approval_checks(this: &WeakEntity<Workspace>, cx: &mut AsyncWindowConte
     assert_eq!(std::fs::read_to_string(store.path()).unwrap(), "{");
     std::fs::write(store.path(), valid).unwrap();
 
-    this.update_in(cx, |this, _, cx| {
-        command_rules_smoke::smoke(&this.rule_editor, cx)
-    })
-    .unwrap();
+    this.update_in(cx, |this, _, cx| rule_editor::smoke(&this.rules.editor, cx))
+        .unwrap();
     this.update_in(cx, |this, window, cx| this.open_command_rules(window, cx))
         .unwrap();
     cx.background_executor()

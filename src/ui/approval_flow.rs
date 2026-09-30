@@ -1,5 +1,17 @@
-use super::*;
+use super::Workspace;
 use gpui_kit::component::WindowExt;
+use gpui_kit::{
+    App, Context, Div, ElementId, FontWeight, Global, Stateful, Window, div, prelude::*, px, rgb,
+};
+use solo::{
+    approval::{ApprovalPlan, ApprovalReply, ApprovalRequest},
+    auto_approval::{self, Assessment},
+    command_rules::{RuleList, RuleStore},
+    config::{ApprovalMode, ApprovalSettings, AutoSettings},
+    design::{self as ds, Button, ButtonVariant, ControlSize, Icon, Tone, glass, typography},
+    event::SessionId,
+    projection::Status,
+};
 
 pub(super) struct PendingApproval {
     request: ApprovalRequest,
@@ -91,11 +103,11 @@ impl Workspace {
             let _ = reply.try_send(ApprovalReply::user(false));
             return;
         }
-        self.approval_settings = settings(&self.command_rules);
-        let decision = plan(&self.command_rules, &request);
-        self.approval_serial = self.approval_serial.wrapping_add(1);
-        let serial = self.approval_serial;
-        self.session_at_mut(index).approval = Some(PendingApproval {
+        self.approval.settings = settings(&self.rules.store);
+        let decision = plan(&self.rules.store, &request);
+        self.approval.serial = self.approval.serial.wrapping_add(1);
+        let serial = self.approval.serial;
+        self.session_at_mut(index).approval.pending = Some(PendingApproval {
             request,
             reply,
             details_open: false,
@@ -120,7 +132,7 @@ impl Workspace {
             }
             Ok(ApprovalPlan::Auto(settings)) => self.start_auto_review(index, settings, cx),
             _ => {
-                if !self.is_visible || self.selected != index {
+                if !self.is_visible || self.sessions.selected != index {
                     let title = self.session_at(index).model.title().to_owned();
                     self.toast.update(cx, |toast, cx| {
                         toast.push(
@@ -141,9 +153,9 @@ impl Workspace {
         note: String,
         cx: &mut Context<Self>,
     ) {
-        if let Some(approval) = self.session_at_mut(index).approval.take() {
+        if let Some(approval) = self.session_at_mut(index).approval.pending.take() {
             let _ = approval.reply.try_send(reply);
-            self.session_at_mut(index).approval_note = Some(note.clone());
+            self.session_at_mut(index).approval.note = Some(note.clone());
             self.toast.update(cx, |toast, cx| {
                 toast.push(
                     note,
@@ -159,11 +171,11 @@ impl Workspace {
         cx.notify();
     }
     fn start_auto_review(&mut self, index: usize, settings: AutoSettings, cx: &mut Context<Self>) {
-        // session を保持したまま self.workspace_path/self.approval_reviewer を読むため、
+        // session を保持したまま self.workspace_path/self.approval.reviewer を読むため、
         // sessions の借用をフィールド分割する。
         let sessions = &mut self.sessions;
         let session = &mut sessions[index];
-        let Some(pending) = session.approval.as_mut() else {
+        let Some(pending) = session.approval.pending.as_mut() else {
             return;
         };
         let input = auto_approval::ReviewInput::new(
@@ -176,7 +188,7 @@ impl Workspace {
         let session_id = session.model.id.clone();
         let generation = session.exec.stream_generation;
         let (review, receiver) = auto_approval::AutoReview::start(
-            self.approval_reviewer.clone(),
+            self.approval.reviewer.clone(),
             settings.clone(),
             input,
         );
@@ -210,14 +222,21 @@ impl Workspace {
                 && self
                     .session_at(index)
                     .approval
+                    .pending
                     .as_ref()
                     .is_some_and(|approval| approval.serial == serial)
         }) else {
             return;
         };
         let current = plan(
-            &self.command_rules,
-            &self.session_at(index).approval.as_ref().unwrap().request,
+            &self.rules.store,
+            &self
+                .session_at(index)
+                .approval
+                .pending
+                .as_ref()
+                .unwrap()
+                .request,
         );
         let accepted = current
             .as_ref()
@@ -247,7 +266,12 @@ impl Workspace {
             };
             self.finish_approval(index, reply, note, cx);
         } else {
-            let approval = self.session_at_mut(index).approval.as_mut().unwrap();
+            let approval = self
+                .session_at_mut(index)
+                .approval
+                .pending
+                .as_mut()
+                .unwrap();
             approval.review = None;
             approval.policy_error = current.as_ref().err().cloned();
             approval.review_note = Some(match current {
@@ -261,20 +285,19 @@ impl Workspace {
         }
     }
     pub(super) fn reconsider_approvals(&mut self, cx: &mut Context<Self>) {
-        self.approval_settings = settings(&self.command_rules);
+        self.approval.settings = settings(&self.rules.store);
         let pending: Vec<_> = self
             .sessions
             .iter_mut()
             .filter_map(|session| {
-                let approval = session.approval.as_ref()?;
-                if let (Some(started), Ok(ApprovalPlan::Auto(current))) = (
-                    &approval.review,
-                    plan(&self.command_rules, &approval.request),
-                ) && started.settings == current
+                let approval = session.approval.pending.as_ref()?;
+                if let (Some(started), Ok(ApprovalPlan::Auto(current))) =
+                    (&approval.review, plan(&self.rules.store, &approval.request))
+                    && started.settings == current
                 {
                     return None;
                 }
-                session.approval.take().map(|approval| {
+                session.approval.pending.take().map(|approval| {
                     (
                         session.model.id.clone(),
                         session.exec.stream_generation,
@@ -291,7 +314,7 @@ impl Workspace {
     }
 
     pub(super) fn approval_mode_button(&self, cx: &mut Context<Self>) -> Button {
-        let (label, tooltip, tone) = match &self.approval_settings {
+        let (label, tooltip, tone) = match &self.approval.settings {
             Ok(settings) => (
                 settings.mode.label(),
                 match settings.mode {
@@ -313,8 +336,8 @@ impl Workspace {
             .text_color(rgb(ds::theme(cx).tone(tone).0))
             .tooltip(tooltip)
             .on_click(cx.listener(|this, _, window, cx| {
-                this.rule_editor.update(cx, |editor, cx| {
-                    editor.page = super::command_rules::Page::Settings;
+                this.rules.editor.update(cx, |editor, cx| {
+                    editor.page = super::rule_editor::Page::Settings;
                     cx.notify();
                 });
                 this.open_command_rules(window, cx);
@@ -322,10 +345,10 @@ impl Workspace {
     }
 
     pub(super) fn open_command_rules(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.approval_settings = settings(&self.command_rules);
-        self.rule_editor.update(cx, |editor, cx| editor.reload(cx));
+        self.approval.settings = settings(&self.rules.store);
+        self.rules.editor.update(cx, |editor, cx| editor.reload(cx));
         cx.notify();
-        let editor = self.rule_editor.clone();
+        let editor = self.rules.editor.clone();
         window.open_sheet(cx, move |sheet, _, _| {
             sheet
                 .title("実行の承認設定")
@@ -335,9 +358,9 @@ impl Workspace {
     }
 
     pub(super) fn answer_approval(&mut self, accepted: bool, cx: &mut Context<Self>) {
-        // 確認時の再判定で self.command_rules を読むため、sessions の借用をフィールド分割する。
+        // 確認時の再判定で self.rules.store を読むため、sessions の借用をフィールド分割する。
         let sessions = &mut self.sessions;
-        let Some(approval) = sessions[self.selected].approval.as_mut() else {
+        let Some(approval) = sessions.current_mut().approval.pending.as_mut() else {
             return;
         };
         if accepted {
@@ -345,7 +368,7 @@ impl Workspace {
                 return;
             }
             // Recheck at confirmation: another window may have denied this command.
-            match plan(&self.command_rules, &approval.request) {
+            match plan(&self.rules.store, &approval.request) {
                 Ok(ApprovalPlan::Deny(_)) => {
                     approval.policy_error =
                         Some("Deny に一致します。実行するにはルールを削除してください。".into());
@@ -361,7 +384,7 @@ impl Workspace {
             }
         }
         self.finish_approval(
-            self.selected,
+            self.sessions.selected,
             ApprovalReply::user(accepted),
             format!("Manual · {}", if accepted { "許可" } else { "拒否" }),
             cx,
@@ -369,9 +392,9 @@ impl Workspace {
     }
 
     pub(super) fn remember_approval(&mut self, list: RuleList, cx: &mut Context<Self>) {
-        // ルール保存で self.command_rules/self.rule_editor を使うため、sessions の借用を分割する。
+        // ルール保存で self.rules.store/self.rules.editor を使うため、sessions の借用を分割する。
         let sessions = &mut self.sessions;
-        let Some(approval) = sessions[self.selected].approval.as_mut() else {
+        let Some(approval) = sessions.current_mut().approval.pending.as_mut() else {
             return;
         };
         if list == RuleList::Allow && !approval.request.can_allow {
@@ -380,7 +403,7 @@ impl Workspace {
         let Some(command) = &approval.request.command else {
             return;
         };
-        let result = rule_store(&self.command_rules).and_then(|store| {
+        let result = rule_store(&self.rules.store).and_then(|store| {
             store
                 .add(list, command.clone())
                 .map_err(|error| error.to_string())
@@ -390,13 +413,13 @@ impl Workspace {
             cx.notify();
             return;
         }
-        self.rule_editor.update(cx, |editor, cx| editor.reload(cx));
+        self.rules.editor.update(cx, |editor, cx| editor.reload(cx));
         self.answer_approval(list == RuleList::Allow, cx);
         changed(cx);
     }
 
     pub(super) fn approval_card(&self, cx: &mut Context<Self>) -> Option<Div> {
-        let approval = self.session().approval.as_ref()?;
+        let approval = self.session().approval.pending.as_ref()?;
         let request = &approval.request;
         let details = serde_json::to_string_pretty(&request.details)
             .unwrap_or_else(|_| request.details.to_string());
@@ -531,7 +554,7 @@ fn approval_body(
                     .toggled(approval.details_open)
                     .control_size(ControlSize::Small)
                     .on_click(cx.listener(|this, _, _, cx| {
-                        if let Some(approval) = this.session_mut().approval.as_mut() {
+                        if let Some(approval) = this.session_mut().approval.pending.as_mut() {
                             approval.details_open = !approval.details_open;
                         }
                         cx.notify();

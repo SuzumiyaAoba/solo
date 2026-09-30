@@ -1,6 +1,15 @@
-use super::*;
+use super::super::{Tab, Workspace};
+use super::{caption, empty, status_tone};
+use gpui_kit::{
+    AnyElement, Context, Div, Focusable, FontWeight, ScrollHandle, SharedString, Window, div,
+    prelude::*, px, rgb,
+};
 use solo::projection::{
     ActivityApproval, ActivityKind, ActivityState, ExecutionActivity, ExecutionThread,
+};
+use solo::{
+    design::{self as ds, Button, ButtonVariant, ControlSize, Icon, Tone, typography},
+    projection::Status,
 };
 
 impl Workspace {
@@ -124,7 +133,7 @@ impl Workspace {
                 )
                 .child(caption(thread_meta(thread), cx)),
         )
-        .when(current && session.approval.is_some(), |v| {
+        .when(current && session.approval.pending.is_some(), |v| {
             v.child(
                 div().p_3().child(
                     Button::new("thread-approval", "承認待ちの操作を確認")

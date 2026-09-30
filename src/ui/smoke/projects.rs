@@ -1,10 +1,17 @@
-use super::projects::ProjectManager;
-use super::smoke::{env_pause_ms, finish_smoke_turn, key_down, preview_cycle, start_smoke_turn};
-use super::*;
+use super::super::{Tab, execution::Backend, projects::ProjectManager};
+use super::{env_pause_ms, finish_smoke_turn, key_down, preview_cycle, start_smoke_turn};
 use gpui_kit::component::WindowExt;
-use std::{fs, time::Duration};
+use gpui_kit::{Context, Focusable, Window, px, size};
+use solo::{
+    design::{self as ds, ColorScheme},
+    mock::Scenario,
+};
+use std::{
+    fs,
+    time::{Duration, Instant},
+};
 
-pub(super) fn start(window: &Window, cx: &mut Context<ProjectManager>) {
+pub(crate) fn start(window: &Window, cx: &mut Context<ProjectManager>) {
     cx.spawn_in(window, async move |this, cx| {
         let (original, a, b, path_a, path_b) = this.update_in(cx, |this, window, cx| {
             let original = this.catalog.active.expect("initial project");
@@ -23,22 +30,22 @@ pub(super) fn start(window: &Window, cx: &mut Context<ProjectManager>) {
             let a = this.add_project(&path_a, window, cx).unwrap();
             let alpha = this.workspace(a).unwrap();
             alpha.update(cx, |workspace, cx| {
-                assert_eq!(workspace.acp_agents[0].name, "Alpha agent");
-                assert_eq!(workspace.command_rules.as_ref().unwrap().workspace(), path_a.canonicalize().unwrap());
+                assert_eq!(workspace.backends.acp_agents[0].name, "Alpha agent");
+                assert_eq!(workspace.rules.store.as_ref().unwrap().workspace(), path_a.canonicalize().unwrap());
                 workspace.session_at_mut(0).composer.update(cx, |input, cx| input.set_value("Alpha の下書き🙂", cx));
                 workspace.show_tab(Tab::Logs, cx);
                 workspace.start_mock(0, Scenario::Demo, "Alpha のデモ".into(), cx);
             });
             let b = this.add_project(&path_b, window, cx).unwrap();
             this.workspace(b).unwrap().update(cx, |workspace, cx| {
-                assert_eq!(workspace.acp_agents[0].name, "Beta agent");
-                assert_eq!(workspace.command_rules.as_ref().unwrap().workspace(), path_b.canonicalize().unwrap());
+                assert_eq!(workspace.backends.acp_agents[0].name, "Beta agent");
+                assert_eq!(workspace.rules.store.as_ref().unwrap().workspace(), path_b.canonicalize().unwrap());
                 workspace.new_session(window, cx);
                 workspace.session_at_mut(1).composer.update(cx, |input, cx| input.set_value("Beta の下書き🧪", cx));
                 workspace.start_mock(1, Scenario::Demo, "Beta のデモ".into(), cx);
             });
             assert!(!alpha.read(cx).is_visible);
-            assert_eq!(alpha.read(cx).selected, 0);
+            assert_eq!(alpha.read(cx).sessions.selected, 0);
             assert!(this.rename_project(a, "設計プロジェクト", window, cx));
             assert_eq!(this.catalog.active, Some(b));
             assert_eq!(alpha.read(cx).workspace_name, "設計プロジェクト");
@@ -71,7 +78,7 @@ pub(super) fn start(window: &Window, cx: &mut Context<ProjectManager>) {
             let beta_channel = beta.read(cx).session_at(1).model.id.clone();
             this.select_channel(b, &beta_channel, window, cx);
             assert_eq!(this.catalog.active, Some(b));
-            assert_eq!(beta.read(cx).selected, 1);
+            assert_eq!(beta.read(cx).sessions.selected, 1);
             assert_eq!(beta.read(cx).session_at(1).composer.read(cx).value(cx), "Beta の下書き🧪");
             // フォルダが移動・削除されても、既に開いたセッションへのアクセスを失わない。
             let missing = path_a.parent().unwrap().join("removed-folder");
@@ -91,7 +98,7 @@ pub(super) fn start(window: &Window, cx: &mut Context<ProjectManager>) {
             // プロジェクト A の待機状態・下書きを B に混ぜない。実モデルは起動しない。
             alpha.update(cx, |workspace, cx| {
                 workspace.new_session(window, cx);
-                workspace.session_at_mut(1).backend = Some(Backend::Subscription);
+                workspace.session_at_mut(1).backend.active = Some(Backend::Subscription);
                 start_smoke_turn(workspace.session_at_mut(1));
                 workspace.new_session(window, cx);
                 workspace.start_selected(2, "Alpha の順番待ち".into(), cx);
@@ -154,7 +161,7 @@ pub(super) fn start(window: &Window, cx: &mut Context<ProjectManager>) {
             window.resize(size(px(1240.), px(840.)));
             this.workspace(restored).unwrap().update(cx, |workspace, cx| {
                 workspace.start_mock(0, Scenario::Demo, "Phase 0 の表示を確認してください。".into(), cx);
-                super::smoke::start(window, cx);
+                super::start(window, cx);
             });
         }).unwrap();
     }).detach();

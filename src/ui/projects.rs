@@ -2,9 +2,19 @@ mod dialogs;
 mod navigation;
 mod panel;
 
-use super::*;
+use super::{
+    CloseWindow, NewSession, NextAttention, ShowChat, ShowDiff, ShowLogs, ShowOverview, ShowThread,
+    Tab, ToggleTheme, Workspace,
+};
 use gpui_kit::component::WindowExt;
 use gpui_kit::component::{h_resizable, resizable_panel};
+use gpui_kit::{
+    Action, App, Context, Entity, FocusHandle, Focusable, Subscription, Window, WindowControlArea,
+    actions, div, prelude::*, px, rgb,
+};
+use solo::design::{
+    self as ds, Button, ButtonVariant, ControlSize, Icon, ToastHost, Tone, space, typography,
+};
 use solo::projects::{Catalog, Project, ProjectStore};
 use std::collections::HashSet;
 
@@ -120,7 +130,7 @@ impl ProjectManager {
         this.activate(window, cx);
         #[cfg(debug_assertions)]
         if run_smoke {
-            super::projects_smoke::start(window, cx);
+            super::smoke::projects::start(window, cx);
         }
         #[cfg(not(debug_assertions))]
         let _ = run_smoke;
